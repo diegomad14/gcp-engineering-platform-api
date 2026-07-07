@@ -8,6 +8,12 @@ from ..services import gcp_billing_bigquery as billing
 router = APIRouter(prefix="/api/costs", tags=["costs"])
 
 
+@router.get("/status")
+async def get_billing_status():
+    """Check if Cloud Billing Export is active."""
+    return billing.get_billing_status()
+
+
 @router.get("/summary", response_model=CostSummary)
 async def get_cost_summary(days: int = Query(default=30, ge=1, le=365)):
     """Get cost summary for the specified time window."""
