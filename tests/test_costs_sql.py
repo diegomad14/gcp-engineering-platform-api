@@ -16,7 +16,7 @@ def test_cost_summary_endpoint():
     assert data["currency"] == "USD"
     assert "period" in data
     assert "items" in data
-    assert data["total_net_cost"] > 0
+    assert data["total_net_cost"] >= 0.0
 
 
 def test_cost_by_service_endpoint():

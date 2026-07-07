@@ -84,22 +84,19 @@ def get_applications() -> CatalogResponse:
     cloud_run_services = _list_cloud_run_services()
     configs = _get_app_config()
 
-    # Map Cloud Run services to known apps
-    known_prefixes = {
-        "cgm-sanplat": 0, "cgm-bot": 0, "communications-ms": 1, "eng-platform": 2,
-    }
+    # Map Cloud Run services to apps by prefix
+    def match_services(prefixes: list[str]) -> list[CloudRunService]:
+        return [s for s in cloud_run_services if any(s.service_name.startswith(p) for p in prefixes)]
 
     for cfg in configs:
-        matching_services = [
-            s for s in cloud_run_services
-            if any(s.service_name.startswith(prefix) for prefix in ["cgm-sanplat", "cgm-bot"])
-        ] if cfg["id"] == "cgm-integration-platform" else []
-
-        # Platform services
-        platform_services = [
-            s for s in cloud_run_services
-            if s.service_name.startswith("eng-platform")
-        ]
+        if cfg["id"] == "cgm-integration-platform":
+            targets = match_services(["cgm-sanplat", "cgm-bot"])
+        elif cfg["id"] == "communications-ms":
+            targets = match_services(["communications"])
+        elif cfg["id"] == "engineering-platform":
+            targets = match_services(["eng-platform"])
+        else:
+            targets = []
 
         apps.append(Application(
             id=cfg["id"],
@@ -107,7 +104,7 @@ def get_applications() -> CatalogResponse:
             repository=cfg["repository"],
             owner=cfg["owner"],
             cost_center=cfg.get("cost_center", ""),
-            release_targets=matching_services if matching_services else cloud_run_services[:2],
+            release_targets=targets if targets else [],
             validation_targets=[
                 ValidationTarget(**vt) for vt in cfg.get("validation_targets", [])
             ],
@@ -116,9 +113,7 @@ def get_applications() -> CatalogResponse:
         ))
 
     if not apps:
-        # Full dynamic: show all Cloud Run services as apps
         for svc in cloud_run_services:
-            base = svc.service_name.replace("cgm-", "").replace("eng-", "")
             apps.append(Application(
                 id=svc.service_name,
                 name=svc.service_name.replace("-", " ").title(),

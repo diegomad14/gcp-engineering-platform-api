@@ -84,9 +84,30 @@ def build_cost_query(
     days: int = 30,
     app_filter: Optional[str] = None,
 ) -> str:
-    table_fqn = f"{_PROJECT_ID}.{_DATASET}.{{TABLE}}"
-    select_clause = "SELECT ... FROM ..."
-    return select_clause
+    """Build a parametrized BigQuery cost query. Used by SQL templates."""
+    table_fqn = f"{_PROJECT_ID}.{_DATASET}.gcp_billing_export_resource_v1_01CBB5_464EAA_96C8AC"
+
+    group_clauses = {
+        "project": "GROUP BY project_id, project_display_name",
+        "service": "GROUP BY gcp_service, service_name, project_id",
+        "app": "GROUP BY app, project_id, gcp_service",
+        "sku": "GROUP BY sku_id, sku_description, gcp_service",
+    }
+    group_clause = group_clauses.get(group_by, "GROUP BY project_id, gcp_service")
+
+    select_clauses = {
+        "project": "SELECT project.id AS project_id, project.name AS project_display_name, SUM(cost) AS cost",
+        "service": "SELECT service.description AS gcp_service, resource.name AS service_name, project.id AS project_id, SUM(cost) AS cost",
+        "app": "SELECT labels_app.value AS app, project.id AS project_id, service.description AS gcp_service, SUM(cost) AS cost",
+        "sku": "SELECT sku.id AS sku_id, sku.description AS sku_description, service.description AS gcp_service, SUM(cost) AS cost",
+    }
+    select_clause = select_clauses.get(group_by, "SELECT project.id AS project_id, service.description AS gcp_service, SUM(cost) AS cost")
+
+    where = f"\nWHERE _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)"
+    if app_filter:
+        where += f"\n  AND EXISTS (SELECT 1 FROM UNNEST(labels) l WHERE l.key = 'app' AND l.value = '{app_filter}')"
+
+    return f"{select_clause}\nFROM `{table_fqn}`\nCROSS JOIN UNNEST(labels) AS labels_app{where}\n{group_clause}\nORDER BY cost DESC"
 
 
 def get_cost_summary(days: int = 30) -> CostSummary:
