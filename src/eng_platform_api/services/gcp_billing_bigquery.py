@@ -204,14 +204,26 @@ def get_cost_summary(days: int = 30) -> CostSummary:
 def get_billing_status() -> dict:
     """Return billing export status for UI display."""
     table = _billing_table_exists()
+    row_count = 0
+    if table:
+        try:
+            client = bigquery.Client(project=_PROJECT_ID)
+            rows = client.query(f"SELECT COUNT(*) AS n FROM `{table}` WHERE _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)").result()
+            for row in rows:
+                row_count = row.n
+        except Exception:
+            pass
+
     return {
         "billing_export_enabled": table is not None,
         "bigquery_table": table or "",
         "dataset": f"{_PROJECT_ID}.{_DATASET}",
+        "row_count": row_count,
+        "is_estimate": row_count == 0,
         "message": (
-            "Real cost data available" if table
-            else "Billing export enabled. Waiting for first data sync (may take a few hours). Showing estimates."
-        ),
+            f"Real cost data available ({row_count} rows)" if row_count > 0
+            else "Billing export table exists but no data yet. Showing estimates. First sync takes 24-48h after enablement."
+        ) if table else "Billing export not enabled. Enable in GCP Console → Billing → BigQuery Export.",
     }
 
 
