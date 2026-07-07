@@ -143,6 +143,7 @@ class ServiceFactoryRequest(BaseModel):
     health_path: str = "/health"
     openapi_path: str = "/openapi.json"
     sonar_project_key: str = ""
+    sonar_organization: str = ""
     validation_targets: list[str] = Field(default_factory=list)
 
 
@@ -163,6 +164,7 @@ class ServiceFactoryPlan(BaseModel):
     caller_promote: str = ""
     caller_rollback: str = ""
     labels_manifest: str = ""
+    sonar_properties: str = ""
 
 
 # ── Health ────────────────────────────────────────────────────────────

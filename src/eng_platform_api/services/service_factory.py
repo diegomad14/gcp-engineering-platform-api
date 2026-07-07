@@ -127,6 +127,18 @@ def _build_caller_workflow(
     """.replace("${{{{", "${{"))
 
 
+def _build_sonar_properties(req: ServiceFactoryRequest) -> str:
+    """Generate sonar-project.properties."""
+    return textwrap.dedent(f"""\
+    # SonarQube Cloud project configuration
+    sonar.organization={req.sonar_organization or '<ORG>'}
+    sonar.projectKey={req.sonar_project_key or f'{req.owner}_{req.app_name}'}
+    sonar.projectName={req.app_name}
+    sonar.sources=src
+    sonar.sourceEncoding=UTF-8
+    """)
+
+
 def _build_labels_manifest(req: ServiceFactoryRequest) -> str:
     """Generate the Cloud Run labels manifest."""
     return textwrap.dedent(f"""\
@@ -216,6 +228,7 @@ def generate_plan(req: ServiceFactoryRequest) -> ServiceFactoryPlan:
             req.service_type,
         ),
         labels_manifest=_build_labels_manifest(req),
+        sonar_properties=_build_sonar_properties(req),
     )
 
     return plan
