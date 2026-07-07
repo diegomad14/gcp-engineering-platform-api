@@ -79,88 +79,6 @@ def _query_billing(table_fqn: str, days: int = 30) -> list[CostItem]:
         return []
 
 
-def _realistic_estimates() -> list[CostItem]:
-    """Realistic cost estimates based on known GCP resources in cgm-assistant-prod.
-
-    These are estimates until Cloud Billing Export data populates.
-    Budget is $15/month.
-    """
-    return [
-        CostItem(
-            project_id=_PROJECT_ID,
-            app="cgm-integration-platform",
-            service_name="cgm-sanplat-api",
-            gcp_service="Cloud Run",
-            cost=3.50,
-            credits=-0.30,
-            net_cost=3.20,
-        ),
-        CostItem(
-            project_id=_PROJECT_ID,
-            app="cgm-integration-platform",
-            service_name="cgm-sanplat-web",
-            gcp_service="Cloud Run",
-            cost=2.00,
-            credits=-0.20,
-            net_cost=1.80,
-        ),
-        CostItem(
-            project_id=_PROJECT_ID,
-            app="cgm-integration-platform",
-            service_name="cgm-bot-api",
-            gcp_service="Cloud Run",
-            cost=1.50,
-            credits=-0.10,
-            net_cost=1.40,
-        ),
-        CostItem(
-            project_id=_PROJECT_ID,
-            app="cgm-integration-platform",
-            service_name="communications-ms",
-            gcp_service="Cloud Run",
-            cost=1.20,
-            credits=-0.10,
-            net_cost=1.10,
-        ),
-        CostItem(
-            project_id=_PROJECT_ID,
-            app="cgm-integration-platform",
-            service_name="cgm-sanplat-pg",
-            gcp_service="Cloud SQL",
-            cost=7.50,
-            credits=0.00,
-            net_cost=7.50,
-        ),
-        CostItem(
-            project_id=_PROJECT_ID,
-            app="cgm-integration-platform",
-            service_name="",
-            gcp_service="Secret Manager",
-            cost=0.50,
-            credits=0.00,
-            net_cost=0.50,
-        ),
-        CostItem(
-            project_id=_PROJECT_ID,
-            app="engineering-platform",
-            service_name="eng-platform-api",
-            gcp_service="Cloud Run",
-            cost=0.30,
-            credits=0.00,
-            net_cost=0.30,
-        ),
-        CostItem(
-            project_id=_PROJECT_ID,
-            app="engineering-platform",
-            service_name="eng-platform-web",
-            gcp_service="Cloud Run",
-            cost=0.20,
-            credits=0.00,
-            net_cost=0.20,
-        ),
-    ]
-
-
 def build_cost_query(
     group_by: str = "service",
     days: int = 30,
@@ -183,9 +101,6 @@ def get_cost_summary(days: int = 30) -> CostSummary:
         items = _query_billing(table, days)
     else:
         items = []
-
-    if not items:
-        items = _realistic_estimates()
 
     total_cost = sum(item.cost for item in items)
     total_credits = sum(item.credits for item in items)
@@ -222,7 +137,7 @@ def get_billing_status() -> dict:
         "is_estimate": row_count == 0,
         "message": (
             f"Real cost data available ({row_count} rows)" if row_count > 0
-            else "Billing export table exists but no data yet. Showing estimates. First sync takes 24-48h after enablement."
+            else "Billing export table exists but no data yet. First sync takes 24-48h after enablement."
         ) if table else "Billing export not enabled. Enable in GCP Console → Billing → BigQuery Export.",
     }
 
