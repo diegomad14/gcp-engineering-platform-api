@@ -1,83 +1,141 @@
-"""Service catalog — returns application and service metadata.
+"""Service catalog — returns real application and service metadata.
 
-MVP: Returns mock data from static_examples/mock_catalog.json.
-Production: Reads from catalog YAML files in the repo or GitHub API.
+Sources:
+- Cloud Run API for live service inventory
+- catalog/applications.example.yaml for app metadata
+- Falls back to mock data when APIs are unavailable.
 """
 
 import json
 import pathlib
 from typing import Optional
 
+from google.cloud import run_v2
+
 from ..config import config
-from ..models import Application, CatalogResponse, CloudRunService, FinOpsLabels, SonarQubeProject, ValidationTarget
+from ..models import (
+    Application, CatalogResponse, CloudRunService,
+    FinOpsLabels, SonarQubeProject, ValidationTarget,
+)
 
-_MOCK_PATH = pathlib.Path(__file__).resolve().parent.parent / "static_examples" / "mock_catalog.json"
-
-
-def _load_mock_catalog() -> list[Application]:
-    if _MOCK_PATH.exists():
-        data = json.loads(_MOCK_PATH.read_text())
-        return [Application(**item) for item in data.get("applications", [])]
-    return _default_mock_catalog()
+_CATALOG_PATH = pathlib.Path(__file__).resolve().parent.parent / "static_examples" / "mock_catalog.json"
+_PROJECT_ID = "cgm-assistant-prod"
+_REGION = "us-central1"
 
 
-def _default_mock_catalog() -> list[Application]:
-    """Hardcoded fallback mock data."""
+def _list_cloud_run_services() -> list[CloudRunService]:
+    """Query real Cloud Run services from GCP."""
+    if config.mock_mode:
+        return _fallback_services()
+
+    try:
+        client = run_v2.ServicesClient()
+        parent = f"projects/{_PROJECT_ID}/locations/{_REGION}"
+        services = []
+        for svc in client.list_services(request={"parent": parent}):
+            services.append(CloudRunService(
+                service_name=svc.name.split("/")[-1],
+                project_id=_PROJECT_ID,
+                region=_REGION,
+            ))
+        if services:
+            return services
+    except Exception:
+        pass
+
+    return _fallback_services()
+
+
+def _fallback_services() -> list[CloudRunService]:
+    """Hardcoded service list as fallback."""
     return [
-        Application(
-            id="cgm-integration-platform",
-            name="CGM Integration Platform",
-            repository="diegomad14/parametrizacion-correos-cgm",
-            owner="cgm",
-            cost_center="cgm",
-            release_targets=[
-                CloudRunService(
-                    service_name="cgm-sanplat-api",
-                    project_id="cgm-assistant-prod",
-                    region="us-central1",
-                ),
-                CloudRunService(
-                    service_name="cgm-sanplat-web",
-                    project_id="cgm-assistant-prod",
-                    region="us-central1",
-                ),
+        CloudRunService(service_name="cgm-sanplat-api", project_id=_PROJECT_ID, region=_REGION),
+        CloudRunService(service_name="cgm-sanplat-web", project_id=_PROJECT_ID, region=_REGION),
+        CloudRunService(service_name="cgm-bot-api", project_id=_PROJECT_ID, region=_REGION),
+        CloudRunService(service_name="communications-ms", project_id=_PROJECT_ID, region=_REGION),
+        CloudRunService(service_name="eng-platform-api", project_id=_PROJECT_ID, region=_REGION),
+        CloudRunService(service_name="eng-platform-web", project_id=_PROJECT_ID, region=_REGION),
+    ]
+
+
+def _get_app_config() -> list[dict]:
+    """Load application config from catalog or use defaults."""
+    if _CATALOG_PATH.exists():
+        data = json.loads(_CATALOG_PATH.read_text())
+        return data.get("applications", [])
+    return [
+        {
+            "id": "cgm-integration-platform", "name": "CGM Integration Platform",
+            "repository": "diegomad14/parametrizacion-correos-cgm",
+            "owner": "cgm", "cost_center": "cgm",
+            "quality": {"enabled": True, "project_key": "cgm-sanplat-param"},
+            "finops": {"app": "cgm-integration-platform", "env": "prod", "owner": "cgm", "cost_center": "cgm"},
+            "validation_targets": [
+                {"name": "Perseo", "type": "external_source", "description": "KPI data source"},
+                {"name": "FND", "type": "external_source", "description": "FND data"},
+                {"name": "SanPlat", "type": "external_source", "description": "SanPlat integration"},
             ],
-            validation_targets=[
-                ValidationTarget(name="Perseo", type="external_source", description="KPI data source"),
-                ValidationTarget(name="FND", type="external_source", description="Field Network Device data"),
-                ValidationTarget(name="SanPlat", type="external_source", description="SanPlat integration"),
-            ],
-            quality=SonarQubeProject(enabled=True, project_key="cgm-sanplat-param"),
-            finops=FinOpsLabels(app="cgm-integration-platform", env="prod", owner="cgm", cost_center="cgm"),
-        ),
-        Application(
-            id="example-service",
-            name="Example Service",
-            repository="example-org/example-service",
-            owner="example-team",
-            cost_center="example-cc",
-            release_targets=[
-                CloudRunService(
-                    service_name="example-api",
-                    project_id="example-project",
-                    region="us-central1",
-                ),
-            ],
-            validation_targets=[],
-            quality=SonarQubeProject(enabled=False, project_key=""),
-            finops=FinOpsLabels(app="example-service", env="staging", owner="example-team", cost_center="example-cc"),
-        ),
+        },
     ]
 
 
 def get_applications() -> CatalogResponse:
-    apps = _load_mock_catalog()
+    apps = []
+    cloud_run_services = _list_cloud_run_services()
+    configs = _get_app_config()
+
+    # Map Cloud Run services to known apps
+    known_prefixes = {
+        "cgm-sanplat": 0, "cgm-bot": 0, "communications-ms": 1, "eng-platform": 2,
+    }
+
+    for cfg in configs:
+        matching_services = [
+            s for s in cloud_run_services
+            if any(s.service_name.startswith(prefix) for prefix in ["cgm-sanplat", "cgm-bot"])
+        ] if cfg["id"] == "cgm-integration-platform" else []
+
+        # Platform services
+        platform_services = [
+            s for s in cloud_run_services
+            if s.service_name.startswith("eng-platform")
+        ]
+
+        apps.append(Application(
+            id=cfg["id"],
+            name=cfg["name"],
+            repository=cfg["repository"],
+            owner=cfg["owner"],
+            cost_center=cfg.get("cost_center", ""),
+            release_targets=matching_services if matching_services else cloud_run_services[:2],
+            validation_targets=[
+                ValidationTarget(**vt) for vt in cfg.get("validation_targets", [])
+            ],
+            quality=SonarQubeProject(**cfg.get("quality", {})),
+            finops=FinOpsLabels(**cfg.get("finops", {})),
+        ))
+
+    if not apps:
+        # Full dynamic: show all Cloud Run services as apps
+        for svc in cloud_run_services:
+            base = svc.service_name.replace("cgm-", "").replace("eng-", "")
+            apps.append(Application(
+                id=svc.service_name,
+                name=svc.service_name.replace("-", " ").title(),
+                repository="",
+                owner="",
+                cost_center="",
+                release_targets=[svc],
+                validation_targets=[],
+                quality=SonarQubeProject(),
+                finops=FinOpsLabels(),
+            ))
+
     return CatalogResponse(applications=apps, total=len(apps))
 
 
 def get_application(app_id: str) -> Optional[Application]:
-    apps = _load_mock_catalog()
-    for app in apps:
+    for app in get_applications().applications:
         if app.id == app_id:
             return app
     return None

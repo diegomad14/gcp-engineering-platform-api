@@ -52,7 +52,7 @@ class PlatformConfig:
 def load_config() -> PlatformConfig:
     """Load configuration from environment variables."""
 
-    mock_mode = os.getenv("ENG_PLATFORM_MOCK_MODE", "true").lower() == "true"
+    mock_mode = os.getenv("ENG_PLATFORM_MOCK_MODE", "false").lower() == "true"
 
     billing = BillingConfig(
         enabled=os.getenv("ENG_PLATFORM_BILLING_ENABLED", "false").lower() == "true",
