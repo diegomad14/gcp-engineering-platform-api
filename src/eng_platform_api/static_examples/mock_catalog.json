@@ -1,0 +1,75 @@
+{
+  "applications": [
+    {
+      "id": "cgm-integration-platform",
+      "name": "CGM Integration Platform",
+      "repository": "diegomad14/parametrizacion-correos-cgm",
+      "owner": "cgm",
+      "cost_center": "cgm",
+      "release_targets": [
+        {
+          "service_name": "cgm-sanplat-api",
+          "project_id": "cgm-assistant-prod",
+          "region": "us-central1"
+        },
+        {
+          "service_name": "cgm-sanplat-web",
+          "project_id": "cgm-assistant-prod",
+          "region": "us-central1"
+        }
+      ],
+      "validation_targets": [
+        {
+          "name": "Perseo",
+          "type": "external_source",
+          "description": "KPI data source"
+        },
+        {
+          "name": "FND",
+          "type": "external_source",
+          "description": "Field Network Device data"
+        },
+        {
+          "name": "SanPlat",
+          "type": "external_source",
+          "description": "SanPlat integration"
+        }
+      ],
+      "quality": {
+        "enabled": true,
+        "project_key": "cgm-sanplat-param"
+      },
+      "finops": {
+        "app": "cgm-integration-platform",
+        "env": "prod",
+        "owner": "cgm",
+        "cost_center": "cgm"
+      }
+    },
+    {
+      "id": "example-service",
+      "name": "Example Service",
+      "repository": "example-org/example-service",
+      "owner": "example-team",
+      "cost_center": "example-cc",
+      "release_targets": [
+        {
+          "service_name": "example-api",
+          "project_id": "example-project",
+          "region": "us-central1"
+        }
+      ],
+      "validation_targets": [],
+      "quality": {
+        "enabled": false,
+        "project_key": ""
+      },
+      "finops": {
+        "app": "example-service",
+        "env": "staging",
+        "owner": "example-team",
+        "cost_center": "example-cc"
+      }
+    }
+  ]
+}
