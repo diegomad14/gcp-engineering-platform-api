@@ -24,12 +24,19 @@ def _get_metric_value(
     service_name: str,
     metric_type: str,
     minutes: int = 1440,
+    per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_MEAN,
+    cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_MEAN,
 ) -> float:
-    """Get the latest value for a Cloud Run metric."""
+    """Get an aggregated value for a Cloud Run metric."""
     now = datetime.now(timezone.utc)
     interval = monitoring_v3.TimeInterval(
         end_time={"seconds": int(now.timestamp()), "nanos": 0},
         start_time={"seconds": int((now - timedelta(minutes=minutes)).timestamp()), "nanos": 0},
+    )
+    aggregation = monitoring_v3.Aggregation(
+        alignment_period={"seconds": minutes * 60},
+        per_series_aligner=per_series_aligner,
+        cross_series_reducer=cross_series_reducer,
     )
 
     filter_str = (
@@ -45,13 +52,19 @@ def _get_metric_value(
                 "filter": filter_str,
                 "interval": interval,
                 "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
+                "aggregation": aggregation,
             }
         )
         for ts in results:
-            for point in reversed(ts.points):
-                val = point.value.double_value or float(point.value.int64_value)
-                if val > 0:
-                    return round(val, 4)
+            if not ts.points:
+                continue
+            point = ts.points[0]
+            val = (
+                point.value.double_value
+                or float(point.value.int64_value)
+                or float(point.value.distribution_value.mean)
+            )
+            return round(val, 4)
     except Exception:
         pass
 
@@ -74,7 +87,13 @@ def _get_error_rate(
     total = 0.0
     errors = 0.0
 
-    for code_class, aggregator in [("5xx", None), ("2xx", None), ("4xx", None)]:
+    aggregation = monitoring_v3.Aggregation(
+        alignment_period={"seconds": minutes * 60},
+        per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_SUM,
+        cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_SUM,
+    )
+
+    for code_class in ["5xx", "2xx", "4xx"]:
         filter_str = (
             f'metric.type="run.googleapis.com/request_count" '
             'resource.type="cloud_run_revision" '
@@ -88,17 +107,16 @@ def _get_error_rate(
                     "filter": filter_str,
                     "interval": interval,
                     "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
+                    "aggregation": aggregation,
                 }
             )
             for ts in results:
-                for point in reversed(ts.points):
-                    val = point.value.int64_value
-                    if val > 0:
-                        if code_class == "5xx":
-                            errors += val
-                        total += val
-                        break
-                break
+                if not ts.points:
+                    continue
+                val = ts.points[0].value.int64_value
+                if code_class == "5xx":
+                    errors += val
+                total += val
         except Exception:
             pass
 
@@ -119,11 +137,47 @@ def get_metrics_for_services(service_names: list[str]) -> list[CloudRunServiceMe
 
         for service_name in service_names:
             try:
-                request_count = _get_metric_value(client, project_id, service_name, _METRIC_REQUEST_COUNT)
-                latency = _get_metric_value(client, project_id, service_name, _METRIC_LATENCY)
-                cpu = _get_metric_value(client, project_id, service_name, _METRIC_CPU)
-                memory = _get_metric_value(client, project_id, service_name, _METRIC_MEMORY)
-                instance_count = _get_metric_value(client, project_id, service_name, _METRIC_INSTANCE_COUNT, 60)
+                request_count = _get_metric_value(
+                    client,
+                    project_id,
+                    service_name,
+                    _METRIC_REQUEST_COUNT,
+                    per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_SUM,
+                    cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_SUM,
+                )
+                latency = _get_metric_value(
+                    client,
+                    project_id,
+                    service_name,
+                    _METRIC_LATENCY,
+                    per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_PERCENTILE_95,
+                    cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_PERCENTILE_95,
+                )
+                cpu = _get_metric_value(
+                    client,
+                    project_id,
+                    service_name,
+                    _METRIC_CPU,
+                    per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_MEAN,
+                    cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_MEAN,
+                )
+                memory = _get_metric_value(
+                    client,
+                    project_id,
+                    service_name,
+                    _METRIC_MEMORY,
+                    per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_MEAN,
+                    cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_MEAN,
+                )
+                instance_count = _get_metric_value(
+                    client,
+                    project_id,
+                    service_name,
+                    _METRIC_INSTANCE_COUNT,
+                    minutes=60,
+                    per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_MAX,
+                    cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_MAX,
+                )
                 error_rate = _get_error_rate(client, project_id, service_name)
 
                 metrics_list.append(CloudRunServiceMetrics(
