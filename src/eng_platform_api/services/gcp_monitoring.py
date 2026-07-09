@@ -158,16 +158,16 @@ def get_metrics_for_services(service_names: list[str]) -> list[CloudRunServiceMe
                     project_id,
                     service_name,
                     _METRIC_CPU,
-                    per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_MEAN,
-                    cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_MEAN,
+                    per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_PERCENTILE_95,
+                    cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_PERCENTILE_95,
                 )
                 memory = _get_metric_value(
                     client,
                     project_id,
                     service_name,
                     _METRIC_MEMORY,
-                    per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_MEAN,
-                    cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_MEAN,
+                    per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_PERCENTILE_95,
+                    cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_PERCENTILE_95,
                 )
                 instance_count = _get_metric_value(
                     client,
