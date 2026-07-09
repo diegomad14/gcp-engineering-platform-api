@@ -191,3 +191,19 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     version: str = "0.1.0"
     mock_mode: bool = True
+
+
+class ServiceHealthItem(BaseModel):
+    app_id: str
+    app_name: str
+    service_name: str
+    project_id: str
+    region: str
+    status: str = "unknown"
+    checked_at: str = ""
+    error: str = ""
+
+
+class ServicesHealthResponse(BaseModel):
+    status: str = "ok"
+    services: list[ServiceHealthItem] = Field(default_factory=list)

@@ -38,6 +38,7 @@ ENG_PLATFORM_GCP_PROJECT_ID=my-project
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | /health | Health check |
+| GET | /api/health/services | Aggregate catalog service health |
 | GET | /api/catalog/apps | List all applications |
 | GET | /api/catalog/apps/{id} | Get application by ID |
 | GET | /api/releases/summary | Recent release activity |
