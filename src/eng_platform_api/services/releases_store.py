@@ -8,10 +8,12 @@ import json
 import os
 import threading
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
-from ..models import ReleaseCreateRequest, ReleaseItem, ReleaseSummary, ServiceRevision
+from pydantic import ValidationError
+from ..models import ReleaseCreateRequest, ReleaseItem, ServiceRevision
 
 _DEFAULT_STORE_PATH = Path(os.getenv("RELEASES_STORE_PATH", "data/releases.json"))
 _store_lock = threading.RLock()
@@ -37,24 +39,149 @@ def _resolve_path() -> Path:
     return Path(_DEFAULT_STORE_PATH) if _DEFAULT_STORE_PATH.is_absolute() else Path.cwd() / _DEFAULT_STORE_PATH
 
 
+@lru_cache(maxsize=64)
+def _catalog_service_names(app_id: str) -> tuple[str, ...]:
+    """Return the catalog release targets for an application."""
+    from . import catalog
+
+    aliases = {"eng-platform": "engineering-platform"}
+    app = catalog.get_application(aliases.get(app_id, app_id))
+    if app is None:
+        return ()
+    return tuple(target.service_name for target in app.release_targets)
+
+
+def _normalize_service(service: ServiceRevision) -> ServiceRevision:
+    """Mark incomplete service entries without hiding explicit no-op actions."""
+    if service.revision or service.action in {"unchanged", "not_included", "missing"}:
+        return service
+    return ServiceRevision(
+        service_name=service.service_name,
+        revision="",
+        action="missing",
+    )
+
+
+def complete_services(
+    app_id: str,
+    services: list[ServiceRevision],
+    *,
+    absent_action: Literal["not_included", "missing"],
+) -> list[ServiceRevision]:
+    """Combine payload services with the application's catalog targets.
+
+    Catalog order is kept for known services. Payload services that are not yet
+    present in the catalog are retained at the end instead of being discarded.
+    """
+    provided = {
+        service.service_name: _normalize_service(service)
+        for service in services
+    }
+    completed: list[ServiceRevision] = []
+
+    for service_name in _catalog_service_names(app_id):
+        completed.append(
+            provided.pop(
+                service_name,
+                ServiceRevision(
+                    service_name=service_name,
+                    revision="",
+                    action=absent_action,
+                ),
+            )
+        )
+
+    completed.extend(provided.values())
+    return completed
+
+
+def _legacy_services(record: dict) -> list[ServiceRevision]:
+    """Recover revision data from pre-multiservice records when possible."""
+    revisions = [
+        record.get("api_revision", ""),
+        record.get("web_revision", ""),
+    ]
+    service_names = _catalog_service_names(record.get("app_id", ""))
+    release_status = record.get("status", "")
+    action = {
+        "promoted": "promoted",
+        "rolled_back": "rolled_back",
+    }.get(release_status, "deployed")
+
+    recovered: list[ServiceRevision] = []
+    for revision in revisions:
+        if not revision:
+            continue
+        service_name = next(
+            (
+                name for name in service_names
+                if revision == name or revision.startswith(f"{name}-")
+            ),
+            "",
+        )
+        if service_name:
+            recovered.append(
+                ServiceRevision(
+                    service_name=service_name,
+                    revision=revision,
+                    action=action,
+                )
+            )
+    return recovered
+
+
+def _stored_service(raw_service: dict) -> ServiceRevision:
+    """Read stored service data defensively across contract versions."""
+    try:
+        return ServiceRevision(**raw_service)
+    except (TypeError, ValidationError):
+        return ServiceRevision(
+            service_name=str(raw_service.get("service_name", "")),
+            revision=str(raw_service.get("revision", "")),
+            action="missing",
+        )
+
+
+def release_item_from_record(record: dict) -> ReleaseItem:
+    """Build the public release contract from current or legacy storage."""
+    raw_services = record.get("services") or []
+    if raw_services:
+        services = [_stored_service(service) for service in raw_services]
+        absent_action = "not_included"
+    else:
+        services = _legacy_services(record)
+        absent_action = "missing"
+
+    return ReleaseItem(
+        app_id=record.get("app_id", ""),
+        app_name=record.get("app_name", ""),
+        version=record.get("version", ""),
+        status=record.get("status", ""),
+        services=complete_services(
+            record.get("app_id", ""),
+            services,
+            absent_action=absent_action,
+        ),
+        github_run_url=record.get("github_run_url", ""),
+        created_at=record.get("created_at", ""),
+    )
+
+
 def save_release(payload: ReleaseCreateRequest) -> ReleaseItem:
     """Persist a release (candidate, promote, or rollback) and return the stored item."""
     now = datetime.now(timezone.utc).isoformat()
-    api_revision = ""
-    web_revision = ""
-    for svc in payload.services:
-        if "api" in svc.service_name.lower():
-            api_revision = svc.revision
-        elif "web" in svc.service_name.lower():
-            web_revision = svc.revision
+    services = complete_services(
+        payload.app_id,
+        payload.services,
+        absent_action="not_included" if payload.services else "missing",
+    )
 
     item = ReleaseItem(
         app_id=payload.app_id,
         app_name=payload.app_name,
         version=payload.version,
         status=payload.status,
-        api_revision=api_revision,
-        web_revision=web_revision,
+        services=services,
         github_run_url=payload.github_run_url,
         created_at=now,
     )
@@ -66,7 +193,7 @@ def save_release(payload: ReleaseCreateRequest) -> ReleaseItem:
             "triggered_by": payload.triggered_by,
             "rollback_from_version": payload.rollback_from_version,
             "notes": payload.notes,
-            "services": [s.model_dump() for s in payload.services],
+            "services": [service.model_dump() for service in services],
         })
         _save(records)
 
@@ -81,16 +208,7 @@ def get_releases(app_id: Optional[str] = None, limit: int = 20) -> list[ReleaseI
     for rec in reversed(records):  # newest first
         if app_id and rec.get("app_id") != app_id:
             continue
-        items.append(ReleaseItem(
-            app_id=rec.get("app_id", ""),
-            app_name=rec.get("app_name", ""),
-            version=rec.get("version", ""),
-            status=rec.get("status", ""),
-            api_revision=rec.get("api_revision", ""),
-            web_revision=rec.get("web_revision", ""),
-            github_run_url=rec.get("github_run_url", ""),
-            created_at=rec.get("created_at", ""),
-        ))
+        items.append(release_item_from_record(rec))
     return items[:limit]
 
 

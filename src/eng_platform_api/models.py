@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -51,21 +51,29 @@ class CatalogResponse(BaseModel):
 
 # ── Releases ─────────────────────────────────────────────────────────
 
+ReleaseServiceAction = Literal[
+    "promoted",
+    "deployed",
+    "rolled_back",
+    "unchanged",
+    "not_included",
+    "missing",
+]
+
+
+class ServiceRevision(BaseModel):
+    service_name: str
+    revision: str = ""
+    action: ReleaseServiceAction = "deployed"
+
 class ReleaseItem(BaseModel):
     app_id: str
     app_name: str
     version: str
     status: str  # candidate, promoted, rolled_back
-    api_revision: str = ""
-    web_revision: str = ""
+    services: list[ServiceRevision] = Field(default_factory=list)
     github_run_url: str = ""
     created_at: str = ""
-
-
-class ServiceRevision(BaseModel):
-    service_name: str  # "cgm-sanplat-api" | "cgm-sanplat-web"
-    revision: str      # "cgm-sanplat-api-00173-5cs"
-    action: str = "deployed"  # "deployed" | "rolled_back" | "unchanged"
 
 
 class ReleaseCreateRequest(BaseModel):

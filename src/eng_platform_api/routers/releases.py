@@ -10,6 +10,18 @@ from ..services import github_actions, releases_store
 router = APIRouter(prefix="/api/releases", tags=["releases"])
 
 
+def _release_identity(item: ReleaseItem) -> tuple[str, ...]:
+    if item.github_run_url:
+        return ("run", item.github_run_url)
+    return (
+        "release",
+        item.app_id,
+        item.version,
+        item.status,
+        item.created_at,
+    )
+
+
 @router.post("/", response_model=ReleaseItem, status_code=201)
 async def register_release(payload: ReleaseCreateRequest):
     """Register a new release, promotion, or rollback.
@@ -37,17 +49,19 @@ async def get_release_summary():
     stored = releases_store.get_releases(limit=10)
     github = github_actions.get_release_summary()
 
-    # Merge: stored releases first, then deduplicate by github_run_url
-    seen_urls = {r.github_run_url for r in stored if r.github_run_url}
+    # Merge stored webhook events with GitHub-discovered runs.
+    seen = {_release_identity(item) for item in stored}
     for item in github.recent:
-        if item.github_run_url not in seen_urls:
+        identity = _release_identity(item)
+        if identity not in seen:
             stored.append(item)
-            seen_urls.add(item.github_run_url)
+            seen.add(identity)
 
     stored.sort(key=lambda r: r.created_at, reverse=True)
+    recent = stored[:20]
     return ReleaseSummary(
-        recent=stored[:20],
-        total_releases=releases_store.count_releases(),
+        recent=recent,
+        total_releases=len(recent),
     )
 
 

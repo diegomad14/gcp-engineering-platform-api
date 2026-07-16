@@ -12,7 +12,8 @@ import urllib.error
 from typing import Any
 
 from ..config import config
-from ..models import ReleaseItem, ReleaseSummary
+from ..models import ReleaseItem, ReleaseSummary, ServiceRevision
+from .releases_store import complete_services
 
 _GITHUB_API = "https://api.github.com"
 _REPOS = [
@@ -57,7 +58,7 @@ def _infer_app_name(repo: str) -> str:
 def _infer_app_id(repo: str) -> str:
     mapping = {
         "diegomad14/parametrizacion-correos-cgm": "cgm-integration-platform",
-        "diegomad14/gcp-engineering-platform": "eng-platform",
+        "diegomad14/gcp-engineering-platform": "engineering-platform",
     }
     return mapping.get(repo, repo.split("/")[-1])
 
@@ -70,13 +71,13 @@ def get_release_summary() -> ReleaseSummary:
     for repo in _REPOS:
         runs = _fetch_recent_runs(repo)
         for run in runs:
+            app_id = _infer_app_id(repo)
             recent.append(ReleaseItem(
-                app_id=_infer_app_id(repo),
+                app_id=app_id,
                 app_name=_infer_app_name(repo),
                 version=run.get("head_branch", "")[:40],
                 status="completed" if run.get("conclusion") == "success" else "failed",
-                api_revision="",
-                web_revision="",
+                services=complete_services(app_id, [], absent_action="missing"),
                 github_run_url=run.get("html_url", ""),
                 created_at=run.get("created_at", ""),
             ))
@@ -98,8 +99,22 @@ def _fallback_releases() -> list[ReleaseItem]:
             app_name="CGM Integration Platform",
             version="v0.4.3",
             status="promoted",
-            api_revision="cgm-sanplat-api-00173-5cs",
-            web_revision="cgm-sanplat-web-00088-bx5",
+            services=complete_services(
+                "cgm-integration-platform",
+                [
+                    ServiceRevision(
+                        service_name="cgm-sanplat-api",
+                        revision="cgm-sanplat-api-00173-5cs",
+                        action="promoted",
+                    ),
+                    ServiceRevision(
+                        service_name="cgm-sanplat-web",
+                        revision="cgm-sanplat-web-00088-bx5",
+                        action="promoted",
+                    ),
+                ],
+                absent_action="not_included",
+            ),
             github_run_url="https://github.com/diegomad14/parametrizacion-correos-cgm/actions",
             created_at="2026-07-07T15:57:39Z",
         ),
