@@ -1,50 +1,84 @@
 {
-  "applications": [
+  "services": [
     {
-      "id": "cgm-integration-platform",
-      "name": "CGM Integration Platform",
+      "service_name": "cgm-sanplat-api",
       "repository": "diegomad14/parametrizacion-correos-cgm",
       "owner": "cgm",
       "cost_center": "cgm",
-      "release_targets": [
-        { "service_name": "cgm-sanplat-api", "project_id": "cgm-assistant-prod", "region": "us-central1" },
-        { "service_name": "cgm-sanplat-web", "project_id": "cgm-assistant-prod", "region": "us-central1" },
-        { "service_name": "cgm-bot-api", "project_id": "cgm-assistant-prod", "region": "us-central1" }
-      ],
+      "project_id": "cgm-assistant-prod",
+      "region": "us-central1",
+      "environment": "prod",
       "validation_targets": [
         { "name": "Perseo", "type": "external_source", "description": "KPI data source" },
         { "name": "FND", "type": "external_source", "description": "Field Network Device data" },
         { "name": "SanPlat", "type": "external_source", "description": "SanPlat integration" }
       ],
-      "quality": { "enabled": true, "project_key": "diegomad14_parametrizacion-correos-cgm" },
-      "finops": { "app": "cgm-integration-platform", "env": "prod", "owner": "cgm", "cost_center": "cgm" }
+      "quality": { "enabled": true, "profile": "python", "coverage_threshold": 70 },
+      "finops": { "service": "cgm-sanplat-api", "env": "prod", "owner": "cgm", "cost_center": "cgm" }
     },
     {
-      "id": "communications-ms",
-      "name": "Communications Microservice",
+      "service_name": "cgm-sanplat-web",
+      "repository": "diegomad14/parametrizacion-correos-cgm",
+      "owner": "cgm",
+      "cost_center": "cgm",
+      "project_id": "cgm-assistant-prod",
+      "region": "us-central1",
+      "environment": "prod",
+      "validation_targets": [
+        { "name": "Perseo", "type": "external_source", "description": "KPI data source" },
+        { "name": "FND", "type": "external_source", "description": "Field Network Device data" },
+        { "name": "SanPlat", "type": "external_source", "description": "SanPlat integration" }
+      ],
+      "quality": { "enabled": true, "profile": "node", "coverage_threshold": 70 },
+      "finops": { "service": "cgm-sanplat-web", "env": "prod", "owner": "cgm", "cost_center": "cgm" }
+    },
+    {
+      "service_name": "cgm-bot-api",
+      "repository": "diegomad14/cgm-bot-core",
+      "owner": "cgm",
+      "cost_center": "cgm",
+      "project_id": "cgm-assistant-prod",
+      "region": "us-central1",
+      "environment": "prod",
+      "validation_targets": [],
+      "quality": { "enabled": true, "profile": "python", "coverage_threshold": 70 },
+      "finops": { "service": "cgm-bot-api", "env": "prod", "owner": "cgm", "cost_center": "cgm" }
+    },
+    {
+      "service_name": "communications-ms",
       "repository": "diegomad14/communications-ms",
       "owner": "cgm",
       "cost_center": "cgm",
-      "release_targets": [
-        { "service_name": "communications-ms", "project_id": "cgm-assistant-prod", "region": "us-central1" }
-      ],
+      "project_id": "cgm-assistant-prod",
+      "region": "us-central1",
+      "environment": "prod",
       "validation_targets": [],
-      "quality": { "enabled": false, "project_key": "" },
-      "finops": { "app": "communications-ms", "env": "prod", "owner": "cgm", "cost_center": "cgm" }
+      "quality": { "enabled": false, "profile": "python", "coverage_threshold": 70 },
+      "finops": { "service": "communications-ms", "env": "prod", "owner": "cgm", "cost_center": "cgm" }
     },
     {
-      "id": "engineering-platform",
-      "name": "Engineering Platform",
+      "service_name": "eng-platform-api",
       "repository": "diegomad14/gcp-engineering-platform",
       "owner": "platform",
       "cost_center": "platform",
-      "release_targets": [
-        { "service_name": "eng-platform-api", "project_id": "cgm-assistant-prod", "region": "us-central1" },
-        { "service_name": "eng-platform-web", "project_id": "cgm-assistant-prod", "region": "us-central1" }
-      ],
+      "project_id": "cgm-assistant-prod",
+      "region": "us-central1",
+      "environment": "prod",
       "validation_targets": [],
-      "quality": { "enabled": true, "project_key": "diegomad14_gcp-engineering-platform" },
-      "finops": { "app": "engineering-platform", "env": "prod", "owner": "platform", "cost_center": "platform" }
+      "quality": { "enabled": true, "profile": "python", "coverage_threshold": 70 },
+      "finops": { "service": "eng-platform-api", "env": "prod", "owner": "platform", "cost_center": "platform" }
+    },
+    {
+      "service_name": "eng-platform-web",
+      "repository": "diegomad14/gcp-engineering-platform",
+      "owner": "platform",
+      "cost_center": "platform",
+      "project_id": "cgm-assistant-prod",
+      "region": "us-central1",
+      "environment": "prod",
+      "validation_targets": [],
+      "quality": { "enabled": true, "profile": "node", "coverage_threshold": 70 },
+      "finops": { "service": "eng-platform-web", "env": "prod", "owner": "platform", "cost_center": "platform" }
     }
   ]
 }

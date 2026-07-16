@@ -1,8 +1,8 @@
-"""Releases router — webhook for registering releases and querying history."""
+"""Releases router — service-oriented webhook and history."""
 
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from ..models import ReleaseCreateRequest, ReleaseItem, ReleaseSummary
 from ..services import github_actions, releases_store
@@ -12,65 +12,55 @@ router = APIRouter(prefix="/api/releases", tags=["releases"])
 
 def _release_identity(item: ReleaseItem) -> tuple[str, ...]:
     if item.github_run_url:
-        return ("run", item.github_run_url)
+        return ("run", item.github_run_url, item.service_name)
     return (
         "release",
-        item.app_id,
+        item.service_name,
         item.version,
         item.status,
         item.created_at,
     )
 
 
-@router.post("/", response_model=ReleaseItem, status_code=201)
+@router.post("/", response_model=list[ReleaseItem], status_code=201)
 async def register_release(payload: ReleaseCreateRequest):
-    """Register a new release, promotion, or rollback.
-
-    Called by CI/CD workflows (release.yml, promote-prod.yml, rollback-prod.yml)
-    to record every deployment event in the platform release history.
-    """
+    """Register one independent release row for every payload service."""
     return releases_store.save_release(payload)
 
 
 @router.get("/", response_model=ReleaseSummary)
 async def list_releases(
-    app_id: Optional[str] = Query(default=None),
+    service_name: Optional[str] = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
 ):
-    """List recent releases, optionally filtered by application."""
-    stored = releases_store.get_releases(app_id=app_id, limit=limit)
-    total = releases_store.count_releases(app_id=app_id)
+    """List recent releases, optionally filtered by service."""
+    stored = releases_store.get_releases(service_name=service_name, limit=limit)
+    total = releases_store.count_releases(service_name=service_name)
     return ReleaseSummary(recent=stored, total_releases=total)
 
 
 @router.get("/summary", response_model=ReleaseSummary)
 async def get_release_summary():
-    """Get release activity: stored releases + GitHub workflow runs."""
-    stored = releases_store.get_releases(limit=10)
+    """Merge persisted service rows with GitHub-discovered workflow runs."""
+    recent = releases_store.get_releases(limit=100)
     github = github_actions.get_release_summary()
-
-    # Merge stored webhook events with GitHub-discovered runs.
-    seen = {_release_identity(item) for item in stored}
+    seen = {_release_identity(item) for item in recent}
     for item in github.recent:
         identity = _release_identity(item)
         if identity not in seen:
-            stored.append(item)
+            recent.append(item)
             seen.add(identity)
 
-    stored.sort(key=lambda r: r.created_at, reverse=True)
-    recent = stored[:20]
-    return ReleaseSummary(
-        recent=recent,
-        total_releases=len(recent),
-    )
+    recent.sort(key=lambda release: release.created_at, reverse=True)
+    return ReleaseSummary(recent=recent[:20], total_releases=len(recent))
 
 
-@router.get("/{app_id}/latest", response_model=ReleaseItem)
-async def get_latest_release(app_id: str):
-    """Get the latest release for a specific application."""
-    from fastapi import HTTPException
-
-    latest = releases_store.get_latest(app_id)
+@router.get("/{service_name}/latest", response_model=ReleaseItem)
+async def get_latest_release(service_name: str):
+    """Get the latest release for a specific service."""
+    latest = releases_store.get_latest(service_name)
     if latest is None:
-        raise HTTPException(status_code=404, detail=f"No releases found for '{app_id}'")
+        raise HTTPException(
+            status_code=404, detail=f"No releases found for '{service_name}'"
+        )
     return latest

@@ -11,7 +11,7 @@ from .routers import catalog, costs, health, metrics, quality, releases, service
 
 app = FastAPI(
     title="Engineering Platform API",
-    version="0.1.0",
+    version="0.4.1",
     description="Control plane API for the GCP Engineering Platform. "
     "All endpoints use mock data unless GCP credentials are configured.",
     docs_url="/docs",
@@ -39,6 +39,6 @@ app.include_router(service_factory.router)
 async def root():
     return {
         "service": "Engineering Platform API",
-        "version": "0.1.0",
+        "version": "0.4.1",
         "docs": "/docs",
     }

@@ -15,7 +15,6 @@ class BillingConfig:
     bigquery_dataset: str = "billing_export"
     bigquery_table: str = "gcp_billing_export_resource_v1_XXXXXX"
     bigquery_location: str = "US"
-    app_label: str = "app"
     env_label: str = "env"
     owner_label: str = "owner"
     cost_center_label: str = "cost_center"
@@ -41,12 +40,22 @@ class SonarQubeConfig:
 
 
 @dataclass
+class QualityConfig:
+    ingest_token: str = ""
+    bucket: str = ""
+    prefix: str = "quality"
+    local_store_path: str = "data"
+    stale_after_hours: int = 168
+
+
+@dataclass
 class PlatformConfig:
     mock_mode: bool = True
     billing: BillingConfig = field(default_factory=BillingConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
     sonarqube: SonarQubeConfig = field(default_factory=SonarQubeConfig)
+    quality: QualityConfig = field(default_factory=QualityConfig)
 
 
 def load_config() -> PlatformConfig:
@@ -58,9 +67,10 @@ def load_config() -> PlatformConfig:
         enabled=os.getenv("ENG_PLATFORM_BILLING_ENABLED", "false").lower() == "true",
         bigquery_project_id=os.getenv("ENG_PLATFORM_BQ_PROJECT_ID", ""),
         bigquery_dataset=os.getenv("ENG_PLATFORM_BQ_DATASET", "billing_export"),
-        bigquery_table=os.getenv("ENG_PLATFORM_BQ_TABLE", "gcp_billing_export_resource_v1_XXXXXX"),
+        bigquery_table=os.getenv(
+            "ENG_PLATFORM_BQ_TABLE", "gcp_billing_export_resource_v1_XXXXXX"
+        ),
         bigquery_location=os.getenv("ENG_PLATFORM_BQ_LOCATION", "US"),
-        app_label=os.getenv("ENG_PLATFORM_LABEL_APP", "app"),
         env_label=os.getenv("ENG_PLATFORM_LABEL_ENV", "env"),
         owner_label=os.getenv("ENG_PLATFORM_LABEL_OWNER", "owner"),
         cost_center_label=os.getenv("ENG_PLATFORM_LABEL_COST_CENTER", "cost_center"),
@@ -82,12 +92,23 @@ def load_config() -> PlatformConfig:
         host_url=os.getenv("SONAR_HOST_URL", "https://sonarcloud.io"),
     )
 
+    quality = QualityConfig(
+        ingest_token=os.getenv("ENG_PLATFORM_QUALITY_INGEST_TOKEN", ""),
+        bucket=os.getenv("ENG_PLATFORM_QUALITY_BUCKET", ""),
+        prefix=os.getenv("ENG_PLATFORM_QUALITY_PREFIX", "quality").strip("/"),
+        local_store_path=os.getenv("ENG_PLATFORM_QUALITY_STORE_PATH", "data"),
+        stale_after_hours=int(
+            os.getenv("ENG_PLATFORM_QUALITY_STALE_AFTER_HOURS", "168")
+        ),
+    )
+
     return PlatformConfig(
         mock_mode=mock_mode,
         billing=billing,
         monitoring=monitoring,
         github=github,
         sonarqube=sonarqube,
+        quality=quality,
     )
 
 

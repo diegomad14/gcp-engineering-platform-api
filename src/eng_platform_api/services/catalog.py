@@ -1,8 +1,8 @@
-"""Service catalog — returns real application and service metadata.
+"""Service catalog — independent service metadata and Cloud Run state.
 
 Sources:
 - Cloud Run API for live service inventory
-- catalog/applications.example.yaml for app metadata
+- static service catalog for ownership and repository metadata
 - Falls back to mock data when APIs are unavailable.
 """
 
@@ -14,123 +14,120 @@ from google.cloud import run_v2
 
 from ..config import config
 from ..models import (
-    Application, CatalogResponse, CloudRunService,
-    FinOpsLabels, SonarQubeProject, ValidationTarget,
+    CatalogResponse,
+    CatalogService,
+    FinOpsLabels,
+    ServiceDetail,
+    ServiceQualityConfig,
+    ServiceTraffic,
+    ValidationTarget,
 )
 
-_CATALOG_PATH = pathlib.Path(__file__).resolve().parent.parent / "static_examples" / "mock_catalog.json"
+_CATALOG_PATH = (
+    pathlib.Path(__file__).resolve().parent.parent
+    / "static_examples"
+    / "mock_catalog.json"
+)
 _PROJECT_ID = "cgm-assistant-prod"
 _REGION = "us-central1"
 
 
-def _list_cloud_run_services() -> list[CloudRunService]:
-    """Query real Cloud Run services from GCP."""
+def _get_service_config() -> list[dict]:
+    """Load the flat service catalog."""
+    if _CATALOG_PATH.exists():
+        data = json.loads(_CATALOG_PATH.read_text())
+        return data.get("services", [])
+    return []
+
+
+def _catalog_service(cfg: dict) -> CatalogService:
+    return CatalogService(
+        service_name=cfg["service_name"],
+        repository=cfg["repository"],
+        owner=cfg["owner"],
+        cost_center=cfg.get("cost_center", ""),
+        project_id=cfg.get("project_id", _PROJECT_ID),
+        region=cfg.get("region", _REGION),
+        environment=cfg.get("environment", "prod"),
+        validation_targets=[
+            ValidationTarget(**vt) for vt in cfg.get("validation_targets", [])
+        ],
+        quality=ServiceQualityConfig(**cfg.get("quality", {})),
+        finops=FinOpsLabels(**cfg.get("finops", {})),
+    )
+
+
+def get_services() -> CatalogResponse:
+    services = [_catalog_service(cfg) for cfg in _get_service_config()]
+    return CatalogResponse(services=services, total=len(services))
+
+
+def get_service(service_name: str) -> Optional[CatalogService]:
+    for service in get_services().services:
+        if service.service_name == service_name:
+            return service
+    return None
+
+
+def get_services_by_repository(repository: str) -> list[CatalogService]:
+    return [
+        service
+        for service in get_services().services
+        if service.repository == repository
+    ]
+
+
+def _is_ready(service: object) -> bool:
+    terminal = getattr(service, "terminal_condition", None)
+    if terminal is not None:
+        state = getattr(getattr(terminal, "state", None), "name", "")
+        if state:
+            return state == "CONDITION_SUCCEEDED"
+    return any(
+        getattr(condition, "type_", "") == "Ready"
+        and getattr(getattr(condition, "state", None), "name", "")
+        == "CONDITION_SUCCEEDED"
+        for condition in getattr(service, "conditions", [])
+    )
+
+
+def get_service_detail(service_name: str) -> Optional[ServiceDetail]:
+    service = get_service(service_name)
+    if service is None:
+        return None
+
+    detail = ServiceDetail(**service.model_dump())
     if config.mock_mode:
-        return _fallback_services()
+        detail.status = "healthy"
+        return detail
 
     try:
         client = run_v2.ServicesClient()
-        parent = f"projects/{_PROJECT_ID}/locations/{_REGION}"
-        services = []
-        for svc in client.list_services(request={"parent": parent}):
-            services.append(CloudRunService(
-                service_name=svc.name.split("/")[-1],
-                project_id=_PROJECT_ID,
-                region=_REGION,
-            ))
-        if services:
-            return services
-    except Exception:
-        pass
-
-    return _fallback_services()
-
-
-def _fallback_services() -> list[CloudRunService]:
-    """Hardcoded service list as fallback."""
-    return [
-        CloudRunService(service_name="cgm-sanplat-api", project_id=_PROJECT_ID, region=_REGION),
-        CloudRunService(service_name="cgm-sanplat-web", project_id=_PROJECT_ID, region=_REGION),
-        CloudRunService(service_name="cgm-bot-api", project_id=_PROJECT_ID, region=_REGION),
-        CloudRunService(service_name="communications-ms", project_id=_PROJECT_ID, region=_REGION),
-        CloudRunService(service_name="eng-platform-api", project_id=_PROJECT_ID, region=_REGION),
-        CloudRunService(service_name="eng-platform-web", project_id=_PROJECT_ID, region=_REGION),
-    ]
-
-
-def _get_app_config() -> list[dict]:
-    """Load application config from catalog or use defaults."""
-    if _CATALOG_PATH.exists():
-        data = json.loads(_CATALOG_PATH.read_text())
-        return data.get("applications", [])
-    return [
-        {
-            "id": "cgm-integration-platform", "name": "CGM Integration Platform",
-            "repository": "diegomad14/parametrizacion-correos-cgm",
-            "owner": "cgm", "cost_center": "cgm",
-            "quality": {"enabled": True, "project_key": "cgm-sanplat-param"},
-            "finops": {"app": "cgm-integration-platform", "env": "prod", "owner": "cgm", "cost_center": "cgm"},
-            "validation_targets": [
-                {"name": "Perseo", "type": "external_source", "description": "KPI data source"},
-                {"name": "FND", "type": "external_source", "description": "FND data"},
-                {"name": "SanPlat", "type": "external_source", "description": "SanPlat integration"},
-            ],
-        },
-    ]
-
-
-def get_applications() -> CatalogResponse:
-    apps = []
-    cloud_run_services = _list_cloud_run_services()
-    configs = _get_app_config()
-
-    # Map Cloud Run services to apps by prefix
-    def match_services(prefixes: list[str]) -> list[CloudRunService]:
-        return [s for s in cloud_run_services if any(s.service_name.startswith(p) for p in prefixes)]
-
-    for cfg in configs:
-        if cfg["id"] == "cgm-integration-platform":
-            targets = match_services(["cgm-sanplat", "cgm-bot"])
-        elif cfg["id"] == "communications-ms":
-            targets = match_services(["communications"])
-        elif cfg["id"] == "engineering-platform":
-            targets = match_services(["eng-platform"])
-        else:
-            targets = []
-
-        apps.append(Application(
-            id=cfg["id"],
-            name=cfg["name"],
-            repository=cfg["repository"],
-            owner=cfg["owner"],
-            cost_center=cfg.get("cost_center", ""),
-            release_targets=targets if targets else [],
-            validation_targets=[
-                ValidationTarget(**vt) for vt in cfg.get("validation_targets", [])
-            ],
-            quality=SonarQubeProject(**cfg.get("quality", {})),
-            finops=FinOpsLabels(**cfg.get("finops", {})),
-        ))
-
-    if not apps:
-        for svc in cloud_run_services:
-            apps.append(Application(
-                id=svc.service_name,
-                name=svc.service_name.replace("-", " ").title(),
-                repository="",
-                owner="",
-                cost_center="",
-                release_targets=[svc],
-                validation_targets=[],
-                quality=SonarQubeProject(),
-                finops=FinOpsLabels(),
-            ))
-
-    return CatalogResponse(applications=apps, total=len(apps))
-
-
-def get_application(app_id: str) -> Optional[Application]:
-    for app in get_applications().applications:
-        if app.id == app_id:
-            return app
-    return None
+        live = client.get_service(
+            name=(
+                f"projects/{service.project_id}/locations/{service.region}"
+                f"/services/{service.service_name}"
+            )
+        )
+        detail.status = "healthy" if _is_ready(live) else "degraded"
+        detail.url = getattr(live, "uri", "") or ""
+        latest_ready_revision = getattr(live, "latest_ready_revision", "") or ""
+        detail.latest_ready_revision = latest_ready_revision.split("/")[-1]
+        traffic = getattr(live, "traffic_statuses", None) or getattr(
+            live, "traffic", []
+        )
+        detail.traffic = [
+            ServiceTraffic(
+                revision=getattr(target, "revision", "")
+                or detail.latest_ready_revision,
+                percent=int(getattr(target, "percent", 0) or 0),
+                tag=getattr(target, "tag", "") or "",
+            )
+            for target in traffic
+        ]
+        if detail.status != "healthy":
+            detail.error = "Cloud Run service is not Ready"
+    except Exception as exc:
+        detail.status = "degraded"
+        detail.error = str(exc)
+    return detail

@@ -1,23 +1,25 @@
-"""Catalog router — application and service metadata."""
+"""Catalog router — independent service metadata."""
 
 from fastapi import APIRouter, HTTPException
 
-from ..models import Application, CatalogResponse
+from ..models import CatalogResponse, ServiceDetail
 from ..services import catalog as catalog_service
 
 router = APIRouter(prefix="/api/catalog", tags=["catalog"])
 
 
-@router.get("/apps", response_model=CatalogResponse)
-async def list_applications():
-    """List all registered applications."""
-    return catalog_service.get_applications()
+@router.get("/services", response_model=CatalogResponse)
+async def list_services():
+    """List all registered services."""
+    return catalog_service.get_services()
 
 
-@router.get("/apps/{app_id}", response_model=Application)
-async def get_application(app_id: str):
-    """Get a single application by ID."""
-    app = catalog_service.get_application(app_id)
-    if app is None:
-        raise HTTPException(status_code=404, detail=f"Application '{app_id}' not found")
-    return app
+@router.get("/services/{service_name}", response_model=ServiceDetail)
+async def get_service(service_name: str):
+    """Get service metadata and best-effort live Cloud Run state."""
+    service = catalog_service.get_service_detail(service_name)
+    if service is None:
+        raise HTTPException(
+            status_code=404, detail=f"Service '{service_name}' not found"
+        )
+    return service

@@ -31,7 +31,10 @@ def _get_metric_value(
     now = datetime.now(timezone.utc)
     interval = monitoring_v3.TimeInterval(
         end_time={"seconds": int(now.timestamp()), "nanos": 0},
-        start_time={"seconds": int((now - timedelta(minutes=minutes)).timestamp()), "nanos": 0},
+        start_time={
+            "seconds": int((now - timedelta(minutes=minutes)).timestamp()),
+            "nanos": 0,
+        },
     )
     aggregation = monitoring_v3.Aggregation(
         alignment_period={"seconds": minutes * 60},
@@ -81,7 +84,10 @@ def _get_error_rate(
     now = datetime.now(timezone.utc)
     interval = monitoring_v3.TimeInterval(
         end_time={"seconds": int(now.timestamp()), "nanos": 0},
-        start_time={"seconds": int((now - timedelta(minutes=minutes)).timestamp()), "nanos": 0},
+        start_time={
+            "seconds": int((now - timedelta(minutes=minutes)).timestamp()),
+            "nanos": 0,
+        },
     )
 
     total = 0.0
@@ -180,15 +186,17 @@ def get_metrics_for_services(service_names: list[str]) -> list[CloudRunServiceMe
                 )
                 error_rate = _get_error_rate(client, project_id, service_name)
 
-                metrics_list.append(CloudRunServiceMetrics(
-                    service_name=service_name,
-                    request_count=int(request_count),
-                    error_rate=error_rate,
-                    p95_latency_ms=latency,
-                    cpu_utilization=cpu,
-                    memory_utilization=memory,
-                    instances_max=int(instance_count),
-                ))
+                metrics_list.append(
+                    CloudRunServiceMetrics(
+                        service_name=service_name,
+                        request_count=int(request_count),
+                        error_rate=error_rate,
+                        p95_latency_ms=latency,
+                        cpu_utilization=cpu,
+                        memory_utilization=memory,
+                        instances_max=int(instance_count),
+                    )
+                )
             except Exception:
                 metrics_list.append(CloudRunServiceMetrics(service_name=service_name))
 
@@ -205,6 +213,7 @@ def _mock_metrics_for(service_names: list[str]) -> list[CloudRunServiceMetrics]:
 def get_metrics_summary() -> MetricsSummary:
     """Return metrics summary for Cloud Run services."""
     from .catalog import _list_cloud_run_services
+
     services = _list_cloud_run_services()
     service_names = [s.service_name for s in services]
     metrics = get_metrics_for_services(service_names)

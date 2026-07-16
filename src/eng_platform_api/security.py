@@ -6,7 +6,10 @@ exposing the platform API publicly.
 Do NOT hardcode tokens, keys, or credentials here.
 """
 
-from fastapi import Request
+import hmac
+import os
+
+from fastapi import Header, HTTPException, Request, status
 
 
 def get_identity(request: Request) -> str:
@@ -27,12 +30,51 @@ def verify_no_secrets_in_response(data: dict) -> dict:
     returning secrets in the first place.
     """
     forbidden_keys = {
-        "token", "password", "secret", "key", "credential",
-        "sonar_token", "api_key", "private_key",
+        "token",
+        "password",
+        "secret",
+        "key",
+        "credential",
+        "sonar_token",
+        "api_key",
+        "private_key",
     }
     if isinstance(data, dict):
-        return {
-            k: v for k, v in data.items()
-            if k.lower() not in forbidden_keys
-        }
+        return {k: v for k, v in data.items() if k.lower() not in forbidden_keys}
     return data
+
+
+def require_quality_ingest_token(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> None:
+    """Require the organization quality-ingest token for report writes."""
+    content_length = request.headers.get("content-length")
+    oversized = False
+    try:
+        if content_length is not None:
+            oversized = int(content_length) > 1_000_000
+    except ValueError:
+        oversized = True
+    if oversized:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Quality report exceeds the 1 MB limit",
+        )
+    expected = os.getenv("ENG_PLATFORM_QUALITY_INGEST_TOKEN", "")
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Quality report ingestion is not configured",
+        )
+    scheme, _, supplied = (authorization or "").partition(" ")
+    if (
+        scheme.lower() != "bearer"
+        or not supplied
+        or not hmac.compare_digest(supplied, expected)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid quality report token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )

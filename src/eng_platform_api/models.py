@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Literal, Optional
-from pydantic import BaseModel, Field
+from typing import Literal
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ── Catalog ──────────────────────────────────────────────────────────
-
-class CloudRunService(BaseModel):
-    service_name: str
-    project_id: str
-    region: str
 
 
 class ValidationTarget(BaseModel):
@@ -20,32 +15,48 @@ class ValidationTarget(BaseModel):
     description: str = ""
 
 
-class SonarQubeProject(BaseModel):
+class ServiceQualityConfig(BaseModel):
     enabled: bool = False
-    project_key: str = ""
+    profile: Literal["python", "node", "static"] | None = None
+    coverage_threshold: float = 70.0
 
 
 class FinOpsLabels(BaseModel):
-    app: str = ""
+    service: str = ""
     env: str = ""
     owner: str = ""
     cost_center: str = ""
 
 
-class Application(BaseModel):
-    id: str
-    name: str
+class CatalogService(BaseModel):
+    service_name: str
     repository: str
     owner: str
     cost_center: str = ""
-    release_targets: list[CloudRunService] = Field(default_factory=list)
+    project_id: str
+    region: str
+    environment: str = "prod"
     validation_targets: list[ValidationTarget] = Field(default_factory=list)
-    quality: SonarQubeProject = Field(default_factory=SonarQubeProject)
+    quality: ServiceQualityConfig = Field(default_factory=ServiceQualityConfig)
     finops: FinOpsLabels = Field(default_factory=FinOpsLabels)
 
 
+class ServiceTraffic(BaseModel):
+    revision: str = ""
+    percent: int = 0
+    tag: str = ""
+
+
+class ServiceDetail(CatalogService):
+    status: str = "unknown"
+    url: str = ""
+    latest_ready_revision: str = ""
+    traffic: list[ServiceTraffic] = Field(default_factory=list)
+    error: str = ""
+
+
 class CatalogResponse(BaseModel):
-    applications: list[Application]
+    services: list[CatalogService]
     total: int
 
 
@@ -66,22 +77,25 @@ class ServiceRevision(BaseModel):
     revision: str = ""
     action: ReleaseServiceAction = "deployed"
 
+
 class ReleaseItem(BaseModel):
-    app_id: str
-    app_name: str
+    service_name: str
+    repository: str
     version: str
     status: str  # candidate, promoted, rolled_back
-    services: list[ServiceRevision] = Field(default_factory=list)
+    revision: str = ""
+    action: ReleaseServiceAction = "deployed"
     github_run_url: str = ""
     created_at: str = ""
 
 
 class ReleaseCreateRequest(BaseModel):
-    app_id: str
-    app_name: str = ""
+    model_config = ConfigDict(extra="forbid")
+
+    repository: str
     version: str
     status: str = "candidate"  # "candidate" | "promoted" | "rolled_back"
-    services: list[ServiceRevision] = Field(default_factory=list)
+    services: list[ServiceRevision] = Field(min_length=1)
     github_run_url: str = ""
     triggered_by: str = "github-actions"
     rollback_from_version: str = ""
@@ -95,15 +109,64 @@ class ReleaseSummary(BaseModel):
 
 # ── Quality ──────────────────────────────────────────────────────────
 
+QualityGateStatus = Literal["PASSED", "FAILED", "RUNNING", "STALE", "NOT_CONFIGURED"]
+QualityCheckStatus = Literal["PASSED", "FAILED", "SKIPPED"]
+
+
+class QualityCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    category: str
+    status: QualityCheckStatus
+    findings: int = 0
+    blocking_findings: int = 0
+    duration_seconds: float = 0.0
+    details: str = ""
+    report_path: str = ""
+
+
+class QualityReportCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    service_name: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[a-z0-9][a-z0-9-]*[a-z0-9]$",
+    )
+    repository: str = Field(min_length=1, max_length=256)
+    commit_sha: str = Field(min_length=7, max_length=64, pattern=r"^[0-9a-fA-F]+$")
+    branch: str = ""
+    profile: Literal["python", "node", "static"]
+    workflow_run_url: str = ""
+    generated_at: str
+    coverage: float | None = Field(default=None, ge=0, le=100)
+    coverage_threshold: float | None = Field(default=None, ge=0, le=100)
+    tool_versions: dict[str, str] = Field(default_factory=dict)
+    checks: list[QualityCheck] = Field(min_length=1)
+
+
+class QualityReport(QualityReportCreate):
+    quality_gate_status: QualityGateStatus
+    received_at: str
+
+
 class QualityProject(BaseModel):
     project_key: str
-    organization: str
-    quality_gate_status: str = "UNKNOWN"  # OK, WARN, ERROR, UNKNOWN
+    organization: str = ""
+    service_name: str = ""
+    repository: str = ""
+    commit_sha: str = ""
+    branch: str = ""
+    profile: str = ""
+    quality_gate_status: QualityGateStatus = "NOT_CONFIGURED"
     coverage: float = 0.0
     bugs: int = 0
     vulnerabilities: int = 0
     code_smells: int = 0
     url: str = ""
+    updated_at: str = ""
+    checks: list[QualityCheck] = Field(default_factory=list)
 
 
 class QualitySummary(BaseModel):
@@ -111,6 +174,7 @@ class QualitySummary(BaseModel):
 
 
 # ── Metrics ──────────────────────────────────────────────────────────
+
 
 class CloudRunServiceMetrics(BaseModel):
     service_name: str
@@ -129,9 +193,9 @@ class MetricsSummary(BaseModel):
 
 # ── Costs ────────────────────────────────────────────────────────────
 
+
 class CostItem(BaseModel):
     project_id: str = ""
-    app: str = ""
     service_name: str = ""
     gcp_service: str = ""
     cost: float = 0.0
@@ -155,8 +219,11 @@ class CostSummary(BaseModel):
 
 # ── Service Factory ──────────────────────────────────────────────────
 
+
 class ServiceFactoryRequest(BaseModel):
-    app_name: str
+    model_config = ConfigDict(extra="forbid")
+
+    repository: str
     service_name: str
     service_type: str  # api, web, worker, integration
     runtime: str  # python, node, static
@@ -168,8 +235,11 @@ class ServiceFactoryRequest(BaseModel):
     cloud_run_service_name: str = ""
     health_path: str = "/health"
     openapi_path: str = "/openapi.json"
-    sonar_project_key: str = ""
-    sonar_organization: str = ""
+    quality_profile: Literal["python", "node", "static"] | None = None
+    quality_working_directory: str = "."
+    coverage_threshold: float = Field(default=70.0, ge=0, le=100)
+    sonar_project_key: str = ""  # Deprecated compatibility input.
+    sonar_organization: str = ""  # Deprecated compatibility input.
     validation_targets: list[str] = Field(default_factory=list)
 
 
@@ -180,7 +250,7 @@ class ServiceFactoryTemplate(BaseModel):
 
 
 class ServiceFactoryPlan(BaseModel):
-    app_name: str
+    repository: str
     service_name: str
     generated_files: list[str] = Field(default_factory=list)
     checklist: list[str] = Field(default_factory=list)
@@ -190,20 +260,20 @@ class ServiceFactoryPlan(BaseModel):
     caller_promote: str = ""
     caller_rollback: str = ""
     labels_manifest: str = ""
-    sonar_properties: str = ""
+    quality_config: str = ""
+    sonar_properties: str = ""  # Deprecated compatibility output; always empty.
 
 
 # ── Health ────────────────────────────────────────────────────────────
 
+
 class HealthResponse(BaseModel):
     status: str = "ok"
-    version: str = "0.1.0"
+    version: str = "0.4.1"
     mock_mode: bool = True
 
 
 class ServiceHealthItem(BaseModel):
-    app_id: str
-    app_name: str
     service_name: str
     project_id: str
     region: str

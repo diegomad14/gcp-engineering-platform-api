@@ -22,6 +22,7 @@ def _sq_request(path: str) -> dict:
     req.add_header("Accept", "application/json")
     if token:
         import base64
+
         auth = base64.b64encode(f"{token}:".encode()).decode()
         req.add_header("Authorization", f"Basic {auth}")
 
@@ -46,9 +47,7 @@ def get_quality_summary() -> QualitySummary:
             continue
 
         # Get quality gate status
-        gate_data = _sq_request(
-            f"/qualitygates/project_status?projectKey={key}"
-        )
+        gate_data = _sq_request(f"/qualitygates/project_status?projectKey={key}")
 
         # Get measures
         measures_data = _sq_request(
@@ -60,16 +59,20 @@ def get_quality_summary() -> QualitySummary:
         for m in measures_data.get("component", {}).get("measures", []):
             metrics[m["metric"]] = m.get("value", "0")
 
-        projects.append(QualityProject(
-            project_key=key,
-            organization=comp.get("organization", "diegomad14"),
-            quality_gate_status=gate_data.get("projectStatus", {}).get("status", "UNKNOWN"),
-            coverage=float(metrics.get("coverage", 0) or 0),
-            bugs=int(float(metrics.get("bugs", 0) or 0)),
-            vulnerabilities=int(float(metrics.get("vulnerabilities", 0) or 0)),
-            code_smells=int(float(metrics.get("code_smells", 0) or 0)),
-            url=f"https://sonarcloud.io/dashboard?id={key}",
-        ))
+        projects.append(
+            QualityProject(
+                project_key=key,
+                organization=comp.get("organization", "diegomad14"),
+                quality_gate_status=gate_data.get("projectStatus", {}).get(
+                    "status", "UNKNOWN"
+                ),
+                coverage=float(metrics.get("coverage", 0) or 0),
+                bugs=int(float(metrics.get("bugs", 0) or 0)),
+                vulnerabilities=int(float(metrics.get("vulnerabilities", 0) or 0)),
+                code_smells=int(float(metrics.get("code_smells", 0) or 0)),
+                url=f"https://sonarcloud.io/dashboard?id={key}",
+            )
+        )
 
     if not projects:
         projects = [

@@ -7,7 +7,6 @@
   "items": [
     {
       "project_id": "cgm-assistant-prod",
-      "app": "cgm-integration-platform",
       "service_name": "cgm-sanplat-api",
       "gcp_service": "Cloud Run",
       "cost": 12.34,
@@ -16,7 +15,6 @@
     },
     {
       "project_id": "cgm-assistant-prod",
-      "app": "cgm-integration-platform",
       "service_name": "cgm-sanplat-web",
       "gcp_service": "Cloud Run",
       "cost": 8.50,
@@ -25,7 +23,6 @@
     },
     {
       "project_id": "cgm-assistant-prod",
-      "app": "cgm-integration-platform",
       "service_name": "cgm-sanplat-api",
       "gcp_service": "Cloud SQL",
       "cost": 45.00,
@@ -34,7 +31,6 @@
     },
     {
       "project_id": "cgm-assistant-prod",
-      "app": "cgm-integration-platform",
       "service_name": "cgm-sanplat-api",
       "gcp_service": "Secret Manager",
       "cost": 1.20,
@@ -43,7 +39,6 @@
     },
     {
       "project_id": "cgm-assistant-prod",
-      "app": "",
       "service_name": "",
       "gcp_service": "Compute Engine",
       "cost": 3.50,

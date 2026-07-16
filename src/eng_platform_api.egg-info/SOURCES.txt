@@ -24,9 +24,13 @@ src/eng_platform_api/services/gcp_billing_bigquery.py
 src/eng_platform_api/services/gcp_cloud_run.py
 src/eng_platform_api/services/gcp_monitoring.py
 src/eng_platform_api/services/github_actions.py
+src/eng_platform_api/services/quality_store.py
+src/eng_platform_api/services/releases_store.py
 src/eng_platform_api/services/service_factory.py
 src/eng_platform_api/services/sonarqube.py
 tests/test_catalog.py
 tests/test_costs_sql.py
 tests/test_health.py
+tests/test_quality.py
+tests/test_releases.py
 tests/test_service_factory.py
