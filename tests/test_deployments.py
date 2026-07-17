@@ -495,6 +495,101 @@ def test_start_rollback_dispatches_with_independent_service_configuration():
     assert inputs["project_id"] == "cgm-assistant-prod"
 
 
+def test_refresh_recaptures_production_revision_after_run_id_already_cached():
+    """A poll made while the deploy was still running caches github_run_id
+    before production_revision is posted; a later poll must still pick it up
+    instead of short-circuiting on the cached run id."""
+    from eng_platform_api.services import github_deployments
+
+    item = DeploymentItem(
+        id="300",
+        service_name="eng-platform-api",
+        repository="diegomad14/gcp-engineering-platform-api",
+        tag="v0.9.0",
+        sha="c" * 40,
+        status="PROMOTING",
+        current_stage="promote",
+        stages=github_deployments.default_stages(),
+        created_at="2026-07-17T12:00:00+00:00",
+        updated_at="2026-07-17T12:00:00+00:00",
+        github_deployment_id=900,
+        github_run_id=901,
+    )
+    statuses_after_completion = [
+        SimpleNamespace(
+            log_url="",
+            target_url="",
+            description="production_revision=eng-platform-api-00099-zzz",
+            environment_url="https://prod.example",
+        ),
+    ]
+    run = SimpleNamespace(
+        id=901,
+        html_url="https://github.com/diegomad14/repo/actions/runs/901",
+        updated_at=datetime(2026, 7, 17, 12, 6, 0),
+        conclusion="success",
+        jobs=lambda: [],
+    )
+    repo = mock.MagicMock()
+    repo.get_deployment.return_value.get_statuses.return_value = (
+        statuses_after_completion
+    )
+    repo.get_workflow_run.return_value = run
+    github = mock.MagicMock()
+    github.get_repo.return_value = repo
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        result = github_deployments.refresh(item)
+
+    assert result.production_revision == "eng-platform-api-00099-zzz"
+    assert result.status == "SUCCEEDED"
+    repo.get_deployment.assert_called_once_with(900)
+
+
+def test_refresh_does_not_recheck_statuses_once_production_revision_known():
+    """Once production_revision is captured, refresh should not keep polling
+    GitHub Deployment statuses on every subsequent call."""
+    from eng_platform_api.services import github_deployments
+
+    item = DeploymentItem(
+        id="301",
+        service_name="eng-platform-api",
+        repository="diegomad14/gcp-engineering-platform-api",
+        tag="v0.9.0",
+        sha="c" * 40,
+        status="SUCCEEDED",
+        current_stage="complete",
+        stages=github_deployments.default_stages(),
+        created_at="2026-07-17T12:00:00+00:00",
+        updated_at="2026-07-17T12:00:00+00:00",
+        github_deployment_id=900,
+        github_run_id=901,
+        production_revision="eng-platform-api-00099-zzz",
+    )
+    run = SimpleNamespace(
+        id=901,
+        html_url="https://github.com/diegomad14/repo/actions/runs/901",
+        updated_at=datetime(2026, 7, 17, 12, 6, 0),
+        conclusion="success",
+        jobs=lambda: [],
+    )
+    repo = mock.MagicMock()
+    repo.get_workflow_run.return_value = run
+    github = mock.MagicMock()
+    github.get_repo.return_value = repo
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        github_deployments.refresh(item)
+
+    repo.get_deployment.assert_not_called()
+
+
 def test_refresh_marks_standalone_rollback_deployment_as_rolled_back():
     from eng_platform_api.services import github_deployments
 
