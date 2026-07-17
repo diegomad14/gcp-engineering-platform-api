@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import os
 import secrets
 from typing import Annotated
 from urllib.parse import urlparse
@@ -43,6 +44,16 @@ def _safe_return_url(value: str) -> str:
     return value
 
 
+def _callback_url(request: Request) -> str:
+    """Construct the OAuth callback URL using the API's public HTTPS origin."""
+    api_origin = urlparse(
+        os.getenv("ENG_PLATFORM_API_ORIGIN", str(request.base_url).rstrip("/"))
+    )
+    # Force HTTPS in production; Cloud Run proxies requests internally as HTTP
+    scheme = "https" if not config.mock_mode else api_origin.scheme
+    return f"{scheme}://{api_origin.netloc}{request.url_for('github_callback')}"
+
+
 @router.get("/me", response_model=AuthSession)
 async def current_session(request: Request):
     identity = get_identity(request)
@@ -76,7 +87,7 @@ async def github_login(
     request.session["oauth_return_url"] = _safe_return_url(next_url)
     client = AsyncOAuth2Client(
         client_id=config.auth.github_client_id,
-        redirect_uri=str(request.url_for("github_callback")),
+        redirect_uri=_callback_url(request),
     )
     authorization_url, _ = client.create_authorization_url(
         _AUTHORIZE_URL,
@@ -103,7 +114,7 @@ async def github_callback(request: Request):
     client = AsyncOAuth2Client(
         client_id=config.auth.github_client_id,
         client_secret=config.auth.github_client_secret,
-        redirect_uri=str(request.url_for("github_callback")),
+        redirect_uri=_callback_url(request),
     )
     token = await client.fetch_token(
         _TOKEN_URL,
