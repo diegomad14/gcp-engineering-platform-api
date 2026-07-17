@@ -57,6 +57,8 @@ env:
   ARTIFACT_REPOSITORY: ${{ inputs.artifact_repository }}
   BUILD_CONTEXT: ${{ inputs.build_context }}
   HEALTH_PATH: ${{ inputs.health_path }}
+  RELEASE_TAG: ${{ inputs.tag }}
+  GITHUB_DEPLOYMENT_ID: ${{ inputs.github_deployment_id }}
 
 jobs:
   verify-release:
@@ -72,19 +74,18 @@ jobs:
         id: release
         run: |
           set -euo pipefail
-          [[ "${{ inputs.tag }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
-          test "${{ inputs.service_name }}" = "$SERVICE_NAME"
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
           test -n "$PROJECT_ID"
           test -n "${{ vars.GCP_WIF_PROVIDER }}"
           test -n "${{ vars.GCP_WIF_SERVICE_ACCOUNT }}"
-          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$ARTIFACT_REPOSITORY/$IMAGE_NAME:${{ inputs.tag }}"
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$ARTIFACT_REPOSITORY/$IMAGE_NAME:$RELEASE_TAG"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
       - name: Mark GitHub deployment in progress
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh api --method POST \
-            "repos/${{ github.repository }}/deployments/${{ inputs.github_deployment_id }}/statuses" \
+            "repos/${{ github.repository }}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
             -f state=in_progress \
             -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             -f description='Release verification passed' >/dev/null
@@ -132,7 +133,7 @@ jobs:
         id: candidate
         run: |
           set -euo pipefail
-          TAG="candidate-${{ inputs.tag }}"
+          TAG="candidate-$RELEASE_TAG"
           TAG="${TAG//./-}"
           gcloud run services update-traffic "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --set-tags="$TAG=${{ steps.deploy.outputs.revision }}" --quiet
           URL=$(gcloud run services describe "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --format=json | python3 -c 'import json,sys; d=json.load(sys.stdin); tag=sys.argv[1]; rows=d.get("status",{}).get("traffic",[]); print(next((r.get("url","") for r in rows if r.get("tag")==tag or r.get("tagName")==tag), ""))' "$TAG")
@@ -151,7 +152,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh api --method POST \
-            "repos/${{ github.repository }}/deployments/${{ inputs.github_deployment_id }}/statuses" \
+            "repos/${{ github.repository }}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
             -f state=in_progress \
             -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             -f environment_url="${{ needs.deploy-candidate.outputs.url }}" \
@@ -198,7 +199,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh api --method POST \
-            "repos/${{ github.repository }}/deployments/${{ inputs.github_deployment_id }}/statuses" \
+            "repos/${{ github.repository }}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
             -f state=success \
             -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             -f environment_url="${{ needs.promote.outputs.production_url }}" \
@@ -225,7 +226,7 @@ jobs:
         run: |
           STATE=$([ "${{ job.status }}" = success ] && echo failure || echo error)
           gh api --method POST \
-            "repos/${{ github.repository }}/deployments/${{ inputs.github_deployment_id }}/statuses" \
+            "repos/${{ github.repository }}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
             -f state="$STATE" \
             -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             -f description='Production validation failed; rollback executed' >/dev/null
@@ -241,7 +242,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh api --method POST \
-            "repos/${{ github.repository }}/deployments/${{ inputs.github_deployment_id }}/statuses" \
+            "repos/${{ github.repository }}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
             -f state=failure \
             -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             -f description='Deployment failed before production traffic changed' >/dev/null

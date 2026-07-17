@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import secrets
+from typing import Annotated
 from urllib.parse import urlparse
 
 from authlib.integrations.httpx_client import (  # type: ignore[import-untyped]
@@ -59,7 +60,8 @@ async def current_session(request: Request):
 
 @router.get("/login")
 async def github_login(
-    request: Request, next_url: str = Query(default="", alias="next")
+    request: Request,
+    next_url: Annotated[str, Query(alias="next")] = "",
 ):
     if config.mock_mode:
         request.session["github_login"] = "diegomad14"

@@ -33,18 +33,18 @@ app = FastAPI(
 )
 
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[config.auth.frontend_url],
-    allow_credentials=True,
-    allow_methods=["GET", "POST"],
-    allow_headers=["*"],
-)
-app.add_middleware(
     SessionMiddleware,
     secret_key=config.auth.session_secret or secrets.token_urlsafe(32),
     same_site="lax" if config.mock_mode else "none",
     https_only=not config.mock_mode,
     max_age=60 * 60 * 12,
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[config.auth.frontend_url],
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
 )
 
 app.include_router(auth.router)

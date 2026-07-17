@@ -53,6 +53,13 @@ async def list_service_tags(
     "/services/{service_name}/deployments",
     response_model=DeploymentItem,
     status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        401: {"description": "GitHub authentication required"},
+        403: {"description": "Operator is not allowlisted"},
+        404: {"description": "Service or tag not found"},
+        409: {"description": "Tag, idempotency, or active deployment conflict"},
+        502: {"description": "GitHub is unavailable"},
+    },
 )
 async def create_deployment(
     service_name: str,

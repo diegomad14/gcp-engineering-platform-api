@@ -98,6 +98,14 @@ GitHub login and avatar URL; the OAuth access token is not persisted. Deploy
 writes require an authenticated, allowlisted operator. Mock mode signs in as
 `diegomad14` for local and end-to-end tests.
 
+## SonarCloud and coverage
+
+CI writes Python coverage in Cobertura XML (`coverage.xml`) before the pinned
+SonarQube scanner runs. `sonar-project.properties` imports that report and waits
+for the Quality Gate, so a red Sonar result fails `quality` and blocks merge.
+Agents must additionally run `python scripts/quality/sonar_agent_check.py
+--pull-request <PR_NUMBER>` before completing PR work.
+
 ## Release request
 
 ```json
