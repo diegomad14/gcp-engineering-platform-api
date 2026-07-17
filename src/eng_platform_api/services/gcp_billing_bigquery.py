@@ -79,7 +79,9 @@ _ITEMS_DIMENSIONS = {
 }
 
 
-def _build_items_sql(table_fqn: str, where_clause: str, group_by: str = "resource") -> str:
+def _build_items_sql(
+    table_fqn: str, where_clause: str, group_by: str = "resource"
+) -> str:
     """Build the line-items query for one of the `_ITEMS_DIMENSIONS` groupings."""
     select_dims, group_clause = _ITEMS_DIMENSIONS[group_by]
     return f"""
