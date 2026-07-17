@@ -75,7 +75,7 @@ deployment:
   enabled: true
   workflow_file: platform-deploy.yml
   image_name: cgm-sanplat-web
-  artifact_repository: cloud-run-source-deploy
+  artifact_repository: cgm-sanplat-repo
   build_context: frontend
   health_path: /
 ```

@@ -9,7 +9,7 @@ release_model: manual
 deployment:
   workflow_file: platform-deploy.yml
   image_name: communications-ms
-  artifact_repository: cloud-run-source-deploy
+  artifact_repository: cgm-sanplat-repo
   build_context: .
   health_path: /health
 finops:

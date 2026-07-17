@@ -25,7 +25,7 @@ class ServiceDeploymentConfig(BaseModel):
     enabled: bool = True
     workflow_file: str = "platform-deploy.yml"
     image_name: str = ""
-    artifact_repository: str = "cloud-run-source-deploy"
+    artifact_repository: str = "cgm-sanplat-repo"
     build_context: str = "."
     health_path: str = "/"
 
