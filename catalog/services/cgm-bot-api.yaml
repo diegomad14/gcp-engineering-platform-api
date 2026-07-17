@@ -9,7 +9,7 @@ release_model: manual
 deployment:
   workflow_file: platform-deploy.yml
   image_name: cgm-bot-api
-  artifact_repository: cloud-run-source-deploy
+  artifact_repository: cgm-sanplat-repo
   build_context: services/cgm-bot-api
   health_path: /health
 finops:

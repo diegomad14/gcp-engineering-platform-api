@@ -9,7 +9,7 @@ release_model: candidate-promote-rollback
 deployment:
   workflow_file: platform-deploy.yml
   image_name: eng-platform-api
-  artifact_repository: cloud-run-source-deploy
+  artifact_repository: cgm-sanplat-repo
   build_context: .
   health_path: /health
 finops:
