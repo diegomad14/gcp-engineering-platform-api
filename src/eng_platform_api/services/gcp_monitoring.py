@@ -212,9 +212,9 @@ def _mock_metrics_for(service_names: list[str]) -> list[CloudRunServiceMetrics]:
 
 def get_metrics_summary() -> MetricsSummary:
     """Return metrics summary for Cloud Run services."""
-    from .catalog import _list_cloud_run_services
+    from .catalog import get_services
 
-    services = _list_cloud_run_services()
+    services = get_services().services
     service_names = [s.service_name for s in services]
     metrics = get_metrics_for_services(service_names)
     return MetricsSummary(period="last_24h", services=metrics)

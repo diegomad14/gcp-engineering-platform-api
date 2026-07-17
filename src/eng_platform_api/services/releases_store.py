@@ -5,11 +5,16 @@ import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 from pydantic import ValidationError
 
-from ..models import ReleaseCreateRequest, ReleaseItem, ServiceRevision
+from ..models import (
+    ReleaseCreateRequest,
+    ReleaseItem,
+    ReleaseServiceAction,
+    ServiceRevision,
+)
 
 _DEFAULT_STORE_PATH = Path(os.getenv("RELEASES_STORE_PATH", "data/releases.json"))
 _store_lock = threading.RLock()
@@ -81,7 +86,7 @@ def _item(
             version=version,
             status=status,
             revision=revision,
-            action=action,
+            action=cast(ReleaseServiceAction, action),
             github_run_url=github_run_url,
             created_at=created_at,
         )

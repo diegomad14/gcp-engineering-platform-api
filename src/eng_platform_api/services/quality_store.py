@@ -13,7 +13,9 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..models import QualityReport, QualityReportCreate
+from collections.abc import Iterable
+
+from ..models import QualityGateStatus, QualityReport, QualityReportCreate
 
 _lock = threading.RLock()
 
@@ -47,9 +49,9 @@ def _write_object(name: str, data: dict) -> None:
     bucket_name = _bucket_name()
     payload = json.dumps(data, ensure_ascii=False, indent=2)
     if bucket_name:
-        from google.cloud import storage
+        from google.cloud.storage import Client
 
-        storage.Client().bucket(bucket_name).blob(name).upload_from_string(
+        Client().bucket(bucket_name).blob(name).upload_from_string(
             payload,
             content_type="application/json",
         )
@@ -65,11 +67,11 @@ def _write_object(name: str, data: dict) -> None:
 def _read_object(name: str) -> dict | None:
     bucket_name = _bucket_name()
     if bucket_name:
-        from google.cloud import storage
+        from google.cloud.storage import Client
         from google.api_core.exceptions import NotFound
 
         try:
-            payload = storage.Client().bucket(bucket_name).blob(name).download_as_text()
+            payload = Client().bucket(bucket_name).blob(name).download_as_text()
         except NotFound:
             return None
     else:
@@ -92,9 +94,9 @@ def _list_latest_objects() -> list[dict]:
     prefix = f"{_prefix()}/latest/"
     values: list[dict] = []
     if bucket_name:
-        from google.cloud import storage
+        from google.cloud.storage import Client
 
-        for blob in storage.Client().list_blobs(bucket_name, prefix=prefix):
+        for blob in Client().list_blobs(bucket_name, prefix=prefix):
             try:
                 value = json.loads(blob.download_as_text())
             except (json.JSONDecodeError, OSError):
@@ -121,10 +123,10 @@ def _list_report_objects(service_name: str) -> list[dict]:
     prefix = f"{_prefix()}/reports/{_safe(service_name)}/"
     values: list[dict] = []
     if bucket_name:
-        from google.cloud import storage
+        from google.cloud.storage import Client
 
-        blobs = storage.Client().list_blobs(bucket_name, prefix=prefix)
-        payloads = (blob.download_as_text() for blob in blobs)
+        blobs = Client().list_blobs(bucket_name, prefix=prefix)
+        payloads: Iterable[str] = (blob.download_as_text() for blob in blobs)
     else:
         root = _local_root() / prefix
         payloads = (
@@ -142,7 +144,7 @@ def _list_report_objects(service_name: str) -> list[dict]:
     return values
 
 
-def _status(payload: QualityReportCreate) -> str:
+def _status(payload: QualityReportCreate) -> QualityGateStatus:
     coverage_failed = (
         payload.coverage_threshold is not None
         and payload.coverage is not None

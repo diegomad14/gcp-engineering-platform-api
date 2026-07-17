@@ -30,6 +30,10 @@ class MonitoringConfig:
 class GitHubConfig:
     enabled: bool = False
     token: str = ""
+    app_id: str = ""
+    installation_id: str = ""
+    private_key: str = ""
+    deployment_workflow: str = "platform-deploy.yml"
 
 
 @dataclass
@@ -84,6 +88,14 @@ def load_config() -> PlatformConfig:
     github = GitHubConfig(
         enabled=os.getenv("ENG_PLATFORM_GITHUB_ENABLED", "false").lower() == "true",
         token=os.getenv("ENG_PLATFORM_GITHUB_TOKEN", ""),
+        app_id=os.getenv("ENG_PLATFORM_GITHUB_APP_ID", ""),
+        installation_id=os.getenv("ENG_PLATFORM_GITHUB_INSTALLATION_ID", ""),
+        private_key=os.getenv("ENG_PLATFORM_GITHUB_PRIVATE_KEY", "").replace(
+            "\\n", "\n"
+        ),
+        deployment_workflow=os.getenv(
+            "ENG_PLATFORM_GITHUB_DEPLOYMENT_WORKFLOW", "platform-deploy.yml"
+        ),
     )
 
     sonarqube = SonarQubeConfig(

@@ -58,7 +58,7 @@
     },
     {
       "service_name": "eng-platform-api",
-      "repository": "diegomad14/gcp-engineering-platform",
+      "repository": "diegomad14/gcp-engineering-platform-api",
       "owner": "platform",
       "cost_center": "platform",
       "project_id": "cgm-assistant-prod",
@@ -70,7 +70,7 @@
     },
     {
       "service_name": "eng-platform-web",
-      "repository": "diegomad14/gcp-engineering-platform",
+      "repository": "diegomad14/gcp-engineering-platform-web",
       "owner": "platform",
       "cost_center": "platform",
       "project_id": "cgm-assistant-prod",

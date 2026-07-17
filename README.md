@@ -23,6 +23,10 @@ python3 -m pytest -q
 | GET | `/api/releases` | Service release rows |
 | GET | `/api/releases/summary` | Stored and GitHub-discovered release rows |
 | GET | `/api/releases/{service_name}/latest` | Latest release for one service |
+| GET | `/api/services/{service_name}/tags` | Paginated eligible GitHub release tags |
+| POST | `/api/services/{service_name}/deployments` | Idempotently dispatch a service deployment |
+| GET | `/api/services/{service_name}/deployments` | Deployment history reconstructed from GitHub |
+| GET | `/api/deployments/{deployment_id}` | Jobs, stages, URLs and evidence for one deployment |
 | GET | `/api/costs/summary` | Billing summary |
 | GET | `/api/costs/by-service` | Billing rows by service |
 | POST | `/api/quality/reports` | Register normalized CI evidence (Bearer token required) |
@@ -41,6 +45,18 @@ python3 -m pytest -q
 
 The Cloud Run runtime service account needs object create/read permissions on the
 configured bucket. Reports are idempotent by `service_name + commit_sha`.
+
+## GitHub deployment configuration
+
+- `ENG_PLATFORM_GITHUB_ENABLED=true`
+- `ENG_PLATFORM_GITHUB_TOKEN` for development, or the GitHub App variables
+  `ENG_PLATFORM_GITHUB_APP_ID`, `ENG_PLATFORM_GITHUB_INSTALLATION_ID` and
+  `ENG_PLATFORM_GITHUB_PRIVATE_KEY` in production.
+- `ENG_PLATFORM_GITHUB_DEPLOYMENT_WORKFLOW`, default `platform-deploy.yml`.
+- `ENG_PLATFORM_DEPLOYMENT_FIRESTORE_COLLECTION` enables durable minimal
+  metadata; local development falls back to `data/deployments.json`.
+
+GitHub remains authoritative for tags, workflow state, jobs and logs.
 
 ## Release request
 

@@ -18,9 +18,11 @@ def get_identity(request: Request) -> str:
     MVP: Returns 'anonymous' since no auth is configured.
     Production: Extract from IAP/OAuth headers.
     """
-    # Future: extract from X-Goog-Authenticated-User-Email (IAP)
-    # Future: extract from Authorization header (OAuth)
-    return "anonymous"
+    iap_identity = request.headers.get("X-Goog-Authenticated-User-Email", "")
+    if iap_identity:
+        return iap_identity.removeprefix("accounts.google.com:")
+    github_identity = request.headers.get("X-GitHub-Login", "")
+    return github_identity or "anonymous"
 
 
 def verify_no_secrets_in_response(data: dict) -> dict:

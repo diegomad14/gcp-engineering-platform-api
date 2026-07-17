@@ -107,6 +107,83 @@ class ReleaseSummary(BaseModel):
     total_releases: int = 0
 
 
+# ── GitHub-native deployments ──────────────────────────────────────────
+
+DeploymentStatus = Literal[
+    "QUEUED",
+    "VERIFYING_RELEASE",
+    "BUILDING",
+    "DEPLOYING_CANDIDATE",
+    "VALIDATING_CANDIDATE",
+    "PROMOTING",
+    "VALIDATING_PRODUCTION",
+    "SUCCEEDED",
+    "FAILED",
+    "ROLLING_BACK",
+    "ROLLED_BACK",
+    "ROLLBACK_FAILED",
+]
+DeploymentStageStatus = Literal["pending", "running", "succeeded", "failed", "skipped"]
+
+
+class ReleaseTag(BaseModel):
+    name: str
+    sha: str
+    created_at: str = ""
+    url: str = ""
+    eligible: bool = True
+    reason: str = ""
+
+
+class ReleaseTagPage(BaseModel):
+    items: list[ReleaseTag] = Field(default_factory=list)
+    next_cursor: str | None = None
+
+
+class DeploymentStage(BaseModel):
+    key: str
+    label: str
+    status: DeploymentStageStatus = "pending"
+    started_at: str = ""
+    completed_at: str = ""
+    duration_seconds: float | None = None
+    details: str = ""
+
+
+class DeploymentCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tag: str = Field(min_length=1, max_length=128)
+
+
+class DeploymentItem(BaseModel):
+    id: str
+    service_name: str
+    repository: str
+    tag: str
+    sha: str = ""
+    status: DeploymentStatus = "QUEUED"
+    current_stage: str = "queued"
+    stages: list[DeploymentStage] = Field(default_factory=list)
+    candidate_revision: str = ""
+    production_revision: str = ""
+    candidate_url: str = ""
+    production_url: str = ""
+    requested_by: str = "anonymous"
+    created_at: str = ""
+    updated_at: str = ""
+    github_deployment_id: int | None = None
+    github_run_id: int | None = None
+    github_run_url: str = ""
+    logs_url: str = ""
+    error: str = ""
+
+
+class DeploymentList(BaseModel):
+    items: list[DeploymentItem] = Field(default_factory=list)
+    total: int = 0
+
+
 # ── Quality ──────────────────────────────────────────────────────────
 
 QualityGateStatus = Literal["PASSED", "FAILED", "RUNNING", "STALE", "NOT_CONFIGURED"]

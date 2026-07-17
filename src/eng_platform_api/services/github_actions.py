@@ -1,36 +1,19 @@
-"""GitHub Actions service — discovered runs expanded to service rows."""
+"""Legacy release summary projected from GitHub Actions.
 
-import json
-import os
-import urllib.request
-from typing import Any
+New deployment screens use ``github_deployments`` directly. This adapter keeps
+the existing releases endpoint backward compatible without a second HTTP
+client or hand-written authentication implementation.
+"""
 
 from ..config import config
 from ..models import ReleaseItem, ReleaseSummary
-from . import catalog
-
-_GITHUB_API = "https://api.github.com"
+from . import catalog, github_deployments
 
 
-def _github_request(path: str) -> Any:
-    req = urllib.request.Request(f"{_GITHUB_API}{path}")
-    req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("User-Agent", "eng-platform-api")
-    token = config.github.token or os.getenv("GITHUB_TOKEN", "")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            return json.loads(response.read())
-    except Exception:
-        return None
-
-
-def _fetch_recent_runs(repository: str, limit: int = 5) -> list[dict]:
-    data = _github_request(
-        f"/repos/{repository}/actions/runs?per_page={limit}&status=completed"
-    )
-    return data.get("workflow_runs", []) if data else []
+def _fetch_recent_runs(repository: str, limit: int = 5) -> list[object]:
+    repo = github_deployments.github_client().get_repo(repository)
+    runs = repo.get_workflow_runs(status="completed")
+    return [run for index, run in enumerate(runs) if index < limit]
 
 
 def get_release_summary() -> ReleaseSummary:
@@ -47,20 +30,25 @@ def get_release_summary() -> ReleaseSummary:
     )
     for repository in repositories:
         services = catalog.get_services_by_repository(repository)
-        for run in _fetch_recent_runs(repository):
+        try:
+            runs = _fetch_recent_runs(repository)
+        except Exception:
+            continue
+        for run in runs:
             for service in services:
+                conclusion = getattr(run, "conclusion", "")
                 recent.append(
                     ReleaseItem(
                         service_name=service.service_name,
                         repository=repository,
-                        version=run.get("head_branch", "")[:40],
-                        status="completed"
-                        if run.get("conclusion") == "success"
-                        else "failed",
+                        version=(getattr(run, "head_branch", "") or "")[:40],
+                        status="completed" if conclusion == "success" else "failed",
                         revision="",
                         action="missing",
-                        github_run_url=run.get("html_url", ""),
-                        created_at=run.get("created_at", ""),
+                        github_run_url=getattr(run, "html_url", "") or "",
+                        created_at=github_deployments._iso(
+                            getattr(run, "created_at", None)
+                        ),
                     )
                 )
 
