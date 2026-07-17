@@ -172,6 +172,7 @@ class DeploymentItem(BaseModel):
     repository: str
     tag: str
     sha: str = ""
+    kind: Literal["deploy", "rollback"] = "deploy"
     status: DeploymentStatus = "QUEUED"
     current_stage: str = "queued"
     stages: list[DeploymentStage] = Field(default_factory=list)

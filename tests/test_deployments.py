@@ -60,6 +60,25 @@ def _deployment():
     )
 
 
+def _succeeded_deployment(
+    tag="v0.4.0",
+    production_revision="eng-platform-api-00010-abc",
+    created_at="2026-07-10T12:00:00+00:00",
+    status="SUCCEEDED",
+):
+    return DeploymentItem(
+        id=f"id-{tag}",
+        service_name="eng-platform-api",
+        repository="diegomad14/gcp-engineering-platform-api",
+        tag=tag,
+        sha="b" * 40,
+        status=status,
+        production_revision=production_revision,
+        created_at=created_at,
+        updated_at=created_at,
+    )
+
+
 def test_list_tags_is_service_oriented(client):
     with mock.patch(
         "eng_platform_api.routers.deployments.github_deployments.list_tags",
@@ -293,6 +312,136 @@ def test_dispatch_uses_independent_service_catalog_configuration():
     assert inputs["build_context"] == "frontend"
     assert inputs["health_path"] == "/"
     assert inputs["project_id"] == "cgm-assistant-prod"
+
+
+def test_rollback_target_must_exist(client):
+    response = client.post(
+        "/api/services/eng-platform-api/deployments/missing/rollback",
+        headers={"Idempotency-Key": "rb-missing"},
+    )
+    assert response.status_code == 404
+
+
+def test_rollback_target_must_be_succeeded(client):
+    from eng_platform_api.services import deployment_store
+
+    target = _succeeded_deployment(status="FAILED")
+    deployment_store.save(target, "")
+    response = client.post(
+        f"/api/services/eng-platform-api/deployments/{target.id}/rollback",
+        headers={"Idempotency-Key": "rb-failed"},
+    )
+    assert response.status_code == 409
+
+
+def test_rollback_dispatches_and_persists(client):
+    from eng_platform_api.services import deployment_store
+
+    target = _succeeded_deployment()
+    deployment_store.save(target, "")
+    rollback_item = DeploymentItem(
+        id="99",
+        service_name="eng-platform-api",
+        repository="diegomad14/gcp-engineering-platform-api",
+        tag=target.tag,
+        sha=target.sha,
+        kind="rollback",
+        created_at="2026-07-17T12:00:00+00:00",
+        updated_at="2026-07-17T12:00:00+00:00",
+        github_deployment_id=99,
+    )
+    with mock.patch(
+        "eng_platform_api.routers.deployments.github_deployments.start_rollback",
+        return_value=rollback_item,
+    ) as start:
+        response = client.post(
+            f"/api/services/eng-platform-api/deployments/{target.id}/rollback",
+            headers={"Idempotency-Key": "rb-ok"},
+        )
+    assert response.status_code == 202
+    assert response.json()["kind"] == "rollback"
+    assert start.call_args.kwargs["target"].id == target.id
+
+
+def test_rollback_idempotent_replay(client):
+    from eng_platform_api.services import deployment_store
+
+    target = _succeeded_deployment()
+    deployment_store.save(target, "")
+    rollback_item = DeploymentItem(
+        id="100",
+        service_name="eng-platform-api",
+        repository="diegomad14/gcp-engineering-platform-api",
+        tag=target.tag,
+        kind="rollback",
+        created_at="2026-07-17T12:00:00+00:00",
+        updated_at="2026-07-17T12:00:00+00:00",
+    )
+    with mock.patch(
+        "eng_platform_api.routers.deployments.github_deployments.start_rollback",
+        return_value=rollback_item,
+    ) as start:
+        headers = {"Idempotency-Key": "rb-replay"}
+        first = client.post(
+            f"/api/services/eng-platform-api/deployments/{target.id}/rollback",
+            headers=headers,
+        )
+        second = client.post(
+            f"/api/services/eng-platform-api/deployments/{target.id}/rollback",
+            headers=headers,
+        )
+    assert first.json()["id"] == second.json()["id"]
+    assert start.call_count == 1
+
+
+def test_rollback_rejected_when_active_deployment_exists(client):
+    from eng_platform_api.services import deployment_store
+
+    target = _succeeded_deployment()
+    deployment_store.save(target, "")
+    deployment_store.save(_deployment(), "active-deploy")  # defaults to QUEUED
+    response = client.post(
+        f"/api/services/eng-platform-api/deployments/{target.id}/rollback",
+        headers={"Idempotency-Key": "rb-blocked"},
+    )
+    assert response.status_code == 409
+    assert "already active" in response.json()["detail"]
+
+
+def test_list_tags_eligibility_follows_current_live_tag():
+    from eng_platform_api.services import deployment_store, github_deployments
+
+    superseded = _succeeded_deployment(
+        tag="v0.4.0", created_at="2026-07-01T12:00:00+00:00"
+    )
+    live = _succeeded_deployment(
+        tag="v0.5.0", created_at="2026-07-16T12:00:00+00:00"
+    )
+    deployment_store.save(superseded, "")
+    deployment_store.save(live, "")
+
+    tags = [
+        SimpleNamespace(name="v0.5.0", commit=SimpleNamespace(sha="c" * 40)),
+        SimpleNamespace(name="v0.4.0", commit=SimpleNamespace(sha="d" * 40)),
+    ]
+    repository = mock.MagicMock()
+    repository.get_tags.return_value = tags
+    repository.get_commit.side_effect = RuntimeError("no commit metadata in test")
+    github = mock.MagicMock()
+    github.get_repo.return_value = repository
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        page = github_deployments.list_tags(
+            "diegomad14/gcp-engineering-platform-api", "eng-platform-api", limit=10
+        )
+
+    by_name = {tag.name: tag for tag in page.items}
+    assert by_name["v0.5.0"].eligible is False
+    assert by_name["v0.5.0"].reason == "This tag is already live in production"
+    assert by_name["v0.4.0"].eligible is True
 
 
 def test_deployment_statuses_supply_run_and_revision_evidence():

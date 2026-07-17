@@ -40,11 +40,14 @@ _STAGE_TO_STATUS = {
     "validate-production": "VALIDATING_PRODUCTION",
     "rollback": "ROLLING_BACK",
 }
+_ROLLBACK_STAGES = [("rollback", "Roll back production")]
 TERMINAL_STATUSES = frozenset({"SUCCEEDED", "FAILED", "ROLLED_BACK", "ROLLBACK_FAILED"})
+_LIVE_STATUSES = frozenset({"SUCCEEDED", "ROLLED_BACK"})
 
 
-def default_stages() -> list[DeploymentStage]:
-    return [DeploymentStage(key=key, label=label) for key, label in _STAGES]
+def default_stages(kind: str = "deploy") -> list[DeploymentStage]:
+    stages = _ROLLBACK_STAGES if kind == "rollback" else _STAGES
+    return [DeploymentStage(key=key, label=label) for key, label in stages]
 
 
 def github_client() -> Github:
@@ -90,7 +93,7 @@ def list_tags(
                 created_at=f"2026-07-{16 - index:02d}T12:00:00+00:00",
                 url=f"https://github.com/{repository}/releases/tag/v0.{minor}.{patch}",
                 eligible=index != 2,
-                reason="This tag is already deployed successfully"
+                reason="This tag is already live in production"
                 if index == 2
                 else "",
             )
@@ -110,6 +113,9 @@ def list_tags(
     active = next(
         (item for item in previous if item.status not in TERMINAL_STATUSES), None
     )
+    current_live_tag = next(
+        (item.tag for item in previous if item.status in _LIVE_STATUSES), None
+    )
     for index, tag in enumerate(tags):
         if index < offset:
             continue
@@ -126,11 +132,9 @@ def list_tags(
         if eligible and active is not None:
             eligible = False
             reason = f"Deployment {active.tag} is already active for this service"
-        elif eligible and any(
-            item.tag == tag.name and item.status == "SUCCEEDED" for item in previous
-        ):
+        elif eligible and tag.name == current_live_tag:
             eligible = False
-            reason = "This tag is already deployed successfully"
+            reason = "This tag is already live in production"
         page.append(
             ReleaseTag(
                 name=tag.name,
@@ -224,6 +228,76 @@ def start_deployment(
     )
 
 
+def start_rollback(
+    *, service: CatalogService, target: DeploymentItem, requested_by: str
+) -> DeploymentItem:
+    """Dispatch a traffic-only rollback to a previously succeeded revision."""
+    repository = service.repository
+    service_name = service.service_name
+    now = datetime.now(timezone.utc).isoformat()
+    if config.mock_mode:
+        deployment_id = str(int(datetime.now(timezone.utc).timestamp() * 1000))
+        return DeploymentItem(
+            id=deployment_id,
+            service_name=service_name,
+            repository=repository,
+            tag=target.tag,
+            sha=target.sha,
+            kind="rollback",
+            status="QUEUED",
+            current_stage="queued",
+            stages=default_stages("rollback"),
+            requested_by=requested_by,
+            created_at=now,
+            updated_at=now,
+        )
+    repo = github_client().get_repo(repository)
+    github_deployment = repo.create_deployment(
+        ref=target.tag,
+        task="rollback",
+        auto_merge=False,
+        required_contexts=[],
+        environment=f"{service_name}-production",
+        description=(
+            f"Rollback {service_name} to {target.tag} "
+            f"({target.production_revision})"
+        ),
+        payload={"service_name": service_name, "tag": target.tag},
+    )
+    github_deployment.create_status(
+        state="queued",
+        description="Rollback queued by Engineering Platform",
+    )
+    workflow = repo.get_workflow(config.github.rollback_workflow)
+    workflow.create_dispatch(
+        ref=target.tag,
+        inputs={
+            "service_name": service_name,
+            "target_tag": target.tag,
+            "target_revision": target.production_revision,
+            "github_deployment_id": str(github_deployment.id),
+            "project_id": service.project_id,
+            "region": service.region,
+            "health_path": service.deployment.health_path,
+        },
+    )
+    return DeploymentItem(
+        id=str(github_deployment.id),
+        service_name=service_name,
+        repository=repository,
+        tag=target.tag,
+        sha=target.sha,
+        kind="rollback",
+        status="QUEUED",
+        current_stage="queued",
+        stages=default_stages("rollback"),
+        requested_by=requested_by,
+        created_at=now,
+        updated_at=now,
+        github_deployment_id=github_deployment.id,
+    )
+
+
 def _job_stage(name: str) -> str | None:
     normalized = name.lower().replace("_", "-")
     aliases = {
@@ -299,14 +373,15 @@ def refresh(item: DeploymentItem) -> DeploymentItem:
     item.github_run_url = run.html_url
     item.logs_url = run.html_url
     item.updated_at = _iso(run.updated_at)
-    stages = {stage.key: stage for stage in default_stages()}
+    stages = {stage.key: stage for stage in default_stages(item.kind)}
     rollback_status = None
     for job in run.jobs():
         key = _job_stage(job.name)
         if key == "rollback":
             rollback_status = _stage_status(job)
-            continue
-        if key not in stages:
+            if key not in stages:
+                continue
+        elif key not in stages:
             continue
         stage = stages[key]
         stage.status = _stage_status(job)
