@@ -4,22 +4,37 @@ Requires Cloud Billing Export enabled in GCP Console:
 https://console.cloud.google.com/billing/01CBB5-464EAA-96C8AC
 """
 
+import time
 from datetime import date, timedelta
 from typing import Optional
 
 from google.cloud import bigquery
 
 from ..config import config
-from ..models import CostItem, CostPeriod, CostSummary
+from ..models import CostItem, CostPeriod, CostSummary, DailyCost, DailyCostSeries
 
 _PROJECT_ID = "cgm-assistant-prod"
 _DATASET = "billing_export"
 
+_TABLE_CACHE_TTL_SECONDS = 600
+_table_cache: Optional[tuple[float, str]] = None
+
 
 def _billing_table_exists() -> Optional[str]:
-    """Check if billing export table exists and return its full ID."""
+    """Check if billing export table exists and return its full ID.
+
+    Successful lookups are memoized for 10 minutes: the table name never
+    changes once the export is enabled, and `list_tables` would otherwise run
+    on every request. Misses are not cached so a transient failure recovers
+    on the next request.
+    """
+    global _table_cache
     if config.mock_mode:
         return None
+
+    now = time.monotonic()
+    if _table_cache and now - _table_cache[0] < _TABLE_CACHE_TTL_SECONDS:
+        return _table_cache[1]
 
     try:
         client = bigquery.Client(project=_PROJECT_ID)
@@ -28,13 +43,66 @@ def _billing_table_exists() -> Optional[str]:
         for table in tables:
             table_id = table.table_id
             if table_id.startswith("gcp_billing_export"):
-                return f"{_PROJECT_ID}.{_DATASET}.{table_id}"
+                table_fqn = f"{_PROJECT_ID}.{_DATASET}.{table_id}"
+                _table_cache = (now, table_fqn)
+                return table_fqn
         return None
     except Exception:
         return None
 
 
-def _query_billing(table_fqn: str, where_clause: str) -> tuple[list[CostItem], dict]:
+_CREDITS_SUM = "SUM(COALESCE((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0))"
+
+_ITEMS_DIMENSIONS = {
+    # Per-resource rows (Cloud Run service, SQL instance, secret, …).
+    "resource": (
+        "project.id AS project_id,\n"
+        "        service.description AS gcp_service,\n"
+        "        COALESCE(resource.name, '') AS service_name",
+        "GROUP BY project_id, gcp_service, service_name",
+    ),
+    # One row per GCP service (Cloud Run, Cloud SQL, …).
+    "service": (
+        "project.id AS project_id,\n"
+        "        service.description AS gcp_service,\n"
+        "        '' AS service_name",
+        "GROUP BY project_id, gcp_service",
+    ),
+    # One row per SKU; the SKU description takes the service_name slot so the
+    # response shape stays CostSummary.
+    "sku": (
+        "project.id AS project_id,\n"
+        "        service.description AS gcp_service,\n"
+        "        COALESCE(sku.description, '') AS service_name",
+        "GROUP BY project_id, gcp_service, service_name",
+    ),
+}
+
+
+def _build_items_sql(table_fqn: str, where_clause: str, group_by: str = "resource") -> str:
+    """Build the line-items query for one of the `_ITEMS_DIMENSIONS` groupings."""
+    select_dims, group_clause = _ITEMS_DIMENSIONS[group_by]
+    return f"""
+    WITH cost_data AS (
+      SELECT
+        {select_dims},
+        SUM(cost) AS cost,
+        {_CREDITS_SUM} AS credits,
+        SUM(cost) + {_CREDITS_SUM} AS net_cost
+      FROM `{table_fqn}`
+      WHERE {where_clause}
+      {group_clause}
+    )
+    SELECT * FROM cost_data
+    WHERE cost > 0.01 OR ABS(credits) > 0.01
+    ORDER BY net_cost DESC, cost DESC
+    LIMIT 50
+    """
+
+
+def _query_billing(
+    table_fqn: str, where_clause: str, group_by: str = "resource"
+) -> tuple[list[CostItem], dict]:
     """Execute real BigQuery cost query for the given ``where_clause`` window.
 
     Returns ``(items, totals)`` where:
@@ -48,31 +116,15 @@ def _query_billing(table_fqn: str, where_clause: str) -> tuple[list[CostItem], d
         covered by credits) would otherwise understate both cost and credits.
 
     ``where_clause`` is built by :func:`get_cost_summary` and already includes
-    the ``cost_type = 'regular'`` guard.
+    the ``cost_type = 'regular'`` guard. ``group_by`` picks the line-item
+    dimension (see `_ITEMS_DIMENSIONS`); totals are independent of it.
     """
-    items_query = f"""
-    WITH cost_data AS (
-      SELECT
-        project.id AS project_id,
-        service.description AS gcp_service,
-        COALESCE(resource.name, '') AS service_name,
-        SUM(cost) AS cost,
-        SUM(COALESCE((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)) AS credits,
-        SUM(cost) + SUM(COALESCE((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)) AS net_cost
-      FROM `{table_fqn}`
-      WHERE {where_clause}
-      GROUP BY project_id, gcp_service, service_name
-    )
-    SELECT * FROM cost_data
-    WHERE cost > 0.01 OR ABS(credits) > 0.01
-    ORDER BY net_cost DESC, cost DESC
-    LIMIT 50
-    """
+    items_query = _build_items_sql(table_fqn, where_clause, group_by)
 
     totals_query = f"""
     SELECT
       SUM(cost) AS total_cost,
-      SUM(COALESCE((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)) AS total_credits
+      {_CREDITS_SUM} AS total_credits
     FROM `{table_fqn}`
     WHERE {where_clause}
     """
@@ -114,7 +166,11 @@ def build_cost_query(
     group_by: str = "service",
     days: int = 30,
 ) -> str:
-    """Build a parametrized BigQuery cost query. Used by SQL templates."""
+    """Build a parametrized BigQuery cost query. Used by SQL templates.
+
+    Kept as a documented template; the live endpoints go through
+    :func:`_build_items_sql` / :func:`_query_billing` instead.
+    """
     table_fqn = (
         f"{_PROJECT_ID}.{_DATASET}.gcp_billing_export_resource_v1_01CBB5_464EAA_96C8AC"
     )
@@ -140,7 +196,9 @@ def build_cost_query(
     return f"{select_clause}\nFROM `{table_fqn}`{where}\n{group_clause}\nORDER BY cost DESC"
 
 
-def get_cost_summary(days: int = 30, month_to_date: bool = False) -> CostSummary:
+def get_cost_summary(
+    days: int = 30, month_to_date: bool = False, group_by: str = "resource"
+) -> CostSummary:
     """Cost summary for a window.
 
     - ``month_to_date=True``: current calendar month, matching the GCP billing
@@ -171,7 +229,7 @@ def get_cost_summary(days: int = 30, month_to_date: bool = False) -> CostSummary
 
     table = _billing_table_exists()
     if table:
-        items, totals = _query_billing(table, where_clause)
+        items, totals = _query_billing(table, where_clause, group_by)
     else:
         items = []
         totals = {"total_cost": 0.0, "total_credits": 0.0, "total_net_cost": 0.0}
@@ -218,4 +276,137 @@ def get_billing_status() -> dict:
 
 
 def get_cost_by_service(days: int = 30, month_to_date: bool = False) -> CostSummary:
-    return get_cost_summary(days=days, month_to_date=month_to_date)
+    return get_cost_summary(days=days, month_to_date=month_to_date, group_by="service")
+
+
+def get_cost_by_sku(days: int = 30, month_to_date: bool = False) -> CostSummary:
+    return get_cost_summary(days=days, month_to_date=month_to_date, group_by="sku")
+
+
+# ── Daily series ─────────────────────────────────────────────────────
+
+
+def _split_daily_rows(
+    rows: list[tuple[date, float, float]],
+    current: CostPeriod,
+    previous: CostPeriod,
+) -> tuple[list[DailyCost], float]:
+    """Partition ``(usage_date, cost, credits)`` rows into the two windows.
+
+    Returns the current window as a gap-free day series (missing days filled
+    with zeros) plus the previous window's total net cost. Rows outside both
+    windows (billing-export ingest lag can spill a day either side) are
+    dropped.
+    """
+    current_start = date.fromisoformat(current.start)
+    current_end = date.fromisoformat(current.end)
+    previous_start = date.fromisoformat(previous.start)
+    previous_end = date.fromisoformat(previous.end)
+
+    by_day: dict[date, tuple[float, float]] = {}
+    previous_total = 0.0
+    for usage_date, cost, credits in rows:
+        if current_start <= usage_date <= current_end:
+            prev_cost, prev_credits = by_day.get(usage_date, (0.0, 0.0))
+            by_day[usage_date] = (prev_cost + cost, prev_credits + credits)
+        elif previous_start <= usage_date <= previous_end:
+            previous_total += cost + credits
+
+    series = []
+    day = current_start
+    while day <= current_end:
+        cost, credits = by_day.get(day, (0.0, 0.0))
+        series.append(
+            DailyCost(
+                date=day.isoformat(),
+                cost=round(cost, 4),
+                credits=round(credits, 4),
+                net_cost=round(cost + credits, 4),
+            )
+        )
+        day += timedelta(days=1)
+
+    return series, round(previous_total, 2)
+
+
+def get_daily_costs(days: int = 30, month_to_date: bool = False) -> DailyCostSeries:
+    """Daily net cost for the window plus the previous window's total.
+
+    One query covers both windows (current + previous) grouped by usage date
+    in the billing account timezone; the split happens in Python. Note the
+    rolling window filters by ``_PARTITIONTIME`` (UTC ingest time) while days
+    group by ``usage_start_time`` (America/Los_Angeles), so edges can differ
+    ±1 day from ``/summary`` — accepted, not reconciled to the cent.
+    """
+    today = date.today()
+
+    if month_to_date:
+        first_of_month = today.replace(day=1)
+        prev_month_end = first_of_month - timedelta(days=1)
+        current = CostPeriod(start=first_of_month.isoformat(), end=today.isoformat())
+        previous = CostPeriod(
+            start=prev_month_end.replace(day=1).isoformat(),
+            end=prev_month_end.isoformat(),
+        )
+        where_clause = (
+            "invoice.month IN (\n"
+            "          FORMAT_DATE('%Y%m', CURRENT_DATE('America/Los_Angeles')),\n"
+            "          FORMAT_DATE('%Y%m', DATE_SUB(DATE_TRUNC(CURRENT_DATE('America/Los_Angeles'), MONTH), INTERVAL 1 DAY))\n"
+            "        )\n"
+            "        AND cost_type = 'regular'"
+        )
+    else:
+        current = CostPeriod(
+            start=(today - timedelta(days=days)).isoformat(),
+            end=today.isoformat(),
+        )
+        previous = CostPeriod(
+            start=(today - timedelta(days=2 * days)).isoformat(),
+            end=(today - timedelta(days=days + 1)).isoformat(),
+        )
+        where_clause = (
+            f"_PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {2 * days} DAY)\n"
+            "        AND cost_type = 'regular'"
+        )
+
+    table = _billing_table_exists()
+    if not table:
+        return DailyCostSeries(
+            currency="USD",
+            period=current,
+            days=[],
+            previous_period=previous,
+            previous_total_net_cost=0.0,
+        )
+
+    rows: list[tuple[date, float, float]] = []
+    if table:
+        daily_query = f"""
+        SELECT
+          DATE(usage_start_time, 'America/Los_Angeles') AS usage_date,
+          SUM(cost) AS cost,
+          {_CREDITS_SUM} AS credits
+        FROM `{table}`
+        WHERE {where_clause}
+        GROUP BY usage_date
+        ORDER BY usage_date
+        """
+        try:
+            client = bigquery.Client(project=_PROJECT_ID)
+            for row in client.query(daily_query).result():
+                rows.append(
+                    (row.usage_date, float(row.cost or 0.0), float(row.credits or 0.0))
+                )
+        except Exception as e:
+            print(f"BigQuery daily query failed: {e}")
+            rows = []
+
+    series, previous_total = _split_daily_rows(rows, current, previous)
+
+    return DailyCostSeries(
+        currency="USD",
+        period=current,
+        days=series,
+        previous_period=previous,
+        previous_total_net_cost=previous_total,
+    )
