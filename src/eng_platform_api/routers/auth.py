@@ -46,12 +46,16 @@ def _safe_return_url(value: str) -> str:
 
 def _callback_url(request: Request) -> str:
     """Construct the OAuth callback URL using the API's public HTTPS origin."""
+    callback_path = request.url_for("github_callback").path
     api_origin = urlparse(
-        os.getenv("ENG_PLATFORM_API_ORIGIN", str(request.base_url).rstrip("/"))
+        os.getenv(
+            "ENG_PLATFORM_API_ORIGIN",
+            str(request.base_url).rstrip("/"),
+        )
     )
     # Force HTTPS in production; Cloud Run proxies requests internally as HTTP
     scheme = "https" if not config.mock_mode else api_origin.scheme
-    return f"{scheme}://{api_origin.netloc}{request.url_for('github_callback')}"
+    return f"{scheme}://{api_origin.netloc}{callback_path}"
 
 
 @router.get("/me", response_model=AuthSession)
