@@ -414,9 +414,7 @@ def test_list_tags_eligibility_follows_current_live_tag():
     superseded = _succeeded_deployment(
         tag="v0.4.0", created_at="2026-07-01T12:00:00+00:00"
     )
-    live = _succeeded_deployment(
-        tag="v0.5.0", created_at="2026-07-16T12:00:00+00:00"
-    )
+    live = _succeeded_deployment(tag="v0.5.0", created_at="2026-07-16T12:00:00+00:00")
     deployment_store.save(superseded, "")
     deployment_store.save(live, "")
 

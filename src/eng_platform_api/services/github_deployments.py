@@ -93,9 +93,7 @@ def list_tags(
                 created_at=f"2026-07-{16 - index:02d}T12:00:00+00:00",
                 url=f"https://github.com/{repository}/releases/tag/v0.{minor}.{patch}",
                 eligible=index != 2,
-                reason="This tag is already live in production"
-                if index == 2
-                else "",
+                reason="This tag is already live in production" if index == 2 else "",
             )
             for index, (minor, patch) in enumerate(
                 [(5, 1), (5, 0), (4, 1), (4, 0), (3, 0), (2, 2), (2, 1), (2, 0)]
@@ -259,8 +257,7 @@ def start_rollback(
         required_contexts=[],
         environment=f"{service_name}-production",
         description=(
-            f"Rollback {service_name} to {target.tag} "
-            f"({target.production_revision})"
+            f"Rollback {service_name} to {target.tag} ({target.production_revision})"
         ),
         payload={"service_name": service_name, "tag": target.tag},
     )

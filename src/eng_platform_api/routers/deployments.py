@@ -131,7 +131,9 @@ async def create_deployment(
         401: {"description": "GitHub authentication required"},
         403: {"description": "Operator is not allowlisted"},
         404: {"description": "Service or target deployment not found"},
-        409: {"description": "Target is not a succeeded production deployment, or an active deployment already exists"},
+        409: {
+            "description": "Target is not a succeeded production deployment, or an active deployment already exists"
+        },
         502: {"description": "GitHub is unavailable"},
     },
 )
@@ -145,7 +147,9 @@ async def rollback_deployment(
     requested_by = require_deployer(request)
     target = deployment_store.get(target_deployment_id)
     if target is None or target.service_name != service_name:
-        raise HTTPException(status_code=404, detail="Unknown deployment to roll back to")
+        raise HTTPException(
+            status_code=404, detail="Unknown deployment to roll back to"
+        )
     if target.status != "SUCCEEDED" or not target.production_revision:
         raise HTTPException(
             status_code=409,
