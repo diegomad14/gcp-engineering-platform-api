@@ -30,6 +30,10 @@ def _service_or_404(service_name: str):
 @router.get(
     "/services/{service_name}/tags",
     response_model=ReleaseTagPage,
+    responses={
+        400: {"description": "Invalid tag cursor"},
+        502: {"description": "GitHub or deployment store unavailable"},
+    },
 )
 async def list_service_tags(
     service_name: str,

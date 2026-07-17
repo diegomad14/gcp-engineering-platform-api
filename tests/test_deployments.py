@@ -152,6 +152,11 @@ def test_negative_tag_cursor_is_rejected(client):
     assert response.status_code == 400
 
 
+def test_non_numeric_tag_cursor_is_rejected(client):
+    response = client.get("/api/services/eng-platform-api/tags?cursor=not-a-number")
+    assert response.status_code == 400
+
+
 def test_operational_value_error_is_not_reported_as_invalid_cursor(client):
     with mock.patch(
         "eng_platform_api.routers.deployments.github_deployments.list_tags",
@@ -175,6 +180,22 @@ def test_firestore_client_uses_configured_project(monkeypatch):
     ):
         collection = deployment_store._firestore_collection()
     client_factory.assert_called_once_with(project="cgm-assistant-prod")
+    assert collection is firestore_client.collection.return_value
+
+
+def test_firestore_client_can_use_default_project_discovery(monkeypatch):
+    from eng_platform_api.services import deployment_store
+
+    firestore_client = mock.MagicMock()
+    monkeypatch.delenv("ENG_PLATFORM_GCP_PROJECT_ID", raising=False)
+    with (
+        mock.patch.object(deployment_store, "_COLLECTION", "deployments"),
+        mock.patch(
+            "google.cloud.firestore.Client", return_value=firestore_client
+        ) as client_factory,
+    ):
+        collection = deployment_store._firestore_collection()
+    client_factory.assert_called_once_with()
     assert collection is firestore_client.collection.return_value
 
 
