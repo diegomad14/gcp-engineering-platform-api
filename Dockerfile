@@ -1,7 +1,7 @@
 # Platform API Dockerfile
 # Python FastAPI — Engineering Platform Control Plane
 
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
