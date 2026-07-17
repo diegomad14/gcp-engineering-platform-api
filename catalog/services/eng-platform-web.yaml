@@ -1,0 +1,13 @@
+service_name: eng-platform-web
+repository: diegomad14/gcp-engineering-platform-web
+owner: platform
+cost_center: platform
+project_id: cgm-assistant-prod
+region: us-central1
+environment: prod
+release_model: candidate-promote-rollback
+finops:
+  service: eng-platform-web
+  env: prod
+  owner: platform
+  cost_center: platform

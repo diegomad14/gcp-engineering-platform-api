@@ -1,0 +1,274 @@
+name: Emergency Promote to PROD
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_id:
+        required: true
+        type: string
+      region:
+        required: true
+        type: string
+      release_tag:
+        required: true
+        type: string
+      api_service:
+        required: true
+        type: string
+      web_service:
+        required: false
+        type: string
+      api_revision:
+        required: false
+        type: string
+      web_revision:
+        required: false
+        type: string
+      promote_api:
+        required: true
+        default: false
+        type: boolean
+      promote_web:
+        required: true
+        default: false
+        type: boolean
+      reason:
+        required: true
+        type: string
+      confirm:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency: production-emergency-promotion
+
+jobs:
+  emergency-promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f
+
+      - name: Validate emergency promotion inputs
+        env:
+          PROMOTE_API: ${{ inputs.promote_api }}
+          PROMOTE_WEB: ${{ inputs.promote_web }}
+          EMERGENCY_REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          test "${{ inputs.confirm }}" = "EMERGENCY_PROMOTE"
+          [[ "${{ inputs.release_tag }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test -n "$EMERGENCY_REASON"
+
+          if [[ "$PROMOTE_API" != "true" && "$PROMOTE_WEB" != "true" ]]; then
+            echo "At least one of promote_api or promote_web must be true"
+            exit 1
+          fi
+
+          if [[ "$PROMOTE_API" == "true" ]]; then
+            test -n "${{ inputs.api_revision }}"
+          fi
+
+          if [[ "$PROMOTE_WEB" == "true" ]]; then
+            test -n "${{ inputs.web_service }}"
+            test -n "${{ inputs.web_revision }}"
+          fi
+
+      - name: Snapshot current routing
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/emergency-promotion-snapshot"
+
+          active_revision() {
+            local service="$1"
+            local outfile="$2"
+            gcloud run services describe "$service" \
+              --project="${{ inputs.project_id }}" \
+              --region="${{ inputs.region }}" \
+              --format=json \
+              | tee "$outfile" \
+              | python3 -c 'import json,sys
+          data=json.load(sys.stdin)
+          active=[i.get("revisionName") for i in data.get("status", {}).get("traffic", []) if i.get("percent") == 100]
+          print(active[0] if len(active) == 1 else "")'
+          }
+
+          API_BEFORE="$(active_revision "${{ inputs.api_service }}" "$RUNNER_TEMP/emergency-promotion-snapshot/api-before.json")"
+          echo "api-before=$API_BEFORE" >> "$GITHUB_OUTPUT"
+
+          if [[ -n "${{ inputs.web_service }}" ]]; then
+            WEB_BEFORE="$(active_revision "${{ inputs.web_service }}" "$RUNNER_TEMP/emergency-promotion-snapshot/web-before.json")"
+            echo "web-before=$WEB_BEFORE" >> "$GITHUB_OUTPUT"
+          fi
+        id: snapshot
+
+      - name: Verify target revisions are Ready
+        env:
+          PROMOTE_API: ${{ inputs.promote_api }}
+          PROMOTE_WEB: ${{ inputs.promote_web }}
+        run: |
+          set -euo pipefail
+
+          revision_ready() {
+            local revision="$1"
+            gcloud run revisions describe "$revision" \
+              --project="${{ inputs.project_id }}" \
+              --region="${{ inputs.region }}" \
+              --format=json \
+              | python3 -c 'import json,sys
+          data=json.load(sys.stdin)
+          ready=any(c.get("type") == "Ready" and c.get("status") == "True" for c in data.get("status", {}).get("conditions", []))
+          if not ready:
+              raise SystemExit("revision is not Ready")
+          print(data.get("metadata", {}).get("name", ""))'
+          }
+
+          if [[ "$PROMOTE_API" == "true" ]]; then
+            revision_ready "${{ inputs.api_revision }}" >/dev/null
+          fi
+
+          if [[ "$PROMOTE_WEB" == "true" ]]; then
+            revision_ready "${{ inputs.web_revision }}" >/dev/null
+          fi
+
+      - name: Promote API traffic
+        if: ${{ inputs.promote_api }}
+        run: |
+          set -euo pipefail
+          gcloud run services update-traffic "${{ inputs.api_service }}" \
+            --project="${{ inputs.project_id }}" \
+            --region="${{ inputs.region }}" \
+            --to-revisions="${{ inputs.api_revision }}=100" \
+            --quiet
+
+      - name: Promote Web traffic
+        if: ${{ inputs.promote_web }}
+        run: |
+          set -euo pipefail
+          gcloud run services update-traffic "${{ inputs.web_service }}" \
+            --project="${{ inputs.project_id }}" \
+            --region="${{ inputs.region }}" \
+            --to-revisions="${{ inputs.web_revision }}=100" \
+            --quiet
+
+      - name: Verify promoted traffic
+        env:
+          PROMOTE_API: ${{ inputs.promote_api }}
+          PROMOTE_WEB: ${{ inputs.promote_web }}
+        run: |
+          set -euo pipefail
+
+          verify_active() {
+            local service="$1"
+            local expected="$2"
+            gcloud run services describe "$service" \
+              --project="${{ inputs.project_id }}" \
+              --region="${{ inputs.region }}" \
+              --format=json \
+              | python3 -c 'import json,sys
+          expected=sys.argv[1]
+          data=json.load(sys.stdin)
+          active=[i for i in data.get("status", {}).get("traffic", []) if i.get("percent") == 100]
+          if len(active) != 1 or active[0].get("revisionName") != expected:
+              raise SystemExit(f"active traffic does not match {expected}: {active}")
+          print(f"{expected}=100")' "$expected"
+          }
+
+          if [[ "$PROMOTE_API" == "true" ]]; then
+            verify_active "${{ inputs.api_service }}" "${{ inputs.api_revision }}"
+          fi
+
+          if [[ "$PROMOTE_WEB" == "true" ]]; then
+            verify_active "${{ inputs.web_service }}" "${{ inputs.web_revision }}"
+          fi
+
+      - name: Register emergency promotion
+        env:
+          PLATFORM_API_URL: ${{ vars.PLATFORM_API_URL }}
+          PROMOTE_API: ${{ inputs.promote_api }}
+          PROMOTE_WEB: ${{ inputs.promote_web }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EMERGENCY_REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${PLATFORM_API_URL:-}" ]]; then
+            echo "::warning::PLATFORM_API_URL is not configured; release registration skipped"
+            exit 0
+          fi
+
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          services = []
+          if os.environ["PROMOTE_API"] == "true":
+              services.append({
+                  "service_name": "${{ inputs.api_service }}",
+                  "revision": "${{ inputs.api_revision }}",
+                  "action": "promoted",
+              })
+          if os.environ["PROMOTE_WEB"] == "true":
+              services.append({
+                  "service_name": "${{ inputs.web_service }}",
+                  "revision": "${{ inputs.web_revision }}",
+                  "action": "promoted",
+              })
+
+          payload = {
+              "repository": "${{ github.repository }}",
+              "version": "${{ inputs.release_tag }}",
+              "status": "promoted",
+              "services": services,
+              "github_run_url": os.environ["GITHUB_RUN_URL"],
+              "triggered_by": "github-actions",
+              "notes": "Emergency promotion: " + os.environ["EMERGENCY_REASON"],
+          }
+          url = os.environ["PLATFORM_API_URL"].rstrip("/") + "/api/releases/"
+          req = urllib.request.Request(
+              url,
+              data=json.dumps(payload).encode(),
+              method="POST",
+              headers={"Content-Type": "application/json"},
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=20) as resp:
+                  print(f"Registered emergency promotion: HTTP {resp.status}")
+          except Exception as exc:
+              print(f"::warning::Release registration failed: {exc}")
+          PY
+
+      - name: Emergency promotion report
+        env:
+          EMERGENCY_REASON: ${{ inputs.reason }}
+        run: |
+          {
+            echo "## Emergency Promotion Result"
+            echo
+            echo "- release_tag: ${{ inputs.release_tag }}"
+            echo "- reason: $EMERGENCY_REASON"
+            echo "- api_revision: ${{ inputs.api_revision }}"
+            echo "- web_revision: ${{ inputs.web_revision }}"
+            echo
+            echo "Rollback API:"
+            echo '```bash'
+            echo "gcloud run services update-traffic ${{ inputs.api_service }} --project=${{ inputs.project_id }} --region=${{ inputs.region }} --to-revisions=${{ steps.snapshot.outputs.api-before }}=100"
+            echo '```'
+            echo
+            if [[ -n "${{ inputs.web_service }}" ]]; then
+              echo "Rollback Web:"
+              echo '```bash'
+              echo "gcloud run services update-traffic ${{ inputs.web_service }} --project=${{ inputs.project_id }} --region=${{ inputs.region }} --to-revisions=${{ steps.snapshot.outputs.web-before }}=100"
+              echo '```'
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"

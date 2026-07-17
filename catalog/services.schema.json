@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/diegomad14/gcp-engineering-platform-api/catalog/services.schema.json",
+  "title": "GCP Engineering Platform Service Catalog",
+  "$ref": "../schemas/platform-catalog.schema.json"
+}

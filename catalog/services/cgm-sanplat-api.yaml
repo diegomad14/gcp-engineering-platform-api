@@ -1,0 +1,13 @@
+service_name: cgm-sanplat-api
+repository: diegomad14/parametrizacion-correos-cgm
+owner: cgm
+cost_center: cgm
+project_id: cgm-assistant-prod
+region: us-central1
+environment: prod
+release_model: candidate-promote-rollback
+finops:
+  service: cgm-sanplat-api
+  env: prod
+  owner: cgm
+  cost_center: cgm

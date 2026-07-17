@@ -1,0 +1,27 @@
+services:
+  - id: cgm-sanplat
+    repo: diegomad14/parametrizacion-correos-cgm
+    project_id: cgm-assistant-prod
+    region: us-central1
+    platform_adoption:
+      status: planning
+      blockers:
+        - credential-rotation-confirmation
+        - connection-pool-p1
+      current_release_model: app-local-workflows
+      target_release_model: platform-template-derived-workflows
+      safe_to_implement: false
+      safe_to_deploy: false
+
+  - id: example-second-service
+    repo: example-owner/example-service
+    project_id: example-project
+    region: us-central1
+    platform_adoption:
+      status: not-started
+      blockers:
+        - service-inventory-required
+      current_release_model: unknown
+      target_release_model: candidate-promote-rollback
+      safe_to_implement: false
+      safe_to_deploy: false

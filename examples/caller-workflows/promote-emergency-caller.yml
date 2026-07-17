@@ -1,0 +1,51 @@
+# Example: Call the emergency promote workflow.
+# Copy to the service repository .github/workflows/ and run via workflow_dispatch.
+# Pin to a tag or SHA — never use @main in production.
+
+name: Emergency Promote to PROD (Caller)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag (e.g., v0.9.7)"
+        required: true
+        type: string
+      api_revision:
+        description: "API revision to promote"
+        required: false
+        type: string
+      web_revision:
+        description: "Web revision to promote"
+        required: false
+        type: string
+      reason:
+        description: "Incident or operational reason for emergency promotion"
+        required: true
+        type: string
+      confirm:
+        description: "Type EMERGENCY_PROMOTE to confirm"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  emergency-promote:
+    uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-cloud-run-promote-emergency.yml@v1
+    with:
+      project-id: ${{ vars.GCP_PROJECT_ID }}
+      region: ${{ vars.GCP_REGION }}
+      workload-identity-provider: ${{ vars.GCP_WIF_PROVIDER }}
+      deployer-service-account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+      release-tag: ${{ inputs.release_tag }}
+      api-service-name: ${{ vars.API_SERVICE_NAME }}
+      api-target-revision: ${{ inputs.api_revision }}
+      web-service-name: ${{ vars.WEB_SERVICE_NAME }}
+      web-target-revision: ${{ inputs.web_revision }}
+      promote-api: ${{ inputs.api_revision != '' }}
+      promote-web: ${{ inputs.web_revision != '' && vars.HAS_FRONTEND == 'true' }}
+      emergency-reason: ${{ inputs.reason }}
+      emergency-confirmation: ${{ inputs.confirm }}

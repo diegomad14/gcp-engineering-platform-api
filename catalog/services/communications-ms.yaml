@@ -1,0 +1,13 @@
+service_name: communications-ms
+repository: diegomad14/communications-ms
+owner: cgm
+cost_center: cgm
+project_id: cgm-assistant-prod
+region: us-central1
+environment: prod
+release_model: manual
+finops:
+  service: communications-ms
+  env: prod
+  owner: cgm
+  cost_center: cgm

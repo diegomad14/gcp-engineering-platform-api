@@ -5,7 +5,7 @@ FastAPI control plane for independent Cloud Run services.
 ## Local development
 
 ```bash
-cd apps/platform-api
+cd gcp-engineering-platform-api
 pip install -e ".[dev]"
 uvicorn eng_platform_api.main:app --reload --port 8000
 python3 -m pytest -q

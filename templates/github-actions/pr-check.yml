@@ -1,0 +1,22 @@
+name: Quality Gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-quality-gate.yml@v1
+    with:
+      service-name: SERVICE_NAME_HERE
+      profile: python
+      working-directory: .
+      coverage-threshold: 70
+      platform-api-url: ${{ vars.ENG_PLATFORM_API_URL }}
+    secrets:
+      QUALITY_API_TOKEN: ${{ secrets.QUALITY_API_TOKEN }}

@@ -1,0 +1,103 @@
+name: Reusable PR Check
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        required: false
+        type: string
+        default: "3.11"
+      node-version:
+        required: false
+        type: string
+        default: "20"
+      working-directory:
+        required: false
+        type: string
+        default: "."
+      backend-enabled:
+        required: false
+        type: boolean
+        default: true
+      frontend-enabled:
+        required: false
+        type: boolean
+        default: false
+      backend-test-command:
+        required: false
+        type: string
+        default: "python -m pytest -q"
+      backend-install-command:
+        required: false
+        type: string
+        default: "pip install -e \".[dev]\""
+      frontend-build-command:
+        required: false
+        type: string
+        default: "npm run build"
+      frontend-working-directory:
+        required: false
+        type: string
+        default: "frontend"
+      openapi-enabled:
+        required: false
+        type: boolean
+        default: false
+      openapi-command:
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    if: ${{ inputs.backend-enabled }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+      - name: Install backend dependencies
+        run: ${{ inputs.backend-install-command }}
+      - name: Run backend tests
+        run: ${{ inputs.backend-test-command }}
+
+  frontend:
+    if: ${{ inputs.frontend-enabled }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.frontend-working-directory }}/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: ${{ inputs.frontend-working-directory }}
+        run: npm ci
+      - name: Build frontend
+        working-directory: ${{ inputs.frontend-working-directory }}
+        run: ${{ inputs.frontend-build-command }}
+
+  openapi:
+    if: ${{ inputs.openapi-enabled && inputs.openapi-command != '' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ inputs.python-version }}
+      - name: Install backend dependencies
+        run: ${{ inputs.backend-install-command }}
+      - name: Run OpenAPI validation
+        run: ${{ inputs.openapi-command }}

@@ -1,0 +1,18 @@
+services:
+  - service_name: example-api
+    repository: example-org/example-repository
+    owner: example-team
+    cost_center: example
+    project_id: example-project
+    region: us-central1
+    environment: prod
+    validation_targets: []
+    quality:
+      enabled: false
+      profile: python
+      coverage_threshold: 70
+    finops:
+      service: example-api
+      env: prod
+      owner: example-team
+      cost_center: example

@@ -1,0 +1,496 @@
+name: Release Candidate
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      project_id:
+        required: false
+        type: string
+      region:
+        required: false
+        type: string
+      api_service:
+        required: true
+        type: string
+      web_service:
+        required: false
+        type: string
+      artifact_registry_repo:
+        required: true
+        type: string
+      api_image_name:
+        required: true
+        type: string
+      web_image_name:
+        required: false
+        type: string
+      tag:
+        required: true
+        type: string
+      expected_openapi_paths:
+        required: false
+        default: "1"
+        type: string
+      smoke_endpoints:
+        required: false
+        default: "/health"
+        type: string
+      runtime_service_account:
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency: production-release-candidate
+
+env:
+  CRITICAL_OPENAPI_PATHS: >-
+    /health
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      project-id: ${{ steps.release-meta.outputs.project-id }}
+      region: ${{ steps.release-meta.outputs.region }}
+      release-tag: ${{ steps.release-meta.outputs.release-tag }}
+      normalized-tag: ${{ steps.release-meta.outputs.normalized-tag }}
+      api-service: ${{ steps.release-meta.outputs.api-service }}
+      web-service: ${{ steps.release-meta.outputs.web-service }}
+      expected-openapi-paths: ${{ steps.release-meta.outputs.expected-openapi-paths }}
+      smoke-endpoints: ${{ steps.release-meta.outputs.smoke-endpoints }}
+      runtime-service-account: ${{ steps.release-meta.outputs.runtime-service-account }}
+      api-image: ${{ steps.build-api.outputs.image }}
+      web-image: ${{ steps.build-web.outputs.image }}
+      api-digest: ${{ steps.api-digest.outputs.digest }}
+      web-digest: ${{ steps.web-digest.outputs.digest }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - id: release-meta
+        name: Validate SemVer tag and template inputs
+        run: |
+          set -euo pipefail
+
+          PROJECT_ID="${{ inputs.project_id || vars.GCP_PROJECT_ID }}"
+          REGION="${{ inputs.region || vars.GCP_REGION }}"
+          RELEASE_TAG="${{ inputs.tag || github.ref_name }}"
+          API_SERVICE="${{ inputs.api_service || 'REPLACE_API_SERVICE' }}"
+          WEB_SERVICE="${{ inputs.web_service || 'REPLACE_WEB_SERVICE' }}"
+          ARTIFACT_REPO="${{ inputs.artifact_registry_repo || 'REPLACE_ARTIFACT_REPO' }}"
+          API_IMAGE_NAME="${{ inputs.api_image_name || inputs.api_service || 'REPLACE_API_IMAGE' }}"
+          WEB_IMAGE_NAME="${{ inputs.web_image_name || inputs.web_service || 'REPLACE_WEB_IMAGE' }}"
+          EXPECTED_OPENAPI_PATHS="${{ inputs.expected_openapi_paths || '1' }}"
+          SMOKE_ENDPOINTS="${{ inputs.smoke_endpoints || '/health' }}"
+          RUNTIME_SERVICE_ACCOUNT="${{ inputs.runtime_service_account }}"
+
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag: $RELEASE_TAG"
+            exit 1
+          fi
+
+          if [[ -z "$PROJECT_ID" || -z "$REGION" ]]; then
+            echo "project_id and region must be supplied through inputs or repository variables"
+            exit 1
+          fi
+
+          if [[ -z "$RUNTIME_SERVICE_ACCOUNT" ]]; then
+            RUNTIME_SERVICE_ACCOUNT="runtime@${PROJECT_ID}.iam.gserviceaccount.com"
+          fi
+
+          NORMALIZED_TAG="${RELEASE_TAG//./-}"
+          NORMALIZED_TAG="${NORMALIZED_TAG//_/-}"
+
+          {
+            echo "project-id=$PROJECT_ID"
+            echo "region=$REGION"
+            echo "release-tag=$RELEASE_TAG"
+            echo "normalized-tag=$NORMALIZED_TAG"
+            echo "api-service=$API_SERVICE"
+            echo "web-service=$WEB_SERVICE"
+            echo "artifact-repo=$ARTIFACT_REPO"
+            echo "api-image-name=$API_IMAGE_NAME"
+            echo "web-image-name=$WEB_IMAGE_NAME"
+            echo "expected-openapi-paths=$EXPECTED_OPENAPI_PATHS"
+            echo "smoke-endpoints=$SMOKE_ENDPOINTS"
+            echo "runtime-service-account=$RUNTIME_SERVICE_ACCOUNT"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f
+
+      - name: Configure Artifact Registry auth
+        run: gcloud auth configure-docker ${{ steps.release-meta.outputs.region }}-docker.pkg.dev --quiet
+
+      - id: build-api
+        name: Build and push API image
+        run: |
+          set -euo pipefail
+          IMAGE="${{ steps.release-meta.outputs.region }}-docker.pkg.dev/${{ steps.release-meta.outputs.project-id }}/${{ steps.release-meta.outputs.artifact-repo }}/${{ steps.release-meta.outputs.api-image-name }}:${{ steps.release-meta.outputs.release-tag }}"
+          docker build --platform linux/amd64 -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - id: api-digest
+        name: Capture API image digest
+        run: |
+          set -euo pipefail
+          DIGEST="$(gcloud artifacts docker images describe "${{ steps.build-api.outputs.image }}" --format='value(image_summary.digest)')"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - id: build-web
+        name: Build and push Web image
+        if: ${{ steps.release-meta.outputs.web-service != '' }}
+        run: |
+          set -euo pipefail
+          IMAGE="${{ steps.release-meta.outputs.region }}-docker.pkg.dev/${{ steps.release-meta.outputs.project-id }}/${{ steps.release-meta.outputs.artifact-repo }}/${{ steps.release-meta.outputs.web-image-name }}:${{ steps.release-meta.outputs.release-tag }}"
+          docker build --platform linux/amd64 -t "$IMAGE" frontend/
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - id: web-digest
+        name: Capture Web image digest
+        if: ${{ steps.release-meta.outputs.web-service != '' }}
+        run: |
+          set -euo pipefail
+          DIGEST="$(gcloud artifacts docker images describe "${{ steps.build-web.outputs.image }}" --format='value(image_summary.digest)')"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+  deploy-candidate-api:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    outputs:
+      api-revision: ${{ steps.revision.outputs.revision }}
+      api-tag: ${{ steps.revision.outputs.revision-tag }}
+      api-tagged-url: ${{ steps.revision.outputs.tagged-url }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f
+
+      - id: deploy
+        name: Deploy API candidate revision
+        uses: google-github-actions/deploy-cloudrun@2028e2d7d30a78c6910e0632e48dd561b064884d
+        with:
+          service: ${{ needs.build-and-push.outputs.api-service }}
+          image: ${{ needs.build-and-push.outputs.api-image }}
+          region: ${{ needs.build-and-push.outputs.region }}
+          project_id: ${{ needs.build-and-push.outputs.project-id }}
+          no_traffic: true
+          flags: |-
+            --no-traffic
+            --allow-unauthenticated
+            --service-account=${{ needs.build-and-push.outputs.runtime-service-account }}
+
+      - id: revision
+        name: Tag API candidate revision
+        run: |
+          set -euo pipefail
+          REVISION="${{ steps.deploy.outputs.revision }}"
+          REVISION_TAG="candidate-api-${{ needs.build-and-push.outputs.normalized-tag }}"
+
+          gcloud run services update-traffic "${{ needs.build-and-push.outputs.api-service }}" \
+            --project="${{ needs.build-and-push.outputs.project-id }}" \
+            --region="${{ needs.build-and-push.outputs.region }}" \
+            --set-tags="${REVISION_TAG}=${REVISION}" \
+            --quiet
+
+          TAGGED_URL="$(gcloud run services describe "${{ needs.build-and-push.outputs.api-service }}" \
+            --project="${{ needs.build-and-push.outputs.project-id }}" \
+            --region="${{ needs.build-and-push.outputs.region }}" \
+            --format=json \
+            | python3 -c 'import json,sys
+          tag=sys.argv[1]
+          rev=sys.argv[2]
+          data=json.load(sys.stdin)
+          for item in data.get("status", {}).get("traffic", []):
+              if item.get("revisionName") == rev and (item.get("tag") == tag or item.get("tagName") == tag):
+                  print(item.get("url", ""))
+                  raise SystemExit(0)
+          raise SystemExit(f"tagged URL for {tag}/{rev} not found")' "$REVISION_TAG" "$REVISION")"
+
+          test -n "$TAGGED_URL"
+          {
+            echo "revision=$REVISION"
+            echo "revision-tag=$REVISION_TAG"
+            echo "tagged-url=$TAGGED_URL"
+          } >> "$GITHUB_OUTPUT"
+
+  deploy-candidate-web:
+    needs: build-and-push
+    if: ${{ needs.build-and-push.outputs.web-service != '' }}
+    runs-on: ubuntu-latest
+    outputs:
+      web-revision: ${{ steps.revision.outputs.revision }}
+      web-tag: ${{ steps.revision.outputs.revision-tag }}
+      web-tagged-url: ${{ steps.revision.outputs.tagged-url }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f
+
+      - id: deploy
+        name: Deploy Web candidate revision
+        uses: google-github-actions/deploy-cloudrun@2028e2d7d30a78c6910e0632e48dd561b064884d
+        with:
+          service: ${{ needs.build-and-push.outputs.web-service }}
+          image: ${{ needs.build-and-push.outputs.web-image }}
+          region: ${{ needs.build-and-push.outputs.region }}
+          project_id: ${{ needs.build-and-push.outputs.project-id }}
+          no_traffic: true
+          flags: |-
+            --no-traffic
+            --allow-unauthenticated
+            --service-account=${{ needs.build-and-push.outputs.runtime-service-account }}
+
+      - id: revision
+        name: Tag Web candidate revision
+        run: |
+          set -euo pipefail
+          REVISION="${{ steps.deploy.outputs.revision }}"
+          REVISION_TAG="candidate-web-${{ needs.build-and-push.outputs.normalized-tag }}"
+
+          gcloud run services update-traffic "${{ needs.build-and-push.outputs.web-service }}" \
+            --project="${{ needs.build-and-push.outputs.project-id }}" \
+            --region="${{ needs.build-and-push.outputs.region }}" \
+            --set-tags="${REVISION_TAG}=${REVISION}" \
+            --quiet
+
+          TAGGED_URL="$(gcloud run services describe "${{ needs.build-and-push.outputs.web-service }}" \
+            --project="${{ needs.build-and-push.outputs.project-id }}" \
+            --region="${{ needs.build-and-push.outputs.region }}" \
+            --format=json \
+            | python3 -c 'import json,sys
+          tag=sys.argv[1]
+          rev=sys.argv[2]
+          data=json.load(sys.stdin)
+          for item in data.get("status", {}).get("traffic", []):
+              if item.get("revisionName") == rev and (item.get("tag") == tag or item.get("tagName") == tag):
+                  print(item.get("url", ""))
+                  raise SystemExit(0)
+          raise SystemExit(f"tagged URL for {tag}/{rev} not found")' "$REVISION_TAG" "$REVISION")"
+
+          test -n "$TAGGED_URL"
+          {
+            echo "revision=$REVISION"
+            echo "revision-tag=$REVISION_TAG"
+            echo "tagged-url=$TAGGED_URL"
+          } >> "$GITHUB_OUTPUT"
+
+  validate-candidate:
+    needs:
+      - build-and-push
+      - deploy-candidate-api
+      - deploy-candidate-web
+    if: ${{ always() && needs.deploy-candidate-api.result == 'success' && (needs.build-and-push.outputs.web-service == '' || needs.deploy-candidate-web.result == 'success') }}
+    runs-on: ubuntu-latest
+    outputs:
+      safe-to-promote: ${{ steps.report.outputs.safe-to-promote }}
+    steps:
+      - name: Validate API candidate tagged URL
+        env:
+          API_TAGGED_URL: ${{ needs.deploy-candidate-api.outputs.api-tagged-url }}
+          EXPECTED_OPENAPI_PATHS: ${{ needs.build-and-push.outputs.expected-openapi-paths }}
+          CRITICAL_OPENAPI_PATHS: ${{ env.CRITICAL_OPENAPI_PATHS }}
+          SMOKE_ENDPOINTS: ${{ needs.build-and-push.outputs.smoke-endpoints }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+
+          api_url = os.environ["API_TAGGED_URL"].rstrip("/")
+          expected_paths = int(os.environ.get("EXPECTED_OPENAPI_PATHS") or "0")
+          critical_paths = [p for p in os.environ.get("CRITICAL_OPENAPI_PATHS", "").split() if p]
+          smoke_endpoints = [p for p in os.environ.get("SMOKE_ENDPOINTS", "").split() if p]
+
+          def request(path, method="GET"):
+              req = urllib.request.Request(api_url + path, method=method)
+              try:
+                  with urllib.request.urlopen(req, timeout=20) as resp:
+                      return resp.status, resp.read()
+              except urllib.error.HTTPError as exc:
+                  return exc.code, exc.read()
+
+          status, body = request("/health")
+          if status != 200:
+              raise SystemExit(f"API candidate /health failed: HTTP {status}")
+
+          status, body = request("/openapi.json")
+          if status != 200:
+              raise SystemExit(f"API candidate /openapi.json failed: HTTP {status}")
+
+          spec = json.loads(body)
+          paths = set(spec.get("paths", {}))
+          if expected_paths and len(paths) < expected_paths:
+              raise SystemExit(f"OpenAPI path count {len(paths)} is below expected {expected_paths}")
+
+          missing = sorted(set(critical_paths) - paths)
+          if missing:
+              raise SystemExit(f"Missing critical OpenAPI paths: {missing}")
+
+          for endpoint in smoke_endpoints:
+              if not endpoint.startswith("/"):
+                  endpoint = "/" + endpoint
+              status, _ = request(endpoint)
+              if status >= 500:
+                  raise SystemExit(f"Smoke endpoint {endpoint} returned HTTP {status}")
+
+          print(f"API candidate validated: {api_url}")
+          print(f"OpenAPI paths: {len(paths)}")
+          PY
+
+      - name: Validate Web candidate tagged URL
+        if: ${{ needs.build-and-push.outputs.web-service != '' }}
+        env:
+          WEB_TAGGED_URL: ${{ needs.deploy-candidate-web.outputs.web-tagged-url }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import urllib.error
+          import urllib.request
+
+          web_url = os.environ["WEB_TAGGED_URL"].rstrip("/")
+          req = urllib.request.Request(web_url + "/", method="HEAD")
+          try:
+              with urllib.request.urlopen(req, timeout=20) as resp:
+                  status = resp.status
+          except urllib.error.HTTPError as exc:
+              status = exc.code
+
+          if status != 200:
+              raise SystemExit(f"Web candidate HEAD failed: HTTP {status}")
+
+          print(f"Web candidate validated: {web_url}")
+          PY
+
+      - name: Validate CORS preflight from Web candidate to API candidate
+        if: ${{ needs.build-and-push.outputs.web-service != '' }}
+        env:
+          API_TAGGED_URL: ${{ needs.deploy-candidate-api.outputs.api-tagged-url }}
+          WEB_TAGGED_URL: ${{ needs.deploy-candidate-web.outputs.web-tagged-url }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import urllib.error
+          import urllib.request
+
+          api_url = os.environ["API_TAGGED_URL"].rstrip("/")
+          origin = os.environ["WEB_TAGGED_URL"].rstrip("/")
+          req = urllib.request.Request(
+              api_url + "/health",
+              method="OPTIONS",
+              headers={
+                  "Origin": origin,
+                  "Access-Control-Request-Method": "GET",
+              },
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=20) as resp:
+                  status = resp.status
+                  allow_origin = resp.headers.get("Access-Control-Allow-Origin", "")
+          except urllib.error.HTTPError as exc:
+              status = exc.code
+              allow_origin = exc.headers.get("Access-Control-Allow-Origin", "")
+
+          if status < 200 or status >= 300:
+              raise SystemExit(f"CORS preflight failed: HTTP {status}")
+          if allow_origin not in {origin, "*"}:
+              raise SystemExit(f"CORS preflight returned unexpected allow-origin: {allow_origin!r}")
+
+          print(f"CORS preflight validated for origin: {origin}")
+          PY
+
+      - id: report
+        name: Candidate gate report
+        run: |
+          {
+            echo "## Release Candidate Gate"
+            echo
+            echo "- release_tag: ${{ needs.build-and-push.outputs.release-tag }}"
+            echo "- api_revision: ${{ needs.deploy-candidate-api.outputs.api-revision }}"
+            echo "- api_tagged_url: ${{ needs.deploy-candidate-api.outputs.api-tagged-url }}"
+            echo "- api_image_digest: ${{ needs.build-and-push.outputs.api-digest }}"
+            echo "- web_revision: ${{ needs.deploy-candidate-web.outputs.web-revision }}"
+            echo "- web_tagged_url: ${{ needs.deploy-candidate-web.outputs.web-tagged-url }}"
+            echo "- web_image_digest: ${{ needs.build-and-push.outputs.web-digest }}"
+            echo "- safe_to_promote: YES"
+            echo "- promotion_requires_manual_workflow: YES"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "safe-to-promote=YES" >> "$GITHUB_OUTPUT"
+
+      - name: Register release candidate
+        env:
+          PLATFORM_API_URL: ${{ vars.PLATFORM_API_URL }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${PLATFORM_API_URL:-}" ]]; then
+            echo "::warning::PLATFORM_API_URL is not configured; release registration skipped"
+            exit 0
+          fi
+
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          services = [{
+              "service_name": "${{ needs.build-and-push.outputs.api-service }}",
+              "revision": "${{ needs.deploy-candidate-api.outputs.api-revision }}",
+              "action": "deployed",
+          }]
+          web_service = "${{ needs.build-and-push.outputs.web-service }}"
+          web_revision = "${{ needs.deploy-candidate-web.outputs.web-revision }}"
+          if web_service and web_revision:
+              services.append({
+                  "service_name": web_service,
+                  "revision": web_revision,
+                  "action": "deployed",
+              })
+
+          payload = {
+              "repository": "${{ github.repository }}",
+              "version": "${{ needs.build-and-push.outputs.release-tag }}",
+              "status": "candidate",
+              "services": services,
+              "github_run_url": os.environ["GITHUB_RUN_URL"],
+              "triggered_by": "github-actions",
+              "notes": "Release candidate validated",
+          }
+          req = urllib.request.Request(
+              os.environ["PLATFORM_API_URL"].rstrip("/") + "/api/releases/",
+              data=json.dumps(payload).encode(),
+              method="POST",
+              headers={"Content-Type": "application/json"},
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=20) as resp:
+                  print(f"Registered release candidate: HTTP {resp.status}")
+          except Exception as exc:
+              print(f"::warning::Release registration failed: {exc}")
+          PY

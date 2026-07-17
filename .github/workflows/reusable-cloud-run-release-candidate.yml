@@ -1,0 +1,348 @@
+name: Reusable Cloud Run Release Candidate
+
+on:
+  workflow_call:
+    inputs:
+      project-id:
+        required: true
+        type: string
+      region:
+        required: false
+        type: string
+        default: "us-central1"
+      workload-identity-provider:
+        required: true
+        type: string
+      deployer-service-account:
+        required: true
+        type: string
+      artifact-registry-repo:
+        required: true
+        type: string
+      api-service-name:
+        required: true
+        type: string
+      api-image-name:
+        required: true
+        type: string
+      web-service-name:
+        required: false
+        type: string
+        default: ""
+      web-image-name:
+        required: false
+        type: string
+        default: ""
+      version:
+        required: true
+        type: string
+      platform-api-url:
+        required: false
+        type: string
+        default: ""
+      quality-gate-enabled:
+        required: false
+        type: boolean
+        default: false
+      quality-commit-sha:
+        required: false
+        type: string
+        default: ""
+      api-health-path:
+        required: false
+        type: string
+        default: "/health"
+      api-openapi-path:
+        required: false
+        type: string
+        default: "/openapi.json"
+      expected-openapi-paths:
+        required: false
+        type: string
+        default: "1"
+      web-health-path:
+        required: false
+        type: string
+        default: "/"
+      runtime-service-account:
+        required: false
+        type: string
+        default: ""
+      build-context:
+        required: false
+        type: string
+        default: "."
+      web-build-context:
+        required: false
+        type: string
+        default: "frontend"
+      build-api:
+        required: false
+        type: boolean
+        default: true
+      build-web:
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      QUALITY_API_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  verify-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify quality evidence for selected services
+        env:
+          QUALITY_GATE_ENABLED: ${{ inputs.quality-gate-enabled }}
+          QUALITY_COMMIT_SHA: ${{ inputs.quality-commit-sha }}
+          PLATFORM_API_URL: ${{ inputs.platform-api-url }}
+          QUALITY_API_TOKEN: ${{ secrets.QUALITY_API_TOKEN }}
+          API_SERVICE_NAME: ${{ inputs.api-service-name }}
+          WEB_SERVICE_NAME: ${{ inputs.web-service-name }}
+          BUILD_API: ${{ inputs.build-api }}
+          BUILD_WEB: ${{ inputs.build-web }}
+          DEFAULT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [ "$QUALITY_GATE_ENABLED" = "true" ] || exit 0
+          test -n "$PLATFORM_API_URL" || (echo "platform-api-url is required when quality gate is enabled" && exit 1)
+          SHA="${QUALITY_COMMIT_SHA:-$DEFAULT_SHA}"
+          verify_service() {
+            local service="$1"
+            curl --fail-with-body --retry 3 \
+              -H "Authorization: Bearer $QUALITY_API_TOKEN" \
+              "$PLATFORM_API_URL/api/quality/services/$service/commits/$SHA" \
+              | python3 -c 'import json,sys; d=json.load(sys.stdin); status=d.get("quality_gate_status"); print("{}: {}".format(d.get("service_name"), status)); sys.exit(0 if status=="PASSED" else 1)'
+          }
+          [ "$BUILD_API" != "true" ] || verify_service "$API_SERVICE_NAME"
+          [ "$BUILD_WEB" != "true" ] || verify_service "$WEB_SERVICE_NAME"
+
+  build-and-push:
+    needs: verify-quality
+    runs-on: ubuntu-latest
+    outputs:
+      api-image: ${{ steps.api-meta.outputs.image }}
+      web-image: ${{ steps.web-meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ inputs.workload-identity-provider }}
+          service_account: ${{ inputs.deployer-service-account }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f
+
+      - name: Configure Artifact Registry
+        run: |
+          gcloud auth configure-docker ${{ inputs.region }}-docker.pkg.dev --quiet
+
+      - id: api-meta
+        name: Build and push API image
+        if: ${{ inputs.build-api }}
+        run: |
+          IMAGE="${{ inputs.region }}-docker.pkg.dev/${{ inputs.project-id }}/${{ inputs.artifact-registry-repo }}/${{ inputs.api-image-name }}:${{ inputs.version }}"
+          docker build --platform linux/amd64 -t "$IMAGE" ${{ inputs.build-context }}
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - id: web-meta
+        name: Build and push Web image
+        if: ${{ inputs.build-web && inputs.web-service-name != '' }}
+        run: |
+          IMAGE="${{ inputs.region }}-docker.pkg.dev/${{ inputs.project-id }}/${{ inputs.artifact-registry-repo }}/${{ inputs.web-image-name }}:${{ inputs.version }}"
+          docker build --platform linux/amd64 -t "$IMAGE" ${{ inputs.web-build-context }}
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+  deploy-candidate-api:
+    needs: build-and-push
+    if: ${{ inputs.build-api }}
+    runs-on: ubuntu-latest
+    outputs:
+      api-revision: ${{ steps.tag-revision.outputs.revision }}
+      api-tagged-url: ${{ steps.tag-revision.outputs.tagged-url }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ inputs.workload-identity-provider }}
+          service_account: ${{ inputs.deployer-service-account }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f
+
+      - name: Deploy API candidate (no traffic)
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@2028e2d7d30a78c6910e0632e48dd561b064884d
+        with:
+          service: ${{ inputs.api-service-name }}
+          image: ${{ needs.build-and-push.outputs.api-image }}
+          region: ${{ inputs.region }}
+          project_id: ${{ inputs.project-id }}
+          no_traffic: true
+          flags: |-
+            --no-traffic
+            --allow-unauthenticated
+            ${{ inputs.runtime-service-account && format('--service-account={0}', inputs.runtime-service-account) || '' }}
+
+      - id: tag-revision
+        name: Tag candidate revision and extract URL
+        run: |
+          set -euo pipefail
+          REVISION="${{ steps.deploy.outputs.revision }}"
+          REVISION_TAG="candidate-api-${{ inputs.version }}"
+
+          # Remove invalid characters from tag
+          NORMALIZED_TAG="${REVISION_TAG//./-}"
+          NORMALIZED_TAG="${NORMALIZED_TAG//_/-}"
+
+          gcloud run services update-traffic "${{ inputs.api-service-name }}" \
+            --project="${{ inputs.project-id }}" \
+            --region="${{ inputs.region }}" \
+            --set-tags="${NORMALIZED_TAG}=${REVISION}" \
+            --quiet
+
+          # Extract tagged URL dynamically — no hardcoded URLs
+          TAGGED_URL="$(gcloud run services describe "${{ inputs.api-service-name }}" \
+            --project="${{ inputs.project-id }}" \
+            --region="${{ inputs.region }}" \
+            --format='json(status.traffic)' | python3 -c 'import json,sys; d=json.load(sys.stdin); items=[i for i in d["status"]["traffic"] if i.get("revisionName")==sys.argv[2] and (i.get("tag","")==sys.argv[1] or i.get("tagName","")==sys.argv[1])]; print(items[0]["url"] if items else ""); sys.exit(0 if items else 1)' "$NORMALIZED_TAG" "$REVISION")"
+          test -n "$TAGGED_URL" || (echo "ERROR: Could not extract tagged URL for tag=$NORMALIZED_TAG revision=$REVISION" && exit 1)
+
+          test -n "$TAGGED_URL"
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
+          echo "tagged-url=$TAGGED_URL" >> "$GITHUB_OUTPUT"
+          echo "API candidate: $TAGGED_URL"
+
+      - name: Validate API candidate
+        env:
+          API_TAGGED_URL: ${{ steps.tag-revision.outputs.tagged-url }}
+          EXPECTED_OPENAPI_PATHS: ${{ inputs.expected-openapi-paths }}
+          API_HEALTH_PATH: ${{ inputs.api-health-path }}
+          API_OPENAPI_PATH: ${{ inputs.api-openapi-path }}
+        run: |
+          set -euo pipefail
+          curl -fsS "${API_TAGGED_URL}${API_HEALTH_PATH}" || exit 1
+
+          OPENAPI_COUNT=$(curl -s "${API_TAGGED_URL}${API_OPENAPI_PATH}" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('paths',{})))")
+          if [ "$OPENAPI_COUNT" -lt "$EXPECTED_OPENAPI_PATHS" ]; then
+            echo "OpenAPI path count $OPENAPI_COUNT is below expected $EXPECTED_OPENAPI_PATHS"
+            exit 1
+          fi
+          echo "API candidate validated: $OPENAPI_COUNT OpenAPI paths"
+
+  deploy-candidate-web:
+    needs: [build-and-push, deploy-candidate-api]
+    if: ${{ inputs.build-web && inputs.web-service-name != '' }}
+    runs-on: ubuntu-latest
+    outputs:
+      web-revision: ${{ steps.tag-revision.outputs.revision }}
+      web-tagged-url: ${{ steps.tag-revision.outputs.tagged-url }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ inputs.workload-identity-provider }}
+          service_account: ${{ inputs.deployer-service-account }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f
+
+      - name: Deploy Web candidate (no traffic)
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@2028e2d7d30a78c6910e0632e48dd561b064884d
+        with:
+          service: ${{ inputs.web-service-name }}
+          image: ${{ needs.build-and-push.outputs.web-image }}
+          region: ${{ inputs.region }}
+          project_id: ${{ inputs.project-id }}
+          no_traffic: true
+          flags: |-
+            --no-traffic
+            --allow-unauthenticated
+            ${{ inputs.runtime-service-account && format('--service-account={0}', inputs.runtime-service-account) || '' }}
+
+      - id: tag-revision
+        name: Tag Web candidate revision and extract URL
+        run: |
+          set -euo pipefail
+          REVISION="${{ steps.deploy.outputs.revision }}"
+          REVISION_TAG="candidate-web-${{ inputs.version }}"
+          NORMALIZED_TAG="${REVISION_TAG//./-}"
+          NORMALIZED_TAG="${NORMALIZED_TAG//_/-}"
+
+          gcloud run services update-traffic "${{ inputs.web-service-name }}" \
+            --project="${{ inputs.project-id }}" \
+            --region="${{ inputs.region }}" \
+            --set-tags="${NORMALIZED_TAG}=${REVISION}" \
+            --quiet
+
+          TAGGED_URL="$(gcloud run services describe "${{ inputs.web-service-name }}" \
+            --project="${{ inputs.project-id }}" \
+            --region="${{ inputs.region }}" \
+            --format='json(status.traffic)' | python3 -c 'import json,sys; d=json.load(sys.stdin); items=[i for i in d["status"]["traffic"] if i.get("revisionName")==sys.argv[2] and (i.get("tag","")==sys.argv[1] or i.get("tagName","")==sys.argv[1])]; print(items[0]["url"] if items else ""); sys.exit(0 if items else 1)' "$NORMALIZED_TAG" "$REVISION")"
+          test -n "$TAGGED_URL" || (echo "ERROR: Could not extract tagged URL for tag=$NORMALIZED_TAG revision=$REVISION" && exit 1)
+
+          test -n "$TAGGED_URL"
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
+          echo "tagged-url=$TAGGED_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Validate Web candidate
+        env:
+          WEB_TAGGED_URL: ${{ steps.tag-revision.outputs.tagged-url }}
+          WEB_HEALTH_PATH: ${{ inputs.web-health-path }}
+        run: |
+          curl -fsS -I "${WEB_TAGGED_URL}${WEB_HEALTH_PATH}" || exit 1
+          echo "Web candidate validated"
+
+  candidate-summary:
+    needs: [build-and-push, deploy-candidate-api, deploy-candidate-web]
+    if: ${{ always() && needs.build-and-push.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print candidate summary
+        run: |
+          {
+            echo "## Release Candidate Summary"
+            echo
+            echo "- **Version:** ${{ inputs.version }}"
+            echo "- **API Service:** ${{ inputs.api-service-name }}"
+            echo "- **API Revision:** ${{ needs.deploy-candidate-api.outputs.api-revision }}"
+            echo "- **API Tagged URL:** ${{ needs.deploy-candidate-api.outputs.api-tagged-url }}"
+            if [ -n "${{ inputs.web-service-name }}" ]; then
+              echo "- **Web Service:** ${{ inputs.web-service-name }}"
+              echo "- **Web Revision:** ${{ needs.deploy-candidate-web.outputs.web-revision }}"
+              echo "- **Web Tagged URL:** ${{ needs.deploy-candidate-web.outputs.web-tagged-url }}"
+            fi
+            echo "- **Safe to Promote:** YES"
+            echo "- **Promotion requires manual workflow_dispatch**"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Register release in Platform API
+        if: ${{ inputs.platform-api-url != '' }}
+        env:
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+          API_REVISION: ${{ needs.deploy-candidate-api.outputs.api-revision }}
+          WEB_REVISION: ${{ needs.deploy-candidate-web.outputs.web-revision }}
+          PLATFORM_API_URL: ${{ inputs.platform-api-url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          SERVICES=""
+          if [ -n "$API_REVISION" ]; then
+            SERVICES="{\"service_name\":\"${{ inputs.api-service-name }}\",\"revision\":\"$API_REVISION\",\"action\":\"deployed\"}"
+          fi
+          if [ -n "$WEB_REVISION" ]; then
+            [ -z "$SERVICES" ] || SERVICES="$SERVICES,"
+            SERVICES="$SERVICES{\"service_name\":\"${{ inputs.web-service-name }}\",\"revision\":\"$WEB_REVISION\",\"action\":\"deployed\"}"
+          fi
+          SERVICES_JSON="[$SERVICES]"
+          curl -fsS -X POST "$PLATFORM_API_URL/api/releases/" \
+            -H "Content-Type: application/json" \
+            -d "{\"repository\":\"$REPOSITORY\",\"version\":\"$VERSION\",\"status\":\"candidate\",\"services\":$SERVICES_JSON,\"github_run_url\":\"$RUN_URL\"}"

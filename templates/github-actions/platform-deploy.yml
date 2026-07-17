@@ -1,0 +1,202 @@
+name: Platform Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_name:
+        description: Cloud Run service selected in Engineering Platform
+        required: true
+        type: string
+      tag:
+        description: Immutable semantic release tag
+        required: true
+        type: string
+      github_deployment_id:
+        description: GitHub Deployment created by Engineering Platform
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  deployments: write
+  id-token: write
+
+concurrency:
+  group: deploy-${{ inputs.service_name }}
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+  SERVICE_NAME: ${{ vars.CLOUD_RUN_SERVICE }}
+  IMAGE_NAME: ${{ vars.IMAGE_NAME || vars.CLOUD_RUN_SERVICE }}
+  ARTIFACT_REPOSITORY: ${{ vars.ARTIFACT_REGISTRY_REPO || 'cloud-run-source-deploy' }}
+  BUILD_CONTEXT: ${{ vars.BUILD_CONTEXT || '.' }}
+  HEALTH_PATH: ${{ vars.HEALTH_PATH || '/' }}
+
+jobs:
+  verify-release:
+    name: Verify release
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.release.outputs.image }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.tag }}
+      - name: Validate immutable release and service configuration
+        id: release
+        run: |
+          set -euo pipefail
+          [[ "${{ inputs.tag }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]
+          test "${{ inputs.service_name }}" = "$SERVICE_NAME"
+          test -n "$PROJECT_ID"
+          test -n "${{ vars.GCP_WIF_PROVIDER }}"
+          test -n "${{ vars.GCP_WIF_SERVICE_ACCOUNT }}"
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$ARTIFACT_REPOSITORY/$IMAGE_NAME:${{ inputs.tag }}"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+      - name: Mark GitHub deployment in progress
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --method POST \
+            "repos/${{ github.repository }}/deployments/${{ inputs.github_deployment_id }}/statuses" \
+            -f state=in_progress -f description='Release verification passed' >/dev/null
+
+  build:
+    name: Build image
+    needs: verify-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+      - name: Build immutable image with Cloud Build
+        run: gcloud builds submit "$BUILD_CONTEXT" --project="$PROJECT_ID" --tag="${{ needs.verify-release.outputs.image }}" --quiet
+
+  deploy-candidate:
+    name: Deploy candidate
+    needs: [verify-release, build]
+    runs-on: ubuntu-latest
+    environment: candidate
+    outputs:
+      revision: ${{ steps.deploy.outputs.revision }}
+      url: ${{ steps.candidate.outputs.url }}
+    steps:
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+      - name: Deploy zero-traffic revision
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@2028e2d7d30a78c6910e0632e48dd561b064884d # v3
+        with:
+          service: ${{ env.SERVICE_NAME }}
+          image: ${{ needs.verify-release.outputs.image }}
+          project_id: ${{ env.PROJECT_ID }}
+          region: ${{ env.REGION }}
+          no_traffic: true
+      - name: Create candidate URL
+        id: candidate
+        run: |
+          set -euo pipefail
+          TAG="candidate-${{ inputs.tag }}"
+          TAG="${TAG//./-}"
+          gcloud run services update-traffic "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --set-tags="$TAG=${{ steps.deploy.outputs.revision }}" --quiet
+          URL=$(gcloud run services describe "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --format=json | python3 -c 'import json,sys; d=json.load(sys.stdin); tag=sys.argv[1]; rows=d.get("status",{}).get("traffic",[]); print(next((r.get("url","") for r in rows if r.get("tag")==tag or r.get("tagName")==tag), ""))' "$TAG")
+          test -n "$URL"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+  validate-candidate:
+    name: Validate candidate
+    needs: deploy-candidate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Smoke candidate revision
+        run: curl --fail-with-body --retry 5 --retry-all-errors "${{ needs.deploy-candidate.outputs.url }}$HEALTH_PATH"
+
+  promote:
+    name: Promote production
+    needs: [deploy-candidate, validate-candidate]
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      previous_revision: ${{ steps.snapshot.outputs.previous_revision }}
+      production_url: ${{ steps.promote.outputs.production_url }}
+    steps:
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+      - name: Snapshot current production revision
+        id: snapshot
+        run: |
+          PREVIOUS=$(gcloud run services describe "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --format='value(status.traffic[0].revisionName)')
+          test -n "$PREVIOUS"
+          echo "previous_revision=$PREVIOUS" >> "$GITHUB_OUTPUT"
+      - name: Promote candidate to 100 percent
+        id: promote
+        run: |
+          gcloud run services update-traffic "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --to-revisions="${{ needs.deploy-candidate.outputs.revision }}=100" --quiet
+          URL=$(gcloud run services describe "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')
+          echo "production_url=$URL" >> "$GITHUB_OUTPUT"
+
+  validate-production:
+    name: Validate production
+    needs: promote
+    runs-on: ubuntu-latest
+    steps:
+      - name: Smoke production
+        run: curl --fail-with-body --retry 5 --retry-all-errors "${{ needs.promote.outputs.production_url }}$HEALTH_PATH"
+      - name: Mark GitHub deployment successful
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --method POST \
+            "repos/${{ github.repository }}/deployments/${{ inputs.github_deployment_id }}/statuses" \
+            -f state=success -f environment_url="${{ needs.promote.outputs.production_url }}" -f description='Production validation passed' >/dev/null
+
+  rollback:
+    name: Rollback production
+    if: ${{ failure() && needs.promote.result == 'success' }}
+    needs: [promote, validate-production]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+      - name: Restore previous production revision
+        run: gcloud run services update-traffic "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --to-revisions="${{ needs.promote.outputs.previous_revision }}=100" --quiet
+      - name: Mark GitHub deployment failed and rolled back
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          STATE=$([ "${{ job.status }}" = success ] && echo failure || echo error)
+          gh api --method POST \
+            "repos/${{ github.repository }}/deployments/${{ inputs.github_deployment_id }}/statuses" \
+            -f state="$STATE" -f description='Production validation failed; rollback executed' >/dev/null
+
+  mark-failed:
+    name: Mark deployment failed
+    if: ${{ failure() && needs.promote.result != 'success' }}
+    needs: [verify-release, build, deploy-candidate, validate-candidate, promote]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish pre-traffic failure
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --method POST \
+            "repos/${{ github.repository }}/deployments/${{ inputs.github_deployment_id }}/statuses" \
+            -f state=failure -f description='Deployment failed before production traffic changed' >/dev/null

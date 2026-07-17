@@ -1,0 +1,23 @@
+service_id: example-service
+name: Example Cloud Run Service
+repository: org/example-service
+environment: production
+gcp:
+  project_id: example-project
+  region: us-central1
+  artifact_registry: us-central1-docker.pkg.dev/example-project/example-repo
+cloud_run:
+  api_service: example-api
+  web_service: example-web
+release:
+  model: candidate-promote
+  semver_tags: true
+  min_openapi_paths: 1
+rollback:
+  api_revision: example-api-00001-abc
+  web_revision: example-web-00001-def
+owners:
+  product: TBD
+  technical: TBD
+  oncall: TBD
+

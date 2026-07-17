@@ -1,0 +1,40 @@
+# Example: Call the reusable Release Candidate workflow.
+# Copy to the service repository's .github/workflows/ directory.
+# Pin to a tag or SHA — never use @main in production.
+
+name: Release Candidate (Caller)
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  release-candidate:
+    uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-cloud-run-release-candidate.yml@v1
+    with:
+      project-id: ${{ vars.GCP_PROJECT_ID }}
+      region: ${{ vars.GCP_REGION }}
+      workload-identity-provider: ${{ vars.GCP_WIF_PROVIDER }}
+      deployer-service-account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+      artifact-registry-repo: ${{ vars.ARTIFACT_REPO }}
+      api-service-name: ${{ vars.API_SERVICE_NAME }}
+      api-image-name: ${{ vars.API_IMAGE_NAME }}
+      web-service-name: ${{ vars.WEB_SERVICE_NAME }}
+      web-image-name: ${{ vars.WEB_IMAGE_NAME }}
+      version: ${{ github.ref_name }}
+      platform-api-url: ${{ vars.ENG_PLATFORM_API_URL }}
+      quality-gate-enabled: true
+      quality-commit-sha: ${{ github.sha }}
+      api-health-path: /health
+      api-openapi-path: /openapi.json
+      expected-openapi-paths: "77"
+      runtime-service-account: ${{ vars.RUNTIME_SERVICE_ACCOUNT }}
+      build-api: true
+      build-web: ${{ vars.HAS_FRONTEND == 'true' }}
+    secrets:
+      QUALITY_API_TOKEN: ${{ secrets.QUALITY_API_TOKEN }}

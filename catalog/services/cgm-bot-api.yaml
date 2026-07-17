@@ -1,0 +1,13 @@
+service_name: cgm-bot-api
+repository: diegomad14/cgm-bot-core
+owner: cgm
+cost_center: cgm
+project_id: cgm-assistant-prod
+region: us-central1
+environment: prod
+release_model: manual
+finops:
+  service: cgm-bot-api
+  env: prod
+  owner: cgm
+  cost_center: cgm
