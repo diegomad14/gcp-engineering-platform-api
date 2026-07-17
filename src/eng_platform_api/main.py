@@ -4,10 +4,15 @@ FastAPI application with mock-backed endpoints.
 All GCP integrations require explicit configuration.
 """
 
+import secrets
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 
+from .config import config
 from .routers import (
+    auth,
     catalog,
     costs,
     deployments,
@@ -29,12 +34,20 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # MVP: allow all. Production: restrict to platform-web origin.
-    allow_credentials=False,
+    allow_origins=[config.auth.frontend_url],
+    allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=config.auth.session_secret or secrets.token_urlsafe(32),
+    same_site="lax" if config.mock_mode else "none",
+    https_only=not config.mock_mode,
+    max_age=60 * 60 * 12,
+)
 
+app.include_router(auth.router)
 app.include_router(health.router)
 app.include_router(catalog.router)
 app.include_router(releases.router)

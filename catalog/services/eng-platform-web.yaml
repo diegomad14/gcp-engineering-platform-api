@@ -6,6 +6,12 @@ project_id: cgm-assistant-prod
 region: us-central1
 environment: prod
 release_model: candidate-promote-rollback
+deployment:
+  workflow_file: platform-deploy.yml
+  image_name: eng-platform-web
+  artifact_repository: cloud-run-source-deploy
+  build_context: .
+  health_path: /
 finops:
   service: eng-platform-web
   env: prod

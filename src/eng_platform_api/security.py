@@ -11,6 +11,8 @@ import os
 
 from fastapi import Header, HTTPException, Request, status
 
+from .config import config
+
 
 def get_identity(request: Request) -> str:
     """Return the caller identity.
@@ -21,8 +23,25 @@ def get_identity(request: Request) -> str:
     iap_identity = request.headers.get("X-Goog-Authenticated-User-Email", "")
     if iap_identity:
         return iap_identity.removeprefix("accounts.google.com:")
-    github_identity = request.headers.get("X-GitHub-Login", "")
-    return github_identity or "anonymous"
+    github_identity = str(request.session.get("github_login", ""))
+    return github_identity or ("diegomad14" if config.mock_mode else "anonymous")
+
+
+def require_deployer(request: Request) -> str:
+    """Require an authenticated, allowlisted platform deployer."""
+    identity = get_identity(request)
+    if identity == "anonymous":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Sign in with GitHub to deploy a service",
+        )
+    allowed = config.auth.allowed_logins
+    if allowed and identity.lower() not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"GitHub user '{identity}' is not allowed to deploy",
+        )
+    return identity
 
 
 def verify_no_secrets_in_response(data: dict) -> dict:

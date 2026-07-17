@@ -15,6 +15,30 @@ on:
         description: GitHub Deployment created by Engineering Platform
         required: true
         type: string
+      project_id:
+        description: GCP project from the platform service catalog
+        required: true
+        type: string
+      region:
+        description: Cloud Run region from the platform service catalog
+        required: true
+        type: string
+      image_name:
+        description: Artifact Registry image name for this service
+        required: true
+        type: string
+      artifact_repository:
+        description: Artifact Registry repository
+        required: true
+        type: string
+      build_context:
+        description: Docker build context for this independent service
+        required: true
+        type: string
+      health_path:
+        description: Candidate and production smoke path
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -26,13 +50,13 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
-  REGION: ${{ vars.GCP_REGION || 'us-central1' }}
-  SERVICE_NAME: ${{ vars.CLOUD_RUN_SERVICE }}
-  IMAGE_NAME: ${{ vars.IMAGE_NAME || vars.CLOUD_RUN_SERVICE }}
-  ARTIFACT_REPOSITORY: ${{ vars.ARTIFACT_REGISTRY_REPO || 'cloud-run-source-deploy' }}
-  BUILD_CONTEXT: ${{ vars.BUILD_CONTEXT || '.' }}
-  HEALTH_PATH: ${{ vars.HEALTH_PATH || '/' }}
+  PROJECT_ID: ${{ inputs.project_id }}
+  REGION: ${{ inputs.region }}
+  SERVICE_NAME: ${{ inputs.service_name }}
+  IMAGE_NAME: ${{ inputs.image_name }}
+  ARTIFACT_REPOSITORY: ${{ inputs.artifact_repository }}
+  BUILD_CONTEXT: ${{ inputs.build_context }}
+  HEALTH_PATH: ${{ inputs.health_path }}
 
 jobs:
   verify-release:
@@ -48,7 +72,7 @@ jobs:
         id: release
         run: |
           set -euo pipefail
-          [[ "${{ inputs.tag }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]
+          [[ "${{ inputs.tag }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
           test "${{ inputs.service_name }}" = "$SERVICE_NAME"
           test -n "$PROJECT_ID"
           test -n "${{ vars.GCP_WIF_PROVIDER }}"
@@ -61,7 +85,9 @@ jobs:
         run: |
           gh api --method POST \
             "repos/${{ github.repository }}/deployments/${{ inputs.github_deployment_id }}/statuses" \
-            -f state=in_progress -f description='Release verification passed' >/dev/null
+            -f state=in_progress \
+            -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f description='Release verification passed' >/dev/null
 
   build:
     name: Build image
@@ -120,6 +146,16 @@ jobs:
     steps:
       - name: Smoke candidate revision
         run: curl --fail-with-body --retry 5 --retry-all-errors "${{ needs.deploy-candidate.outputs.url }}$HEALTH_PATH"
+      - name: Publish candidate evidence
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --method POST \
+            "repos/${{ github.repository }}/deployments/${{ inputs.github_deployment_id }}/statuses" \
+            -f state=in_progress \
+            -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f environment_url="${{ needs.deploy-candidate.outputs.url }}" \
+            -f description="candidate_revision=${{ needs.deploy-candidate.outputs.revision }}" >/dev/null
 
   promote:
     name: Promote production
@@ -128,6 +164,7 @@ jobs:
     environment: production
     outputs:
       previous_revision: ${{ steps.snapshot.outputs.previous_revision }}
+      production_revision: ${{ steps.promote.outputs.production_revision }}
       production_url: ${{ steps.promote.outputs.production_url }}
     steps:
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
@@ -146,6 +183,7 @@ jobs:
         run: |
           gcloud run services update-traffic "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --to-revisions="${{ needs.deploy-candidate.outputs.revision }}=100" --quiet
           URL=$(gcloud run services describe "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')
+          echo "production_revision=${{ needs.deploy-candidate.outputs.revision }}" >> "$GITHUB_OUTPUT"
           echo "production_url=$URL" >> "$GITHUB_OUTPUT"
 
   validate-production:
@@ -161,7 +199,10 @@ jobs:
         run: |
           gh api --method POST \
             "repos/${{ github.repository }}/deployments/${{ inputs.github_deployment_id }}/statuses" \
-            -f state=success -f environment_url="${{ needs.promote.outputs.production_url }}" -f description='Production validation passed' >/dev/null
+            -f state=success \
+            -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f environment_url="${{ needs.promote.outputs.production_url }}" \
+            -f description="production_revision=${{ needs.promote.outputs.production_revision }}" >/dev/null
 
   rollback:
     name: Rollback production
@@ -185,7 +226,9 @@ jobs:
           STATE=$([ "${{ job.status }}" = success ] && echo failure || echo error)
           gh api --method POST \
             "repos/${{ github.repository }}/deployments/${{ inputs.github_deployment_id }}/statuses" \
-            -f state="$STATE" -f description='Production validation failed; rollback executed' >/dev/null
+            -f state="$STATE" \
+            -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f description='Production validation failed; rollback executed' >/dev/null
 
   mark-failed:
     name: Mark deployment failed
@@ -199,4 +242,6 @@ jobs:
         run: |
           gh api --method POST \
             "repos/${{ github.repository }}/deployments/${{ inputs.github_deployment_id }}/statuses" \
-            -f state=failure -f description='Deployment failed before production traffic changed' >/dev/null
+            -f state=failure \
+            -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f description='Deployment failed before production traffic changed' >/dev/null

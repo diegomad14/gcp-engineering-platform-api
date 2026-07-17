@@ -13,6 +13,7 @@ from ..models import (
     DeploymentItem,
     DeploymentStage,
     DeploymentStageStatus,
+    CatalogService,
     ReleaseTag,
     ReleaseTagPage,
 )
@@ -39,6 +40,7 @@ _STAGE_TO_STATUS = {
     "validate-production": "VALIDATING_PRODUCTION",
     "rollback": "ROLLING_BACK",
 }
+TERMINAL_STATUSES = frozenset({"SUCCEEDED", "FAILED", "ROLLED_BACK", "ROLLBACK_FAILED"})
 
 
 def default_stages() -> list[DeploymentStage]:
@@ -78,6 +80,8 @@ def list_tags(
     limit: int = 10,
 ) -> ReleaseTagPage:
     offset = int(cursor or "0")
+    if offset < 0:
+        raise ValueError("Tag cursor must be non-negative")
     if config.mock_mode:
         mock_tags = [
             ReleaseTag(
@@ -102,6 +106,10 @@ def list_tags(
     repo = github_client().get_repo(repository)
     tags = repo.get_tags()
     page: list[ReleaseTag] = []
+    previous = deployment_store.list_for_service(service_name, limit=100)
+    active = next(
+        (item for item in previous if item.status not in TERMINAL_STATUSES), None
+    )
     for index, tag in enumerate(tags):
         if index < offset:
             continue
@@ -115,8 +123,10 @@ def list_tags(
             created_at = _iso(commit.commit.committer.date)
         except Exception:
             pass
-        previous = deployment_store.list_for_service(service_name, limit=100)
-        if eligible and any(
+        if eligible and active is not None:
+            eligible = False
+            reason = f"Deployment {active.tag} is already active for this service"
+        elif eligible and any(
             item.tag == tag.name and item.status == "SUCCEEDED" for item in previous
         ):
             eligible = False
@@ -147,8 +157,10 @@ def get_tag(repository: str, service_name: str, name: str) -> ReleaseTag | None:
 
 
 def start_deployment(
-    *, repository: str, service_name: str, tag: ReleaseTag, requested_by: str
+    *, service: CatalogService, tag: ReleaseTag, requested_by: str
 ) -> DeploymentItem:
+    repository = service.repository
+    service_name = service.service_name
     now = datetime.now(timezone.utc).isoformat()
     if config.mock_mode:
         deployment_id = str(int(datetime.now(timezone.utc).timestamp() * 1000))
@@ -171,17 +183,29 @@ def start_deployment(
         task="deploy",
         auto_merge=False,
         required_contexts=[],
-        environment=f"{service_name}-candidate",
+        environment=f"{service_name}-production",
         description=f"Deploy {service_name} {tag.name}",
         payload={"service_name": service_name, "tag": tag.name},
     )
-    workflow = repo.get_workflow(config.github.deployment_workflow)
+    github_deployment.create_status(
+        state="queued",
+        description="Queued by Engineering Platform",
+    )
+    workflow = repo.get_workflow(
+        service.deployment.workflow_file or config.github.deployment_workflow
+    )
     workflow.create_dispatch(
         ref=tag.name,
         inputs={
             "service_name": service_name,
             "tag": tag.name,
             "github_deployment_id": str(github_deployment.id),
+            "project_id": service.project_id,
+            "region": service.region,
+            "image_name": service.deployment.image_name or service_name,
+            "artifact_repository": service.deployment.artifact_repository,
+            "build_context": service.deployment.build_context,
+            "health_path": service.deployment.health_path,
         },
     )
     return DeploymentItem(
@@ -230,22 +254,41 @@ def _stage_status(job: Any) -> DeploymentStageStatus:
     return "failed"
 
 
+def _run_id(url: str) -> int | None:
+    match = re.search(r"/actions/runs/(\d+)", url)
+    return int(match.group(1)) if match else None
+
+
+def _metadata_from_statuses(repo: Any, item: DeploymentItem) -> int | None:
+    """Read workflow and revision evidence from GitHub Deployment statuses."""
+    if not item.github_deployment_id:
+        return None
+    deployment = repo.get_deployment(item.github_deployment_id)
+    discovered_run_id: int | None = None
+    for status in deployment.get_statuses():
+        log_url = str(
+            getattr(status, "log_url", "") or getattr(status, "target_url", "") or ""
+        )
+        discovered_run_id = discovered_run_id or _run_id(log_url)
+        description = str(getattr(status, "description", "") or "")
+        environment_url = str(getattr(status, "environment_url", "") or "")
+        if description.startswith("candidate_revision="):
+            item.candidate_revision = description.removeprefix("candidate_revision=")
+            item.candidate_url = environment_url or item.candidate_url
+        elif description.startswith("production_revision="):
+            item.production_revision = description.removeprefix("production_revision=")
+            item.production_url = environment_url or item.production_url
+    return discovered_run_id
+
+
 def refresh(item: DeploymentItem) -> DeploymentItem:
     """Project GitHub workflow jobs into the platform's friendly stage model."""
     if config.mock_mode:
         return item
     repo = github_client().get_repo(item.repository)
     try:
-        workflow = repo.get_workflow(config.github.deployment_workflow)
-        runs = workflow.get_runs(event="workflow_dispatch", head_sha=item.sha)
-        run = next(
-            (
-                candidate
-                for candidate in runs
-                if _iso(candidate.created_at) >= item.created_at
-            ),
-            None,
-        )
+        run_id = item.github_run_id or _metadata_from_statuses(repo, item)
+        run = repo.get_workflow_run(run_id) if run_id else None
     except Exception as exc:
         item.error = f"Unable to read GitHub workflow: {exc}"
         return item

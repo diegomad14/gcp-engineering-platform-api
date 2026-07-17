@@ -12,7 +12,7 @@ from ..models import (
     DeploymentList,
     ReleaseTagPage,
 )
-from ..security import get_identity
+from ..security import require_deployer
 from ..services import catalog, deployment_store, github_deployments
 
 router = APIRouter(prefix="/api", tags=["deployments"])
@@ -61,10 +61,32 @@ async def create_deployment(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     service = _service_or_404(service_name)
+    requested_by = require_deployer(request)
     key = idempotency_key or str(uuid.uuid4())
     existing = deployment_store.find_by_idempotency_key(key)
     if existing is not None:
+        if existing.service_name != service_name or existing.tag != payload.tag:
+            raise HTTPException(
+                status_code=409,
+                detail="Idempotency-Key was already used for another deployment",
+            )
         return existing
+    active = next(
+        (
+            item
+            for item in deployment_store.list_for_service(service_name, limit=100)
+            if item.status not in github_deployments.TERMINAL_STATUSES
+        ),
+        None,
+    )
+    if active is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Deployment '{active.tag}' is already active for this service "
+                f"(id: {active.id})"
+            ),
+        )
     try:
         tag = github_deployments.get_tag(service.repository, service_name, payload.tag)
         if tag is None:
@@ -72,10 +94,9 @@ async def create_deployment(
         if not tag.eligible:
             raise HTTPException(status_code=409, detail=tag.reason)
         item = github_deployments.start_deployment(
-            repository=service.repository,
-            service_name=service_name,
+            service=service,
             tag=tag,
-            requested_by=get_identity(request),
+            requested_by=requested_by,
         )
         return deployment_store.save(item, key)
     except HTTPException:
@@ -104,7 +125,10 @@ async def list_service_deployments(
             item.error = f"GitHub unavailable: {exc}"
         deployment_store.save(item, "")
         refreshed.append(item)
-    return DeploymentList(items=refreshed, total=len(refreshed))
+    return DeploymentList(
+        items=refreshed,
+        total=deployment_store.count_for_service(service_name),
+    )
 
 
 @router.get("/deployments/{deployment_id}", response_model=DeploymentItem)
