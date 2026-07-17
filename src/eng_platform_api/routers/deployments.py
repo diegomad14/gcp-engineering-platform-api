@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import uuid
 
+from typing import Annotated
+
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 
 from ..models import (
@@ -141,7 +143,7 @@ async def rollback_deployment(
     service_name: str,
     target_deployment_id: str,
     request: Request,
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
     service = _service_or_404(service_name)
     requested_by = require_deployer(request)

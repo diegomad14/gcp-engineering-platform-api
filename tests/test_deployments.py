@@ -1,6 +1,7 @@
 """Contract tests for GitHub-native deployment endpoints."""
 
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -440,6 +441,152 @@ def test_list_tags_eligibility_follows_current_live_tag():
     assert by_name["v0.5.0"].eligible is False
     assert by_name["v0.5.0"].reason == "This tag is already live in production"
     assert by_name["v0.4.0"].eligible is True
+
+
+def test_start_rollback_mock_mode_returns_synthetic_item():
+    from eng_platform_api.services import catalog, github_deployments
+
+    service = catalog.get_service("eng-platform-api")
+    assert service is not None
+    target = _succeeded_deployment()
+
+    with mock.patch.object(github_deployments.config, "mock_mode", True):
+        item = github_deployments.start_rollback(
+            service=service, target=target, requested_by="diegomad14"
+        )
+
+    assert item.kind == "rollback"
+    assert item.tag == target.tag
+    assert item.sha == target.sha
+    assert item.status == "QUEUED"
+    assert item.stages[0].key == "rollback"
+
+
+def test_start_rollback_dispatches_with_independent_service_configuration():
+    from eng_platform_api.services import catalog, github_deployments
+
+    service = catalog.get_service("cgm-sanplat-web")
+    assert service is not None
+    target = _succeeded_deployment(tag="v0.4.0")
+    repository = mock.MagicMock()
+    github_deployment = mock.MagicMock(id=88)
+    repository.create_deployment.return_value = github_deployment
+    workflow = repository.get_workflow.return_value
+    github = mock.MagicMock()
+    github.get_repo.return_value = repository
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        item = github_deployments.start_rollback(
+            service=service,
+            target=target,
+            requested_by="diegomad14",
+        )
+
+    assert item.id == "88"
+    assert item.kind == "rollback"
+    repository.get_workflow.assert_called_once_with("platform-rollback.yml")
+    inputs = workflow.create_dispatch.call_args.kwargs["inputs"]
+    assert inputs["service_name"] == "cgm-sanplat-web"
+    assert inputs["target_tag"] == target.tag
+    assert inputs["target_revision"] == target.production_revision
+    assert inputs["project_id"] == "cgm-assistant-prod"
+
+
+def test_refresh_marks_standalone_rollback_deployment_as_rolled_back():
+    from eng_platform_api.services import github_deployments
+
+    item = DeploymentItem(
+        id="200",
+        service_name="eng-platform-api",
+        repository="diegomad14/gcp-engineering-platform-api",
+        tag="v0.4.0",
+        sha="b" * 40,
+        kind="rollback",
+        status="QUEUED",
+        current_stage="queued",
+        stages=github_deployments.default_stages("rollback"),
+        created_at="2026-07-17T12:00:00+00:00",
+        updated_at="2026-07-17T12:00:00+00:00",
+        github_run_id=555,
+    )
+    job = SimpleNamespace(
+        name="Rollback production",
+        status="completed",
+        conclusion="success",
+        started_at=datetime(2026, 7, 17, 12, 0, 0),
+        completed_at=datetime(2026, 7, 17, 12, 1, 0),
+        html_url="https://github.com/diegomad14/repo/actions/runs/555/job/1",
+    )
+    run = SimpleNamespace(
+        id=555,
+        html_url="https://github.com/diegomad14/repo/actions/runs/555",
+        updated_at=datetime(2026, 7, 17, 12, 1, 0),
+        conclusion="success",
+        jobs=lambda: [job],
+    )
+    repo = mock.MagicMock()
+    repo.get_workflow_run.return_value = run
+    github = mock.MagicMock()
+    github.get_repo.return_value = repo
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        result = github_deployments.refresh(item)
+
+    assert result.status == "ROLLED_BACK"
+    assert result.current_stage == "rollback"
+    assert result.stages[0].status == "succeeded"
+    assert result.stages[0].details == job.html_url
+
+
+def test_refresh_still_detects_embedded_auto_rollback_on_deploy_kind_item():
+    from eng_platform_api.services import github_deployments
+
+    item = _deployment()  # kind="deploy" by default
+    item.github_run_id = 556
+    rollback_job = SimpleNamespace(
+        name="Rollback production",
+        status="completed",
+        conclusion="failure",
+        started_at=datetime(2026, 7, 17, 12, 0, 0),
+        completed_at=datetime(2026, 7, 17, 12, 1, 0),
+        html_url="https://github.com/diegomad14/repo/actions/runs/556/job/1",
+    )
+    unrelated_job = SimpleNamespace(
+        name="Setup runner",
+        status="completed",
+        conclusion="success",
+        started_at=datetime(2026, 7, 17, 11, 59, 0),
+        completed_at=datetime(2026, 7, 17, 11, 59, 30),
+        html_url="https://github.com/diegomad14/repo/actions/runs/556/job/0",
+    )
+    run = SimpleNamespace(
+        id=556,
+        html_url="https://github.com/diegomad14/repo/actions/runs/556",
+        updated_at=datetime(2026, 7, 17, 12, 1, 0),
+        conclusion="failure",
+        jobs=lambda: [unrelated_job, rollback_job],
+    )
+    repo = mock.MagicMock()
+    repo.get_workflow_run.return_value = run
+    github = mock.MagicMock()
+    github.get_repo.return_value = repo
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        result = github_deployments.refresh(item)
+
+    assert result.status == "ROLLBACK_FAILED"
+    assert result.current_stage == "rollback"
+    # The deploy pipeline's own stages stay untouched by the embedded rollback job.
+    assert all(stage.status == "pending" for stage in result.stages)
 
 
 def test_deployment_statuses_supply_run_and_revision_evidence():
