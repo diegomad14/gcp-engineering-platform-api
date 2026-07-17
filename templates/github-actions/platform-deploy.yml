@@ -103,8 +103,14 @@ jobs:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
-      - name: Build immutable image with Cloud Build
-        run: gcloud builds submit "$BUILD_CONTEXT" --project="$PROJECT_ID" --tag="${{ needs.verify-release.outputs.image }}" --quiet
+      - name: Authenticate Docker to Artifact Registry
+        run: gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+      - name: Build and push immutable image
+        env:
+          IMAGE: ${{ needs.verify-release.outputs.image }}
+        run: |
+          docker build --tag "$IMAGE" "$BUILD_CONTEXT"
+          docker push "$IMAGE"
 
   deploy-candidate:
     name: Deploy candidate
