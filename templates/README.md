@@ -12,12 +12,13 @@ Before adoption:
 
 ## Release Templates
 
-- `release-candidate.yml` builds and deploys no-traffic candidate revisions.
-- `promote-prod.yml` moves production traffic after strict revision checks. Post-promotion CORS, Web HEAD, and OpenAPI diagnostics are warnings.
-- `promote-emergency.yml` is incident-only. It moves traffic to known Ready revisions with confirmation `EMERGENCY_PROMOTE` and skips non-critical validation.
-- `rollback-prod.yml` moves traffic back to known-good revisions.
+- `platform-deploy.yml` is the canonical GitHub-native workflow. It verifies an
+  immutable tag, builds once, deploys a zero-traffic candidate, validates,
+  promotes, validates production and rolls back automatically when required.
 
-Set `PLATFORM_API_URL` as a repository variable in adopting service repositories to register release events through `POST /api/releases`. If it is absent, release registration is skipped without blocking deployment.
+The platform dispatches this workflow through GitHub Deployments. The legacy
+manual candidate/promote/rollback templates were removed because their
+`workflow_dispatch` interfaces exceeded GitHub's supported input limit.
 
 ## Quality Gate
 
