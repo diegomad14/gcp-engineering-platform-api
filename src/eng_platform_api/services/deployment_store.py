@@ -52,7 +52,9 @@ def _firestore_collection():
         return None
     from google.cloud import firestore
 
-    return firestore.Client().collection(_COLLECTION)
+    project_id = os.getenv("ENG_PLATFORM_GCP_PROJECT_ID", "").strip()
+    client = firestore.Client(project=project_id) if project_id else firestore.Client()
+    return client.collection(_COLLECTION)
 
 
 def save(item: DeploymentItem, idempotency_key: str) -> DeploymentItem:

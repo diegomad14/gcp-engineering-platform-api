@@ -152,6 +152,32 @@ def test_negative_tag_cursor_is_rejected(client):
     assert response.status_code == 400
 
 
+def test_operational_value_error_is_not_reported_as_invalid_cursor(client):
+    with mock.patch(
+        "eng_platform_api.routers.deployments.github_deployments.list_tags",
+        side_effect=ValueError("Project ID is required"),
+    ):
+        response = client.get("/api/services/eng-platform-api/tags")
+    assert response.status_code == 502
+    assert response.json()["detail"] == "GitHub unavailable: Project ID is required"
+
+
+def test_firestore_client_uses_configured_project(monkeypatch):
+    from eng_platform_api.services import deployment_store
+
+    firestore_client = mock.MagicMock()
+    monkeypatch.setenv("ENG_PLATFORM_GCP_PROJECT_ID", "cgm-assistant-prod")
+    with (
+        mock.patch.object(deployment_store, "_COLLECTION", "eng_platform_deployments"),
+        mock.patch(
+            "google.cloud.firestore.Client", return_value=firestore_client
+        ) as client_factory,
+    ):
+        collection = deployment_store._firestore_collection()
+    client_factory.assert_called_once_with(project="cgm-assistant-prod")
+    assert collection is firestore_client.collection.return_value
+
+
 def test_get_and_list_reconstruct_from_store(client):
     from eng_platform_api.services import deployment_store
 
