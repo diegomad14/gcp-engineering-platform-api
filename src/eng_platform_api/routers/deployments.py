@@ -16,6 +16,7 @@ from ..security import require_deployer
 from ..services import catalog, deployment_store, github_deployments
 
 router = APIRouter(prefix="/api", tags=["deployments"])
+_GITHUB_UNAVAILABLE = "GitHub unavailable"
 
 
 def _service_or_404(service_name: str):
@@ -52,9 +53,7 @@ async def list_service_tags(
             service.repository, service_name, cursor=cursor, limit=limit
         )
     except Exception as exc:
-        raise HTTPException(
-            status_code=502, detail=f"GitHub unavailable: {exc}"
-        ) from exc
+        raise HTTPException(status_code=502, detail=_GITHUB_UNAVAILABLE) from exc
 
 
 @router.post(
@@ -117,9 +116,7 @@ async def create_deployment(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(
-            status_code=502, detail=f"GitHub unavailable: {exc}"
-        ) from exc
+        raise HTTPException(status_code=502, detail=_GITHUB_UNAVAILABLE) from exc
 
 
 @router.get(
@@ -136,8 +133,8 @@ async def list_service_deployments(
     for item in items:
         try:
             item = github_deployments.refresh(item)
-        except Exception as exc:
-            item.error = f"GitHub unavailable: {exc}"
+        except Exception:
+            item.error = _GITHUB_UNAVAILABLE
         deployment_store.save(item, "")
         refreshed.append(item)
     return DeploymentList(
@@ -154,6 +151,6 @@ async def get_deployment(deployment_id: str):
     try:
         item = github_deployments.refresh(item)
         deployment_store.save(item, "")
-    except Exception as exc:
-        item.error = f"GitHub unavailable: {exc}"
+    except Exception:
+        item.error = _GITHUB_UNAVAILABLE
     return item
