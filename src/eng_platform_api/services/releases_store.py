@@ -17,7 +17,18 @@ from ..models import (
 )
 
 _DEFAULT_STORE_PATH = Path(os.getenv("RELEASES_STORE_PATH", "data/releases.json"))
+_COLLECTION = os.getenv("ENG_PLATFORM_RELEASES_FIRESTORE_COLLECTION", "")
 _store_lock = threading.RLock()
+
+
+def _firestore_collection():
+    if not _COLLECTION:
+        return None
+    from google.cloud import firestore
+
+    project_id = os.getenv("ENG_PLATFORM_GCP_PROJECT_ID", "").strip()
+    client = firestore.Client(project=project_id) if project_id else firestore.Client()
+    return client.collection(_COLLECTION)
 
 
 def _resolve_path() -> Path:
@@ -203,6 +214,20 @@ def save_release(payload: ReleaseCreateRequest) -> list[ReleaseItem]:
         for normalized in [_normalize_service(service)]
     ]
 
+    collection = _firestore_collection()
+    if collection is not None:
+        for item in items:
+            doc_id = f"{item.service_name}-{item.created_at}"
+            collection.document(doc_id).set(
+                {
+                    **item.model_dump(),
+                    "triggered_by": payload.triggered_by,
+                    "rollback_from_version": payload.rollback_from_version,
+                    "notes": payload.notes,
+                }
+            )
+        return items
+
     with _store_lock:
         records = _load()
         records.extend(
@@ -221,17 +246,35 @@ def save_release(payload: ReleaseCreateRequest) -> list[ReleaseItem]:
 def get_releases(
     service_name: Optional[str] = None, limit: int = 20
 ) -> list[ReleaseItem]:
-    with _store_lock:
-        records = _load()
-
-    items = [
-        item
-        for record in records
-        for item in release_items_from_record(record)
-        if not service_name or item.service_name == service_name
-    ]
-    items.sort(key=lambda item: item.created_at, reverse=True)
-    return items[:limit]
+    collection = _firestore_collection()
+    if collection is not None:
+        if service_name:
+            snapshots = (
+                collection.where("service_name", "==", service_name)
+                .order_by("created_at", direction="DESCENDING")
+                .limit(limit)
+                .stream()
+            )
+        else:
+            snapshots = (
+                collection.order_by("created_at", direction="DESCENDING")
+                .limit(limit)
+                .stream()
+            )
+        records = [snapshot.to_dict() for snapshot in snapshots]
+        items = [ReleaseItem(**record) for record in records]
+        return items
+    else:
+        with _store_lock:
+            records = _load()
+        items = [
+            item
+            for record in records
+            for item in release_items_from_record(record)
+            if not service_name or item.service_name == service_name
+        ]
+        items.sort(key=lambda item: item.created_at, reverse=True)
+        return items[:limit]
 
 
 def get_latest(service_name: str) -> Optional[ReleaseItem]:
@@ -240,6 +283,13 @@ def get_latest(service_name: str) -> Optional[ReleaseItem]:
 
 
 def count_releases(service_name: Optional[str] = None) -> int:
+    collection = _firestore_collection()
+    if collection is not None:
+        if service_name:
+            return sum(
+                1 for _ in collection.where("service_name", "==", service_name).stream()
+            )
+        return sum(1 for _ in collection.stream())
     with _store_lock:
         records = _load()
     return sum(
