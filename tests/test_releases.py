@@ -230,3 +230,99 @@ def test_concurrent_writes_preserve_all_service_rows(client):
     with ThreadPoolExecutor(max_workers=5) as executor:
         assert set(executor.map(register, range(10))) == {201}
     assert client.get("/api/releases?limit=20").json()["total_releases"] == 10
+
+
+def test_firestore_save_and_query_uses_collection_backend():
+    """Firestore backend saves and queries per-service release rows."""
+    from unittest import mock as um
+
+    from eng_platform_api.models import ReleaseCreateRequest, ServiceRevision
+    from eng_platform_api.services import releases_store
+
+    doc_mock = um.MagicMock()
+    collection_mock = um.MagicMock()
+    collection_mock.document.return_value = doc_mock
+    doc_mock.get.return_value = um.MagicMock(exists=False, to_dict=lambda: {})
+
+    with (
+        um.patch.object(
+            releases_store,
+            "_firestore_collection",
+            return_value=collection_mock,
+        ),
+        um.patch.object(
+            releases_store,
+            "_COLLECTION",
+            "test_releases",
+        ),
+    ):
+        releases_store.save_release(
+            ReleaseCreateRequest(
+                repository="diegomad14/test-repo",
+                version="v1.0.0",
+                services=[
+                    ServiceRevision(
+                        service_name="test-api",
+                        revision="test-api-00001-abc",
+                        action="promoted",
+                    )
+                ],
+            )
+        )
+        doc_mock.set.assert_called_once()
+        args = doc_mock.set.call_args[0][0]
+        assert args["service_name"] == "test-api"
+        assert args["repository"] == "diegomad14/test-repo"
+        assert args["version"] == "v1.0.0"
+        assert args["action"] == "promoted"
+
+        # Also exercise get_releases and count_releases via Firestore
+        saved_record = {
+            "service_name": "test-api",
+            "repository": "diegomad14/test-repo",
+            "version": "v1.0.0",
+            "status": "promoted",
+            "revision": "test-api-00001-abc",
+            "action": "promoted",
+            "github_run_url": "",
+            "created_at": "2026-07-17T00:00:00Z",
+        }
+        mock_stream = [um.MagicMock(to_dict=lambda r=saved_record: r)]
+        collection_mock.order_by.return_value.limit.return_value.stream.return_value = (
+            mock_stream
+        )
+        collection_mock.where.return_value.order_by.return_value.limit.return_value.stream.return_value = mock_stream
+        collection_mock.where.return_value.stream.return_value = mock_stream
+
+        results = releases_store.get_releases(service_name="test-api", limit=5)
+        assert len(results) == 1
+        assert results[0].service_name == "test-api"
+        assert results[0].action == "promoted"
+
+        count = releases_store.count_releases(service_name="test-api")
+        assert count == 1
+
+
+def test_firestore_collection_returns_client_when_configured():
+    """_firestore_collection creates a Firestore client when _COLLECTION is set."""
+    from unittest import mock as um
+
+    from eng_platform_api.services import releases_store
+
+    fake_client = um.MagicMock()
+    fake_collection = um.MagicMock()
+    fake_client.collection.return_value = fake_collection
+
+    with (
+        um.patch.object(releases_store, "_COLLECTION", "test_releases"),
+        um.patch("os.getenv", return_value="test-project"),
+        um.patch("google.cloud.firestore.Client") as mock_client_cls,
+    ):
+        mock_client_cls.return_value = fake_client
+        result = releases_store._firestore_collection()
+        assert result is fake_collection
+        fake_client.collection.assert_called_once_with("test_releases")
+
+    # When _COLLECTION is empty, returns None
+    with um.patch.object(releases_store, "_COLLECTION", ""):
+        assert releases_store._firestore_collection() is None
