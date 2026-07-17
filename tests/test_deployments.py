@@ -2,6 +2,7 @@
 
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -196,3 +197,33 @@ def test_dispatch_uses_independent_service_catalog_configuration():
     assert inputs["build_context"] == "frontend"
     assert inputs["health_path"] == "/"
     assert inputs["project_id"] == "cgm-assistant-prod"
+
+
+def test_deployment_statuses_supply_run_and_revision_evidence():
+    from eng_platform_api.services import github_deployments
+
+    item = _deployment()
+    statuses = [
+        SimpleNamespace(
+            log_url="https://github.com/diegomad14/repo/actions/runs/314",
+            target_url="",
+            description="candidate_revision=service-00012-candidate",
+            environment_url="https://candidate.example",
+        ),
+        SimpleNamespace(
+            log_url="",
+            target_url="",
+            description="production_revision=service-00012-production",
+            environment_url="https://production.example",
+        ),
+    ]
+    repository = mock.MagicMock()
+    repository.get_deployment.return_value.get_statuses.return_value = statuses
+
+    run_id = github_deployments._metadata_from_statuses(repository, item)
+
+    assert run_id == 314
+    assert item.candidate_revision == "service-00012-candidate"
+    assert item.candidate_url == "https://candidate.example"
+    assert item.production_revision == "service-00012-production"
+    assert item.production_url == "https://production.example"

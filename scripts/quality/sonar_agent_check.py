@@ -102,6 +102,14 @@ def main() -> int:
 
     status = str(gate.get("status", "NONE"))
     print(f"SonarCloud {project}: {status}; open issues: {issues.get('total', 0)}")
+    for condition in gate.get("conditions", []):
+        if condition.get("status") == "OK":
+            continue
+        print(
+            f"- GATE {condition.get('metricKey', 'unknown')}: "
+            f"actual={condition.get('actualValue', 'unknown')} "
+            f"threshold={condition.get('errorThreshold', 'unknown')}"
+        )
     for issue in issues.get("issues", []):
         component = str(issue.get("component", "")).removeprefix(f"{project}:")
         location = (
