@@ -34,6 +34,7 @@ class GitHubConfig:
     installation_id: str = ""
     private_key: str = ""
     deployment_workflow: str = "platform-deploy.yml"
+    rollback_workflow: str = "platform-rollback.yml"
 
 
 @dataclass
@@ -105,6 +106,9 @@ def load_config() -> PlatformConfig:
         ),
         deployment_workflow=os.getenv(
             "ENG_PLATFORM_GITHUB_DEPLOYMENT_WORKFLOW", "platform-deploy.yml"
+        ),
+        rollback_workflow=os.getenv(
+            "ENG_PLATFORM_GITHUB_ROLLBACK_WORKFLOW", "platform-rollback.yml"
         ),
     )
 

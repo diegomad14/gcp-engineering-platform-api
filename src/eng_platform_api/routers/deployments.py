@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import uuid
 
+from typing import Annotated
+
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 
 from ..models import (
@@ -26,6 +28,17 @@ def _service_or_404(service_name: str):
     if not service.repository:
         raise HTTPException(status_code=409, detail="Service has no GitHub repository")
     return service
+
+
+def _active_deployment(service_name: str) -> DeploymentItem | None:
+    return next(
+        (
+            item
+            for item in deployment_store.list_for_service(service_name, limit=100)
+            if item.status not in github_deployments.TERMINAL_STATUSES
+        ),
+        None,
+    )
 
 
 @router.get(
@@ -85,14 +98,7 @@ async def create_deployment(
                 detail="Idempotency-Key was already used for another deployment",
             )
         return existing
-    active = next(
-        (
-            item
-            for item in deployment_store.list_for_service(service_name, limit=100)
-            if item.status not in github_deployments.TERMINAL_STATUSES
-        ),
-        None,
-    )
+    active = _active_deployment(service_name)
     if active is not None:
         raise HTTPException(
             status_code=409,
@@ -110,6 +116,69 @@ async def create_deployment(
         item = github_deployments.start_deployment(
             service=service,
             tag=tag,
+            requested_by=requested_by,
+        )
+        return deployment_store.save(item, key)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=_GITHUB_UNAVAILABLE) from exc
+
+
+@router.post(
+    "/services/{service_name}/deployments/{target_deployment_id}/rollback",
+    response_model=DeploymentItem,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        401: {"description": "GitHub authentication required"},
+        403: {"description": "Operator is not allowlisted"},
+        404: {"description": "Service or target deployment not found"},
+        409: {
+            "description": "Target is not a succeeded production deployment, or an active deployment already exists"
+        },
+        502: {"description": "GitHub is unavailable"},
+    },
+)
+async def rollback_deployment(
+    service_name: str,
+    target_deployment_id: str,
+    request: Request,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+):
+    service = _service_or_404(service_name)
+    requested_by = require_deployer(request)
+    target = deployment_store.get(target_deployment_id)
+    if target is None or target.service_name != service_name:
+        raise HTTPException(
+            status_code=404, detail="Unknown deployment to roll back to"
+        )
+    if target.status != "SUCCEEDED" or not target.production_revision:
+        raise HTTPException(
+            status_code=409,
+            detail="Can only roll back to a previously succeeded production revision",
+        )
+    key = idempotency_key or str(uuid.uuid4())
+    existing = deployment_store.find_by_idempotency_key(key)
+    if existing is not None:
+        if existing.service_name != service_name or existing.tag != target.tag:
+            raise HTTPException(
+                status_code=409,
+                detail="Idempotency-Key was already used for another deployment",
+            )
+        return existing
+    active = _active_deployment(service_name)
+    if active is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Deployment '{active.tag}' is already active for this service "
+                f"(id: {active.id})"
+            ),
+        )
+    try:
+        item = github_deployments.start_rollback(
+            service=service,
+            target=target,
             requested_by=requested_by,
         )
         return deployment_store.save(item, key)

@@ -1,0 +1,96 @@
+name: Platform Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_name:
+        description: Cloud Run service selected in Engineering Platform
+        required: true
+        type: string
+      target_tag:
+        description: Immutable semantic release tag being restored
+        required: true
+        type: string
+      target_revision:
+        description: Cloud Run revision to restore to 100 percent traffic
+        required: true
+        type: string
+      github_deployment_id:
+        description: GitHub Deployment created by Engineering Platform
+        required: true
+        type: string
+      project_id:
+        description: GCP project from the platform service catalog
+        required: true
+        type: string
+      region:
+        description: Cloud Run region from the platform service catalog
+        required: true
+        type: string
+      health_path:
+        description: Post-rollback smoke path
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  deployments: write
+  id-token: write
+
+concurrency:
+  group: deploy-${{ inputs.service_name }}
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: ${{ inputs.project_id }}
+  REGION: ${{ inputs.region }}
+  SERVICE_NAME: ${{ inputs.service_name }}
+  TARGET_REVISION: ${{ inputs.target_revision }}
+  HEALTH_PATH: ${{ inputs.health_path }}
+  GITHUB_DEPLOYMENT_ID: ${{ inputs.github_deployment_id }}
+
+jobs:
+  rollback:
+    name: Rollback production
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+      - name: Mark GitHub deployment in progress
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --method POST \
+            "repos/${{ github.repository }}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
+            -f state=in_progress \
+            -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f description='Rollback started' >/dev/null
+      - name: Verify target revision is Ready
+        run: |
+          set -euo pipefail
+          READY=$(gcloud run revisions describe "$TARGET_REVISION" \
+            --project="$PROJECT_ID" --region="$REGION" \
+            --format='json(status.conditions)' \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); ready=any(c.get("type")=="Ready" and c.get("status")=="True" for c in d.get("status",{}).get("conditions",[])); print("ready" if ready else "not-ready")')
+          test "$READY" = "ready"
+      - name: Restore target revision to 100 percent traffic
+        run: gcloud run services update-traffic "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --to-revisions="$TARGET_REVISION=100" --quiet
+      - name: Smoke production
+        run: |
+          URL=$(gcloud run services describe "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')
+          curl --fail-with-body --retry 5 --retry-all-errors "$URL$HEALTH_PATH"
+      - name: Mark GitHub deployment result
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          STATE=$([ "${{ job.status }}" = success ] && echo success || echo failure)
+          gh api --method POST \
+            "repos/${{ github.repository }}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
+            -f state="$STATE" \
+            -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f description="production_revision=$TARGET_REVISION" >/dev/null
