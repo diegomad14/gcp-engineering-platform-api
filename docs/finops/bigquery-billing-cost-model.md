@@ -60,18 +60,24 @@ ENG_PLATFORM_BQ_DATASET=billing_export
 ENG_PLATFORM_BQ_TABLE=gcp_billing_export_resource_v1_XXXXXX
 ```
 
-## SQL Query Templates
+## Queries
 
-Available in `sql/billing/`:
+The live queries are built in
+`src/eng_platform_api/services/gcp_billing_bigquery.py`:
 
-| File | Purpose |
-|------|---------|
-| `cost_by_project.sql` | Total cost per GCP project |
-| `cost_by_service.sql` | Cost grouped by `service.description` |
-| `cost_by_cloud_run_service.sql` | Cost for Cloud Run resources specifically |
-| `daily_cost_trend.sql` | Daily cost over a time window |
-| `top_skus.sql` | Highest-cost SKUs |
-| `unlabeled_costs.sql` | Resources missing required labels |
+| Function | Purpose |
+|----------|---------|
+| `_build_items_sql(group_by="resource")` | Line items per resource (`/api/costs/summary`) |
+| `_build_items_sql(group_by="service")` | Cost grouped by `service.description` (`/api/costs/by-service`) |
+| `_build_items_sql(group_by="sku")` | Cost grouped by `sku.description` (`/api/costs/by-sku`) |
+| `get_daily_costs()` | Daily net cost trend plus previous-window total (`/api/costs/daily`) |
+| `build_cost_query()` | Parametrized template (project/service/sku), kept for reference |
+
+**Follow-up — label attribution**: queries group by `resource.name` and
+`service.description`, not by the labels above, because most resources do not
+carry the labels yet. Once `service`/`env`/`owner`/`cost_center` are applied
+consistently, add a labels grouping (`UNNEST(labels)`) with an "unlabeled"
+bucket.
 
 ## Cost Calculation
 

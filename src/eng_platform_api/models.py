@@ -312,6 +312,21 @@ class CostSummary(BaseModel):
     items: list[CostItem] = Field(default_factory=list)
 
 
+class DailyCost(BaseModel):
+    date: str  # ISO YYYY-MM-DD, usage date in the billing account timezone
+    cost: float = 0.0
+    credits: float = 0.0
+    net_cost: float = 0.0
+
+
+class DailyCostSeries(BaseModel):
+    currency: str = "USD"
+    period: CostPeriod
+    days: list[DailyCost] = Field(default_factory=list)
+    previous_period: CostPeriod
+    previous_total_net_cost: float = 0.0
+
+
 # ── Service Factory ──────────────────────────────────────────────────
 
 
