@@ -289,8 +289,8 @@ def refresh(item: DeploymentItem) -> DeploymentItem:
     try:
         run_id = item.github_run_id or _metadata_from_statuses(repo, item)
         run = repo.get_workflow_run(run_id) if run_id else None
-    except Exception as exc:
-        item.error = f"Unable to read GitHub workflow: {exc}"
+    except Exception:
+        item.error = "Unable to read GitHub workflow"
         return item
     if run is None:
         return item

@@ -164,7 +164,56 @@ def test_operational_value_error_is_not_reported_as_invalid_cursor(client):
     ):
         response = client.get("/api/services/eng-platform-api/tags")
     assert response.status_code == 502
-    assert response.json()["detail"] == "GitHub unavailable: Project ID is required"
+    assert response.json()["detail"] == "GitHub unavailable"
+
+
+def test_github_token_is_trimmed(monkeypatch):
+    from eng_platform_api.config import load_config
+
+    monkeypatch.setenv("ENG_PLATFORM_GITHUB_TOKEN", "token-with-whitespace\n")
+    assert load_config().github.token == "token-with-whitespace"
+
+
+def test_create_deployment_hides_upstream_error_details(client):
+    with mock.patch(
+        "eng_platform_api.routers.deployments.github_deployments.get_tag",
+        side_effect=RuntimeError("sensitive provider detail"),
+    ):
+        response = client.post(
+            "/api/services/eng-platform-api/deployments",
+            json={"tag": "v0.6.3"},
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "GitHub unavailable"
+
+
+def test_deployment_reads_hide_upstream_error_details(client):
+    from eng_platform_api.services import deployment_store
+
+    deployment_store.save(_deployment(), "key")
+    with mock.patch(
+        "eng_platform_api.routers.deployments.github_deployments.refresh",
+        side_effect=RuntimeError("sensitive provider detail"),
+    ):
+        listing = client.get("/api/services/eng-platform-api/deployments")
+        detail = client.get("/api/deployments/42")
+    assert listing.json()["items"][0]["error"] == "GitHub unavailable"
+    assert detail.json()["error"] == "GitHub unavailable"
+
+
+def test_refresh_hides_upstream_error_details():
+    from eng_platform_api.services import github_deployments
+
+    github = mock.MagicMock()
+    github.get_repo.return_value.get_deployment.side_effect = RuntimeError(
+        "sensitive provider detail"
+    )
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        item = github_deployments.refresh(_deployment())
+    assert item.error == "Unable to read GitHub workflow"
 
 
 def test_firestore_client_uses_configured_project(monkeypatch):

@@ -97,7 +97,7 @@ def load_config() -> PlatformConfig:
 
     github = GitHubConfig(
         enabled=os.getenv("ENG_PLATFORM_GITHUB_ENABLED", "false").lower() == "true",
-        token=os.getenv("ENG_PLATFORM_GITHUB_TOKEN", ""),
+        token=os.getenv("ENG_PLATFORM_GITHUB_TOKEN", "").strip(),
         app_id=os.getenv("ENG_PLATFORM_GITHUB_APP_ID", ""),
         installation_id=os.getenv("ENG_PLATFORM_GITHUB_INSTALLATION_ID", ""),
         private_key=os.getenv("ENG_PLATFORM_GITHUB_PRIVATE_KEY", "").replace(
