@@ -49,7 +49,7 @@ def _write_object(name: str, data: dict) -> None:
     bucket_name = _bucket_name()
     payload = json.dumps(data, ensure_ascii=False, indent=2)
     if bucket_name:
-        from google.cloud.storage import Client
+        from google.cloud.storage import Client  # type: ignore[import-untyped]
 
         Client().bucket(bucket_name).blob(name).upload_from_string(
             payload,
@@ -67,7 +67,7 @@ def _write_object(name: str, data: dict) -> None:
 def _read_object(name: str) -> dict | None:
     bucket_name = _bucket_name()
     if bucket_name:
-        from google.cloud.storage import Client
+        from google.cloud.storage import Client  # type: ignore[import-untyped]
         from google.api_core.exceptions import NotFound
 
         try:
@@ -94,7 +94,7 @@ def _list_latest_objects() -> list[dict]:
     prefix = f"{_prefix()}/latest/"
     values: list[dict] = []
     if bucket_name:
-        from google.cloud.storage import Client
+        from google.cloud.storage import Client  # type: ignore[import-untyped]
 
         for blob in Client().list_blobs(bucket_name, prefix=prefix):
             try:
@@ -123,7 +123,7 @@ def _list_report_objects(service_name: str) -> list[dict]:
     prefix = f"{_prefix()}/reports/{_safe(service_name)}/"
     values: list[dict] = []
     if bucket_name:
-        from google.cloud.storage import Client
+        from google.cloud.storage import Client  # type: ignore[import-untyped]
 
         blobs = Client().list_blobs(bucket_name, prefix=prefix)
         payloads: Iterable[str] = (blob.download_as_text() for blob in blobs)

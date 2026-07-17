@@ -124,3 +124,15 @@ def list_for_service(service_name: str, limit: int = 20) -> list[DeploymentItem]
     items = [DeploymentItem(**record) for record in records]
     items.sort(key=lambda item: item.created_at, reverse=True)
     return items[:limit]
+
+
+def count_for_service(service_name: str) -> int:
+    collection = _firestore_collection()
+    if collection is not None:
+        return sum(
+            1 for _ in collection.where("service_name", "==", service_name).stream()
+        )
+    with _lock:
+        return sum(
+            1 for record in _local_load() if record.get("service_name") == service_name
+        )

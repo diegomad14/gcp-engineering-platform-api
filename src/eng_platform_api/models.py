@@ -21,6 +21,15 @@ class ServiceQualityConfig(BaseModel):
     coverage_threshold: float = 70.0
 
 
+class ServiceDeploymentConfig(BaseModel):
+    enabled: bool = True
+    workflow_file: str = "platform-deploy.yml"
+    image_name: str = ""
+    artifact_repository: str = "cloud-run-source-deploy"
+    build_context: str = "."
+    health_path: str = "/"
+
+
 class FinOpsLabels(BaseModel):
     service: str = ""
     env: str = ""
@@ -38,6 +47,7 @@ class CatalogService(BaseModel):
     environment: str = "prod"
     validation_targets: list[ValidationTarget] = Field(default_factory=list)
     quality: ServiceQualityConfig = Field(default_factory=ServiceQualityConfig)
+    deployment: ServiceDeploymentConfig = Field(default_factory=ServiceDeploymentConfig)
     finops: FinOpsLabels = Field(default_factory=FinOpsLabels)
 
 
@@ -182,6 +192,13 @@ class DeploymentItem(BaseModel):
 class DeploymentList(BaseModel):
     items: list[DeploymentItem] = Field(default_factory=list)
     total: int = 0
+
+
+class AuthSession(BaseModel):
+    authenticated: bool = False
+    can_deploy: bool = False
+    login: str = ""
+    avatar_url: str = ""
 
 
 # ── Quality ──────────────────────────────────────────────────────────
@@ -346,7 +363,7 @@ class ServiceFactoryPlan(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str = "ok"
-    version: str = "0.4.1"
+    version: str = "0.5.0"
     mock_mode: bool = True
 
 

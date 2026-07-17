@@ -18,6 +18,7 @@ from ..models import (
     CatalogService,
     FinOpsLabels,
     ServiceDetail,
+    ServiceDeploymentConfig,
     ServiceQualityConfig,
     ServiceTraffic,
     ValidationTarget,
@@ -53,6 +54,7 @@ def _catalog_service(cfg: dict) -> CatalogService:
             ValidationTarget(**vt) for vt in cfg.get("validation_targets", [])
         ],
         quality=ServiceQualityConfig(**cfg.get("quality", {})),
+        deployment=ServiceDeploymentConfig(**cfg.get("deployment", {})),
         finops=FinOpsLabels(**cfg.get("finops", {})),
     )
 

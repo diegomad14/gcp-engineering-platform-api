@@ -37,6 +37,15 @@ class GitHubConfig:
 
 
 @dataclass
+class AuthConfig:
+    github_client_id: str = ""
+    github_client_secret: str = ""
+    session_secret: str = ""
+    frontend_url: str = "http://localhost:5173"
+    allowed_logins: tuple[str, ...] = ()
+
+
+@dataclass
 class SonarQubeConfig:
     enabled: bool = False
     token: str = ""
@@ -58,6 +67,7 @@ class PlatformConfig:
     billing: BillingConfig = field(default_factory=BillingConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
+    auth: AuthConfig = field(default_factory=AuthConfig)
     sonarqube: SonarQubeConfig = field(default_factory=SonarQubeConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
 
@@ -98,6 +108,22 @@ def load_config() -> PlatformConfig:
         ),
     )
 
+    auth = AuthConfig(
+        github_client_id=os.getenv("ENG_PLATFORM_GITHUB_OAUTH_CLIENT_ID", ""),
+        github_client_secret=os.getenv("ENG_PLATFORM_GITHUB_OAUTH_CLIENT_SECRET", ""),
+        session_secret=os.getenv("ENG_PLATFORM_SESSION_SECRET", ""),
+        frontend_url=os.getenv(
+            "ENG_PLATFORM_FRONTEND_URL", "http://localhost:5173"
+        ).rstrip("/"),
+        allowed_logins=tuple(
+            login.strip().lower()
+            for login in os.getenv(
+                "ENG_PLATFORM_ALLOWED_GITHUB_LOGINS", "diegomad14"
+            ).split(",")
+            if login.strip()
+        ),
+    )
+
     sonarqube = SonarQubeConfig(
         enabled=os.getenv("ENG_PLATFORM_SONARQUBE_ENABLED", "false").lower() == "true",
         token=os.getenv("ENG_PLATFORM_SONARQUBE_TOKEN", ""),
@@ -119,6 +145,7 @@ def load_config() -> PlatformConfig:
         billing=billing,
         monitoring=monitoring,
         github=github,
+        auth=auth,
         sonarqube=sonarqube,
         quality=quality,
     )

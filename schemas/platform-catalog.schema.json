@@ -31,6 +31,18 @@
               "coverage_threshold": { "type": "number", "minimum": 0, "maximum": 100 }
             }
           },
+          "deployment": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "workflow_file": { "type": "string", "minLength": 1 },
+              "image_name": { "type": "string" },
+              "artifact_repository": { "type": "string", "minLength": 1 },
+              "build_context": { "type": "string", "minLength": 1 },
+              "health_path": { "type": "string", "pattern": "^/" }
+            }
+          },
           "finops": {
             "type": "object",
             "additionalProperties": false,
