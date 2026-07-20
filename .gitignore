@@ -10,3 +10,4 @@ __pycache__/
 coverage.xml
 quality-reports/
 data/
+.DS_Store
