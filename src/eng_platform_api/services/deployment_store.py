@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -47,14 +48,18 @@ def _local_save(items: list[dict[str, Any]]) -> None:
     path.write_text(json.dumps(items, indent=2), encoding="utf-8")
 
 
+@lru_cache(maxsize=4)
+def _firestore_client(project_id: str):
+    from google.cloud import firestore
+
+    return firestore.Client(project=project_id) if project_id else firestore.Client()
+
+
 def _firestore_collection():
     if not _COLLECTION:
         return None
-    from google.cloud import firestore
-
     project_id = os.getenv("ENG_PLATFORM_GCP_PROJECT_ID", "").strip()
-    client = firestore.Client(project=project_id) if project_id else firestore.Client()
-    return client.collection(_COLLECTION)
+    return _firestore_client(project_id).collection(_COLLECTION)
 
 
 def save(item: DeploymentItem, idempotency_key: str) -> DeploymentItem:
@@ -112,6 +117,12 @@ def find_by_idempotency_key(key: str) -> DeploymentItem | None:
 
 
 def list_for_service(service_name: str, limit: int = 20) -> list[DeploymentItem]:
+    return list_for_service_with_total(service_name, limit=limit)[0]
+
+
+def list_for_service_with_total(
+    service_name: str, limit: int = 20
+) -> tuple[list[DeploymentItem], int]:
     collection = _firestore_collection()
     if collection is not None:
         snapshots = collection.where("service_name", "==", service_name).stream()
@@ -125,7 +136,29 @@ def list_for_service(service_name: str, limit: int = 20) -> list[DeploymentItem]
             ]
     items = [DeploymentItem(**record) for record in records]
     items.sort(key=lambda item: item.created_at, reverse=True)
-    return items[:limit]
+    return items[:limit], len(items)
+
+
+def latest_for_services(service_names: list[str]) -> dict[str, DeploymentItem]:
+    if not service_names:
+        return {}
+    collection = _firestore_collection()
+    if collection is not None:
+        snapshots = collection.where("service_name", "in", service_names).stream()
+        records = [snapshot.to_dict() for snapshot in snapshots]
+    else:
+        with _lock:
+            records = [
+                record
+                for record in _local_load()
+                if record.get("service_name") in service_names
+            ]
+    items = [DeploymentItem(**record) for record in records]
+    items.sort(key=lambda item: item.created_at, reverse=True)
+    latest: dict[str, DeploymentItem] = {}
+    for item in items:
+        latest.setdefault(item.service_name, item)
+    return latest
 
 
 def count_for_service(service_name: str) -> int:

@@ -11,6 +11,7 @@ import os
 import re
 import threading
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 from collections.abc import Iterable
@@ -18,6 +19,13 @@ from collections.abc import Iterable
 from ..models import QualityGateStatus, QualityReport, QualityReportCreate
 
 _lock = threading.RLock()
+
+
+@lru_cache(maxsize=1)
+def _storage_client():
+    from google.cloud.storage import Client  # type: ignore[import-untyped]
+
+    return Client()
 
 
 def _safe(value: str) -> str:
@@ -49,9 +57,7 @@ def _write_object(name: str, data: dict) -> None:
     bucket_name = _bucket_name()
     payload = json.dumps(data, ensure_ascii=False, indent=2)
     if bucket_name:
-        from google.cloud.storage import Client  # type: ignore[import-untyped]
-
-        Client().bucket(bucket_name).blob(name).upload_from_string(
+        _storage_client().bucket(bucket_name).blob(name).upload_from_string(
             payload,
             content_type="application/json",
         )
@@ -67,11 +73,12 @@ def _write_object(name: str, data: dict) -> None:
 def _read_object(name: str) -> dict | None:
     bucket_name = _bucket_name()
     if bucket_name:
-        from google.cloud.storage import Client  # type: ignore[import-untyped]
         from google.api_core.exceptions import NotFound
 
         try:
-            payload = Client().bucket(bucket_name).blob(name).download_as_text()
+            payload = (
+                _storage_client().bucket(bucket_name).blob(name).download_as_text()
+            )
         except NotFound:
             return None
     else:
@@ -94,9 +101,7 @@ def _list_latest_objects() -> list[dict]:
     prefix = f"{_prefix()}/latest/"
     values: list[dict] = []
     if bucket_name:
-        from google.cloud.storage import Client  # type: ignore[import-untyped]
-
-        for blob in Client().list_blobs(bucket_name, prefix=prefix):
+        for blob in _storage_client().list_blobs(bucket_name, prefix=prefix):
             try:
                 value = json.loads(blob.download_as_text())
             except (json.JSONDecodeError, OSError):
@@ -123,9 +128,7 @@ def _list_report_objects(service_name: str) -> list[dict]:
     prefix = f"{_prefix()}/reports/{_safe(service_name)}/"
     values: list[dict] = []
     if bucket_name:
-        from google.cloud.storage import Client  # type: ignore[import-untyped]
-
-        blobs = Client().list_blobs(bucket_name, prefix=prefix)
+        blobs = _storage_client().list_blobs(bucket_name, prefix=prefix)
         payloads: Iterable[str] = (blob.download_as_text() for blob in blobs)
     else:
         root = _local_root() / prefix
@@ -181,6 +184,11 @@ def get_latest_reports() -> list[QualityReport]:
     reports = [QualityReport.model_validate(value) for value in _list_latest_objects()]
     reports.sort(key=lambda report: report.generated_at, reverse=True)
     return reports
+
+
+def get_latest_report(service_name: str) -> QualityReport | None:
+    data = _read_object(_latest_name(service_name))
+    return QualityReport.model_validate(data) if data else None
 
 
 def get_reports(service_name: str, limit: int = 20) -> list[QualityReport]:

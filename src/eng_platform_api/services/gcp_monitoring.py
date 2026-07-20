@@ -21,7 +21,7 @@ _METRIC_CPU = "run.googleapis.com/container/cpu/utilizations"
 _METRIC_MEMORY = "run.googleapis.com/container/memory/utilizations"
 _METRIC_INSTANCE_COUNT = "run.googleapis.com/container/instance_count"
 _METRICS_CACHE_TTL_SECONDS = 60
-_metrics_cache: tuple[float, MetricsSummary] | None = None
+_metrics_cache: dict[int, tuple[float, MetricsSummary]] = {}
 _metrics_cache_lock = Lock()
 
 
@@ -139,7 +139,7 @@ def _get_error_rate(
 
 
 def _get_metrics_for_service(
-    project_id: str, service_name: str
+    project_id: str, service_name: str, minutes: int = 1440
 ) -> CloudRunServiceMetrics:
     try:
         client = monitoring_v3.MetricServiceClient()
@@ -151,16 +151,20 @@ def _get_metrics_for_service(
                     project_id,
                     service_name,
                     _METRIC_REQUEST_COUNT,
+                    minutes=minutes,
                     per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_SUM,
                     cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_SUM,
                 )
             ),
-            error_rate=_get_error_rate(client, project_id, service_name),
+            error_rate=_get_error_rate(
+                client, project_id, service_name, minutes=minutes
+            ),
             p95_latency_ms=_get_metric_value(
                 client,
                 project_id,
                 service_name,
                 _METRIC_LATENCY,
+                minutes=minutes,
                 per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_PERCENTILE_95,
                 cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_PERCENTILE_95,
             ),
@@ -169,6 +173,7 @@ def _get_metrics_for_service(
                 project_id,
                 service_name,
                 _METRIC_CPU,
+                minutes=minutes,
                 per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_PERCENTILE_95,
                 cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_PERCENTILE_95,
             ),
@@ -177,6 +182,7 @@ def _get_metrics_for_service(
                 project_id,
                 service_name,
                 _METRIC_MEMORY,
+                minutes=minutes,
                 per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_PERCENTILE_95,
                 cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_PERCENTILE_95,
             ),
@@ -196,7 +202,9 @@ def _get_metrics_for_service(
         return CloudRunServiceMetrics(service_name=service_name)
 
 
-def get_metrics_for_services(service_names: list[str]) -> list[CloudRunServiceMetrics]:
+def get_metrics_for_services(
+    service_names: list[str], minutes: int = 1440
+) -> list[CloudRunServiceMetrics]:
     """Query Cloud Monitoring concurrently for multiple services."""
     if config.mock_mode:
         return _mock_metrics_for(service_names)
@@ -204,7 +212,9 @@ def get_metrics_for_services(service_names: list[str]) -> list[CloudRunServiceMe
     project_id = config.monitoring.gcp_project_id or "cgm-assistant-prod"
     worker_count = min(6, max(1, len(service_names)))
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        get_service_metrics = partial(_get_metrics_for_service, project_id)
+        get_service_metrics = partial(
+            _get_metrics_for_service, project_id, minutes=minutes
+        )
         return list(executor.map(get_service_metrics, service_names))
 
 
@@ -213,19 +223,21 @@ def _mock_metrics_for(service_names: list[str]) -> list[CloudRunServiceMetrics]:
     return [CloudRunServiceMetrics(service_name=name) for name in service_names]
 
 
-def get_metrics_summary() -> MetricsSummary:
+def get_metrics_summary(minutes: int = 1440) -> MetricsSummary:
     """Return metrics summary for Cloud Run services."""
     from .catalog import get_services
 
     global _metrics_cache
     with _metrics_cache_lock:
         now = monotonic()
-        if _metrics_cache and now - _metrics_cache[0] < _METRICS_CACHE_TTL_SECONDS:
-            return _metrics_cache[1]
+        cached = _metrics_cache.get(minutes)
+        if cached and now - cached[0] < _METRICS_CACHE_TTL_SECONDS:
+            return cached[1]
         services = get_services().services
         service_names = [s.service_name for s in services]
         summary = MetricsSummary(
-            period="last_24h", services=get_metrics_for_services(service_names)
+            period="1h" if minutes == 60 else "24h",
+            services=get_metrics_for_services(service_names, minutes=minutes),
         )
-        _metrics_cache = (monotonic(), summary)
+        _metrics_cache[minutes] = (monotonic(), summary)
         return summary

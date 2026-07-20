@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import uuid
 
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from threading import Lock
+from time import monotonic
 from typing import Annotated
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
@@ -12,6 +16,8 @@ from ..models import (
     DeploymentCreateRequest,
     DeploymentItem,
     DeploymentList,
+    DeploymentOverview,
+    DeploymentOverviewItem,
     ReleaseTagPage,
 )
 from ..security import require_deployer
@@ -19,6 +25,15 @@ from ..services import catalog, deployment_store, github_deployments
 
 router = APIRouter(prefix="/api", tags=["deployments"])
 _GITHUB_UNAVAILABLE = "GitHub unavailable"
+_OVERVIEW_CACHE_TTL_SECONDS = 30
+_overview_cache: tuple[float, DeploymentOverview] | None = None
+_overview_cache_lock = Lock()
+
+
+def _invalidate_overview_cache() -> None:
+    global _overview_cache
+    with _overview_cache_lock:
+        _overview_cache = None
 
 
 def _service_or_404(service_name: str):
@@ -61,7 +76,7 @@ def _active_deployment(service_name: str) -> DeploymentItem | None:
         502: {"description": "GitHub or deployment store unavailable"},
     },
 )
-async def list_service_tags(
+def list_service_tags(
     service_name: str,
     cursor: str | None = Query(default=None),
     limit: int = Query(default=10, ge=1, le=100),
@@ -93,7 +108,7 @@ async def list_service_tags(
         502: {"description": "GitHub is unavailable"},
     },
 )
-async def create_deployment(
+def create_deployment(
     service_name: str,
     payload: DeploymentCreateRequest,
     request: Request,
@@ -131,7 +146,9 @@ async def create_deployment(
             tag=tag,
             requested_by=requested_by,
         )
-        return deployment_store.save(item, key)
+        saved = deployment_store.save(item, key)
+        _invalidate_overview_cache()
+        return saved
     except HTTPException:
         raise
     except Exception as exc:
@@ -152,7 +169,7 @@ async def create_deployment(
         502: {"description": "GitHub is unavailable"},
     },
 )
-async def rollback_deployment(
+def rollback_deployment(
     service_name: str,
     target_deployment_id: str,
     request: Request,
@@ -195,7 +212,9 @@ async def rollback_deployment(
             target=target,
             requested_by=requested_by,
         )
-        return deployment_store.save(item, key)
+        saved = deployment_store.save(item, key)
+        _invalidate_overview_cache()
+        return saved
     except HTTPException:
         raise
     except Exception as exc:
@@ -206,34 +225,86 @@ async def rollback_deployment(
     "/services/{service_name}/deployments",
     response_model=DeploymentList,
 )
-async def list_service_deployments(
+def list_service_deployments(
     service_name: str,
     limit: int = Query(default=20, ge=1, le=100),
 ):
     _service_or_404(service_name)
-    items = deployment_store.list_for_service(service_name, limit=limit)
+    items, total = deployment_store.list_for_service_with_total(
+        service_name, limit=limit
+    )
     refreshed: list[DeploymentItem] = []
     for item in items:
-        try:
-            item = github_deployments.refresh(item)
-        except Exception:
-            item.error = _GITHUB_UNAVAILABLE
-        deployment_store.save(item, "")
+        if item.status not in github_deployments.TERMINAL_STATUSES:
+            try:
+                previous = item.model_dump()
+                item = github_deployments.refresh(item)
+                if item.model_dump() != previous:
+                    deployment_store.save(item, "")
+                    _invalidate_overview_cache()
+            except Exception:
+                item.error = _GITHUB_UNAVAILABLE
         refreshed.append(item)
-    return DeploymentList(
-        items=refreshed,
-        total=deployment_store.count_for_service(service_name),
+    return DeploymentList(items=refreshed, total=total)
+
+
+def _overview_item(
+    service, last_deployment: DeploymentItem | None
+) -> DeploymentOverviewItem:
+    detail = catalog.get_service_detail(service.service_name)
+    return DeploymentOverviewItem(
+        service_name=service.service_name,
+        status=detail.status if detail else "degraded",
+        latest_ready_revision=detail.latest_ready_revision if detail else "",
+        deployment_ready=service.deployment_ready,
+        deployment_blockers=service.deployment_blockers,
+        last_deployment=last_deployment,
     )
 
 
+@router.get("/deployments/overview", response_model=DeploymentOverview)
+def get_deployments_overview():
+    """Return the deployment list page data with bounded external concurrency."""
+    global _overview_cache
+    with _overview_cache_lock:
+        now = monotonic()
+        if _overview_cache and now - _overview_cache[0] < _OVERVIEW_CACHE_TTL_SECONDS:
+            return _overview_cache[1]
+
+        services = catalog.get_services().services
+        latest = deployment_store.latest_for_services(
+            [service.service_name for service in services]
+        )
+        workers = min(6, max(1, len(services)))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            items = list(
+                executor.map(
+                    lambda service: _overview_item(
+                        service, latest.get(service.service_name)
+                    ),
+                    services,
+                )
+            )
+        result = DeploymentOverview(
+            items=items,
+            generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        _overview_cache = (monotonic(), result)
+        return result
+
+
 @router.get("/deployments/{deployment_id}", response_model=DeploymentItem)
-async def get_deployment(deployment_id: str):
+def get_deployment(deployment_id: str):
     item = deployment_store.get(deployment_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Deployment not found")
-    try:
-        item = github_deployments.refresh(item)
-        deployment_store.save(item, "")
-    except Exception:
-        item.error = _GITHUB_UNAVAILABLE
+    if item.status not in github_deployments.TERMINAL_STATUSES:
+        try:
+            previous = item.model_dump()
+            item = github_deployments.refresh(item)
+            if item.model_dump() != previous:
+                deployment_store.save(item, "")
+                _invalidate_overview_cache()
+        except Exception:
+            item.error = _GITHUB_UNAVAILABLE
     return item
