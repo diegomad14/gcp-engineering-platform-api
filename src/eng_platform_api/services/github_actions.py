@@ -101,19 +101,32 @@ def get_release_summary() -> ReleaseSummary:
     return ReleaseSummary(recent=recent, total_releases=len(recent))
 
 
+def _get_ci_workflow(repo: object) -> object | None:
+    for workflow_file in ("ci.yml", "pr-check.yml"):
+        try:
+            return repo.get_workflow(workflow_file)
+        except Exception:
+            continue
+    return None
+
+
+def _ci_status(
+    conclusion: str, run_status: str
+) -> tuple[QualityGateStatus, QualityCheckStatus]:
+    if run_status != "completed":
+        return "RUNNING", "SKIPPED"
+    if conclusion == "success":
+        return "PASSED", "PASSED"
+    return "FAILED", "FAILED"
+
+
 def get_ci_quality_project(service: CatalogService) -> QualityProject | None:
     """Return latest default-branch CI evidence when no normalized report exists."""
     if config.mock_mode or not service.repository:
         return None
     try:
         repo = github_deployments.github_client().get_repo(service.repository)
-        workflow = None
-        for workflow_file in ("ci.yml", "pr-check.yml"):
-            try:
-                workflow = repo.get_workflow(workflow_file)
-                break
-            except Exception:
-                continue
+        workflow = _get_ci_workflow(repo)
         if workflow is None:
             return None
         run = next(iter(workflow.get_runs(branch=repo.default_branch)), None)
@@ -124,14 +137,7 @@ def get_ci_quality_project(service: CatalogService) -> QualityProject | None:
 
     run_status = getattr(run, "status", "") or ""
     conclusion = getattr(run, "conclusion", "") or ""
-    status: QualityGateStatus
-    check_status: QualityCheckStatus
-    if run_status != "completed":
-        status, check_status = "RUNNING", "SKIPPED"
-    elif conclusion == "success":
-        status, check_status = "PASSED", "PASSED"
-    else:
-        status, check_status = "FAILED", "FAILED"
+    status, check_status = _ci_status(conclusion, run_status)
 
     return QualityProject(
         project_key=service.service_name,

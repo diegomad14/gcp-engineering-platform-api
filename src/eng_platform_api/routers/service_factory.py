@@ -14,7 +14,11 @@ async def list_templates():
     return sf.get_templates()
 
 
-@router.post("/plan", response_model=ServiceFactoryPlan)
+@router.post(
+    "/plan",
+    response_model=ServiceFactoryPlan,
+    responses={503: {"description": "Service Factory templates are unavailable"}},
+)
 async def generate_plan(request: ServiceFactoryRequest):
     """Generate an onboarding plan for a new service.
 

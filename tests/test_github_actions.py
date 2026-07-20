@@ -97,3 +97,40 @@ def test_ci_quality_project_reports_unknown_coverage():
     assert project.quality_gate_status == "PASSED"
     assert project.coverage is None
     assert project.evidence_source == "github-actions"
+
+
+def test_ci_quality_project_reports_running_ci():
+    service = _service()
+    run = SimpleNamespace(status="in_progress", conclusion=None, head_sha="b" * 40)
+    workflow = mock.MagicMock()
+    workflow.get_runs.return_value = [run]
+    repo = mock.MagicMock(default_branch="main")
+    repo.get_workflow.return_value = workflow
+
+    with (
+        mock.patch.object(github_actions.config, "mock_mode", False),
+        mock.patch.object(
+            github_actions.github_deployments, "github_client"
+        ) as github_client,
+    ):
+        github_client.return_value.get_repo.return_value = repo
+        project = github_actions.get_ci_quality_project(service)
+
+    assert project is not None
+    assert project.quality_gate_status == "RUNNING"
+    assert project.checks[0].status == "SKIPPED"
+
+
+def test_ci_quality_project_returns_none_without_ci_workflow():
+    service = _service()
+    repo = mock.MagicMock(default_branch="main")
+    repo.get_workflow.side_effect = RuntimeError("missing")
+
+    with (
+        mock.patch.object(github_actions.config, "mock_mode", False),
+        mock.patch.object(
+            github_actions.github_deployments, "github_client"
+        ) as github_client,
+    ):
+        github_client.return_value.get_repo.return_value = repo
+        assert github_actions.get_ci_quality_project(service) is None
