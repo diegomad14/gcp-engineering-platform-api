@@ -33,6 +33,28 @@ _PROJECT_ID = "cgm-assistant-prod"
 _REGION = "us-central1"
 
 
+def deployment_blockers(service: CatalogService) -> list[str]:
+    """Return actionable reasons why a service cannot be deployed by the platform."""
+    blockers: list[str] = []
+    deployment = service.deployment
+    required_fields = [
+        ("repository", service.repository),
+        ("project_id", service.project_id),
+        ("region", service.region),
+        ("deployment.workflow_file", deployment.workflow_file),
+        ("deployment.image_name", deployment.image_name),
+        ("deployment.artifact_repository", deployment.artifact_repository),
+        ("deployment.build_context", deployment.build_context),
+        ("deployment.health_path", deployment.health_path),
+    ]
+    if not deployment.enabled:
+        blockers.append("deployment.enabled is false")
+    blockers.extend(
+        f"{name} is required" for name, value in required_fields if not value
+    )
+    return blockers
+
+
 def _get_service_config() -> list[dict]:
     """Load the flat service catalog."""
     if _CATALOG_PATH.exists():
@@ -42,7 +64,7 @@ def _get_service_config() -> list[dict]:
 
 
 def _catalog_service(cfg: dict) -> CatalogService:
-    return CatalogService(
+    service = CatalogService(
         service_name=cfg["service_name"],
         repository=cfg["repository"],
         owner=cfg["owner"],
@@ -56,6 +78,10 @@ def _catalog_service(cfg: dict) -> CatalogService:
         quality=ServiceQualityConfig(**cfg.get("quality", {})),
         deployment=ServiceDeploymentConfig(**cfg.get("deployment", {})),
         finops=FinOpsLabels(**cfg.get("finops", {})),
+    )
+    blockers = deployment_blockers(service)
+    return service.model_copy(
+        update={"deployment_ready": not blockers, "deployment_blockers": blockers}
     )
 
 

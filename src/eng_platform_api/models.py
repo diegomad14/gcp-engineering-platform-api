@@ -49,6 +49,8 @@ class CatalogService(BaseModel):
     quality: ServiceQualityConfig = Field(default_factory=ServiceQualityConfig)
     deployment: ServiceDeploymentConfig = Field(default_factory=ServiceDeploymentConfig)
     finops: FinOpsLabels = Field(default_factory=FinOpsLabels)
+    deployment_ready: bool = False
+    deployment_blockers: list[str] = Field(default_factory=list)
 
 
 class ServiceTraffic(BaseModel):
@@ -369,6 +371,11 @@ class ServiceFactoryPlan(BaseModel):
     caller_release_candidate: str = ""
     caller_promote: str = ""
     caller_rollback: str = ""
+    platform_deploy_workflow: str = ""
+    platform_rollback_workflow: str = ""
+    semantic_release_workflow: str = ""
+    catalog_entry: str = ""
+    agent_prompt: str = ""
     labels_manifest: str = ""
     quality_config: str = ""
     sonar_properties: str = ""  # Deprecated compatibility output; always empty.

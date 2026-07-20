@@ -4,6 +4,11 @@ The catalog captures reusable metadata about services operated on the platform.
 
 Catalog entries should describe ownership, runtime, release gates, rollback targets, and operational risk. They must not contain secrets, database contents, or customer data.
 
+The API derives `deployment_ready` and `deployment_blockers` from each entry.
+Services can be visible in the catalog while still blocked from `/deployments`
+until repository, workflow, image, Artifact Registry, build context, project,
+region, and health-path fields are complete.
+
 ## Files
 
 - `services.example.yaml` is the reusable aggregate example.
