@@ -7,8 +7,11 @@ WORKDIR /app
 
 COPY pyproject.toml .
 COPY src/ src/
+COPY templates/ templates/
+COPY .github/workflows/platform-rollback.yml .github/workflows/platform-rollback.yml
 
-RUN pip install --no-cache-dir -e "."
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -e "."
 
 ENV ENG_PLATFORM_MOCK_MODE=true
 

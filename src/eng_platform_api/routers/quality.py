@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from ..config import config
 from ..models import QualityProject, QualityReport, QualityReportCreate, QualitySummary
 from ..security import require_quality_ingest_token
-from ..services import catalog, quality_store
+from ..services import catalog, github_actions, quality_store
 
 router = APIRouter(prefix="/api/quality", tags=["quality"])
 
@@ -42,7 +42,7 @@ def _project(report: QualityReport) -> QualityProject:
         branch=report.branch,
         profile=report.profile,
         quality_gate_status=status,
-        coverage=report.coverage or 0.0,
+        coverage=report.coverage,
         bugs=defects,
         vulnerabilities=vulnerabilities,
         code_smells=sum(
@@ -53,6 +53,7 @@ def _project(report: QualityReport) -> QualityProject:
         url=report.workflow_run_url,
         updated_at=report.generated_at,
         checks=report.checks,
+        evidence_source="normalized-report",
     )
 
 
@@ -92,20 +93,22 @@ async def get_quality_history(
 @router.get("/summary", response_model=QualitySummary)
 async def get_quality_summary():
     """Get the latest normalized quality result for every service."""
-    projects = {
-        report.service_name: _project(report)
-        for report in quality_store.get_latest_reports()
+    reports = {
+        report.service_name: report for report in quality_store.get_latest_reports()
     }
+    projects: dict[str, QualityProject] = {}
     for service in catalog.get_services().services:
-        projects.setdefault(
-            service.service_name,
-            QualityProject(
-                project_key=service.service_name,
-                service_name=service.service_name,
-                repository=service.repository,
-                profile=service.quality.profile or "",
-                quality_gate_status="NOT_CONFIGURED",
-            ),
+        report = reports.get(service.service_name)
+        if report and report.repository == service.repository:
+            projects[service.service_name] = _project(report)
+            continue
+        github_project = github_actions.get_ci_quality_project(service)
+        projects[service.service_name] = github_project or QualityProject(
+            project_key=service.service_name,
+            service_name=service.service_name,
+            repository=service.repository,
+            profile=service.quality.profile or "",
+            quality_gate_status="NOT_CONFIGURED",
         )
     return QualitySummary(
         projects=sorted(projects.values(), key=lambda project: project.service_name)

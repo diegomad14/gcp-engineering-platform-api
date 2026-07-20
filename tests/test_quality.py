@@ -1,10 +1,17 @@
 """Tests for normalized quality report ingestion and deployment evidence."""
 
 from datetime import datetime, timezone
+from unittest import mock
 
 from fastapi.testclient import TestClient
 
 from eng_platform_api.main import app
+from eng_platform_api.models import (
+    CatalogResponse,
+    CatalogService,
+    QualityProject,
+    QualityReport,
+)
 
 client = TestClient(app)
 
@@ -94,3 +101,48 @@ def test_summary_includes_unconfigured_catalog_services(tmp_path, monkeypatch):
     assert any(
         project["quality_gate_status"] == "NOT_CONFIGURED" for project in projects
     )
+
+
+def test_summary_ignores_report_from_previous_repository():
+    service = CatalogService(
+        service_name="eng-platform-api",
+        repository="diegomad14/gcp-engineering-platform-api",
+        owner="platform",
+        project_id="test-project",
+        region="us-central1",
+    )
+    old_report = QualityReport(
+        **_payload(
+            service_name=service.service_name,
+            repository="diegomad14/gcp-engineering-platform",
+        ),
+        quality_gate_status="PASSED",
+        received_at=datetime.now(timezone.utc).isoformat(),
+    )
+    github_project = QualityProject(
+        project_key=service.service_name,
+        service_name=service.service_name,
+        repository=service.repository,
+        quality_gate_status="PASSED",
+        evidence_source="github-actions",
+    )
+    with (
+        mock.patch(
+            "eng_platform_api.routers.quality.quality_store.get_latest_reports",
+            return_value=[old_report],
+        ),
+        mock.patch(
+            "eng_platform_api.routers.quality.catalog.get_services",
+            return_value=CatalogResponse(services=[service], total=1),
+        ),
+        mock.patch(
+            "eng_platform_api.routers.quality.github_actions.get_ci_quality_project",
+            return_value=github_project,
+        ),
+    ):
+        response = client.get("/api/quality/summary")
+
+    assert response.status_code == 200
+    project = response.json()["projects"][0]
+    assert project["repository"] == service.repository
+    assert project["evidence_source"] == "github-actions"
