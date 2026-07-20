@@ -1,5 +1,7 @@
 """GitHub release and CI evidence for catalog services."""
 
+from typing import Any
+
 from ..config import config
 from ..models import (
     CatalogService,
@@ -101,7 +103,7 @@ def get_release_summary() -> ReleaseSummary:
     return ReleaseSummary(recent=recent, total_releases=len(recent))
 
 
-def _get_ci_workflow(repo: object) -> object | None:
+def _get_ci_workflow(repo: Any) -> Any | None:
     for workflow_file in ("ci.yml", "pr-check.yml"):
         try:
             return repo.get_workflow(workflow_file)
