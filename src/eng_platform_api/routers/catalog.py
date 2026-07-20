@@ -1,5 +1,6 @@
 """Catalog router — independent service metadata."""
 
+import anyio
 from fastapi import APIRouter, HTTPException
 
 from ..models import CatalogResponse, ServiceDetail
@@ -17,7 +18,9 @@ async def list_services():
 @router.get("/services/{service_name}", response_model=ServiceDetail)
 async def get_service(service_name: str):
     """Get service metadata and best-effort live Cloud Run state."""
-    service = catalog_service.get_service_detail(service_name)
+    service = await anyio.to_thread.run_sync(
+        catalog_service.get_service_detail, service_name
+    )
     if service is None:
         raise HTTPException(
             status_code=404, detail=f"Service '{service_name}' not found"
