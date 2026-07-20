@@ -4,7 +4,11 @@ Queries Cloud Monitoring API for operational metrics.
 All Cloud Run services have metrics available automatically.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from functools import partial
+from threading import Lock
+from time import monotonic
 
 from google.cloud import monitoring_v3
 
@@ -16,6 +20,9 @@ _METRIC_LATENCY = "run.googleapis.com/request_latencies"
 _METRIC_CPU = "run.googleapis.com/container/cpu/utilizations"
 _METRIC_MEMORY = "run.googleapis.com/container/memory/utilizations"
 _METRIC_INSTANCE_COUNT = "run.googleapis.com/container/instance_count"
+_METRICS_CACHE_TTL_SECONDS = 60
+_metrics_cache: tuple[float, MetricsSummary] | None = None
+_metrics_cache_lock = Lock()
 
 
 def _get_metric_value(
@@ -131,19 +138,15 @@ def _get_error_rate(
     return 0.0
 
 
-def get_metrics_for_services(service_names: list[str]) -> list[CloudRunServiceMetrics]:
-    """Query real Cloud Monitoring metrics for multiple services."""
-    if config.mock_mode:
-        return _mock_metrics_for(service_names)
-
+def _get_metrics_for_service(
+    project_id: str, service_name: str
+) -> CloudRunServiceMetrics:
     try:
         client = monitoring_v3.MetricServiceClient()
-        project_id = config.monitoring.gcp_project_id or "cgm-assistant-prod"
-        metrics_list = []
-
-        for service_name in service_names:
-            try:
-                request_count = _get_metric_value(
+        return CloudRunServiceMetrics(
+            service_name=service_name,
+            request_count=int(
+                _get_metric_value(
                     client,
                     project_id,
                     service_name,
@@ -151,31 +154,34 @@ def get_metrics_for_services(service_names: list[str]) -> list[CloudRunServiceMe
                     per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_SUM,
                     cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_SUM,
                 )
-                latency = _get_metric_value(
-                    client,
-                    project_id,
-                    service_name,
-                    _METRIC_LATENCY,
-                    per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_PERCENTILE_95,
-                    cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_PERCENTILE_95,
-                )
-                cpu = _get_metric_value(
-                    client,
-                    project_id,
-                    service_name,
-                    _METRIC_CPU,
-                    per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_PERCENTILE_95,
-                    cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_PERCENTILE_95,
-                )
-                memory = _get_metric_value(
-                    client,
-                    project_id,
-                    service_name,
-                    _METRIC_MEMORY,
-                    per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_PERCENTILE_95,
-                    cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_PERCENTILE_95,
-                )
-                instance_count = _get_metric_value(
+            ),
+            error_rate=_get_error_rate(client, project_id, service_name),
+            p95_latency_ms=_get_metric_value(
+                client,
+                project_id,
+                service_name,
+                _METRIC_LATENCY,
+                per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_PERCENTILE_95,
+                cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_PERCENTILE_95,
+            ),
+            cpu_utilization=_get_metric_value(
+                client,
+                project_id,
+                service_name,
+                _METRIC_CPU,
+                per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_PERCENTILE_95,
+                cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_PERCENTILE_95,
+            ),
+            memory_utilization=_get_metric_value(
+                client,
+                project_id,
+                service_name,
+                _METRIC_MEMORY,
+                per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_PERCENTILE_95,
+                cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_PERCENTILE_95,
+            ),
+            instances_max=int(
+                _get_metric_value(
                     client,
                     project_id,
                     service_name,
@@ -184,25 +190,22 @@ def get_metrics_for_services(service_names: list[str]) -> list[CloudRunServiceMe
                     per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_MAX,
                     cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_MAX,
                 )
-                error_rate = _get_error_rate(client, project_id, service_name)
-
-                metrics_list.append(
-                    CloudRunServiceMetrics(
-                        service_name=service_name,
-                        request_count=int(request_count),
-                        error_rate=error_rate,
-                        p95_latency_ms=latency,
-                        cpu_utilization=cpu,
-                        memory_utilization=memory,
-                        instances_max=int(instance_count),
-                    )
-                )
-            except Exception:
-                metrics_list.append(CloudRunServiceMetrics(service_name=service_name))
-
-        return metrics_list if metrics_list else _mock_metrics_for(service_names)
+            ),
+        )
     except Exception:
+        return CloudRunServiceMetrics(service_name=service_name)
+
+
+def get_metrics_for_services(service_names: list[str]) -> list[CloudRunServiceMetrics]:
+    """Query Cloud Monitoring concurrently for multiple services."""
+    if config.mock_mode:
         return _mock_metrics_for(service_names)
+
+    project_id = config.monitoring.gcp_project_id or "cgm-assistant-prod"
+    worker_count = min(6, max(1, len(service_names)))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        get_service_metrics = partial(_get_metrics_for_service, project_id)
+        return list(executor.map(get_service_metrics, service_names))
 
 
 def _mock_metrics_for(service_names: list[str]) -> list[CloudRunServiceMetrics]:
@@ -214,7 +217,15 @@ def get_metrics_summary() -> MetricsSummary:
     """Return metrics summary for Cloud Run services."""
     from .catalog import get_services
 
-    services = get_services().services
-    service_names = [s.service_name for s in services]
-    metrics = get_metrics_for_services(service_names)
-    return MetricsSummary(period="last_24h", services=metrics)
+    global _metrics_cache
+    with _metrics_cache_lock:
+        now = monotonic()
+        if _metrics_cache and now - _metrics_cache[0] < _METRICS_CACHE_TTL_SECONDS:
+            return _metrics_cache[1]
+        services = get_services().services
+        service_names = [s.service_name for s in services]
+        summary = MetricsSummary(
+            period="last_24h", services=get_metrics_for_services(service_names)
+        )
+        _metrics_cache = (monotonic(), summary)
+        return summary
