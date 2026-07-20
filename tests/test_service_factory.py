@@ -1,5 +1,7 @@
 """Tests for Service Factory endpoints."""
 
+from unittest import mock
+
 from fastapi.testclient import TestClient
 
 from eng_platform_api.main import app
@@ -42,6 +44,7 @@ def test_generate_service_plan():
     assert data["repository"] == "test-org/test-repository"
     assert data["service_name"] == "test-api"
     assert "service:" in data["yaml_contract"]
+    assert "# Repo: test-org/test-repository" in data["yaml_contract"]
     assert "application:" not in data["yaml_contract"]
     assert "service: test-api" in data["labels_manifest"]
     assert "app:" not in data["labels_manifest"]
@@ -77,3 +80,15 @@ def test_generate_worker_plan():
     )
     assert response.status_code == 200
     assert response.json()["service_name"] == "worker-proc"
+
+
+def test_generate_plan_returns_structured_error_when_template_is_missing():
+    with mock.patch(
+        "eng_platform_api.routers.service_factory.sf.generate_plan",
+        side_effect=FileNotFoundError("missing template"),
+    ):
+        response = client.post("/api/service-factory/plan", json=_payload())
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "Service Factory templates are unavailable in this deployment"
+    )

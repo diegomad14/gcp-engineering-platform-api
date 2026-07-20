@@ -1,6 +1,6 @@
 """Service Factory router — generate onboarding artifacts for new services."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from ..models import ServiceFactoryPlan, ServiceFactoryRequest, ServiceFactoryTemplate
 from ..services import service_factory as sf
@@ -21,4 +21,10 @@ async def generate_plan(request: ServiceFactoryRequest):
     This creates YAML contracts, caller workflow files, and a checklist.
     It does NOT create any GCP resources, IAM bindings, or secrets.
     """
-    return sf.generate_plan(request)
+    try:
+        return sf.generate_plan(request)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Service Factory templates are unavailable in this deployment",
+        ) from exc

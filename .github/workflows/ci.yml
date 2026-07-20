@@ -43,3 +43,10 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Lint GitHub Actions
         run: docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint:1.7.7 .github/workflows/*.yml templates/github-actions/*.yml examples/caller-workflows/*.yml
+      - name: Smoke Service Factory container image
+        run: |
+          docker build --tag eng-platform-api:ci .
+          docker run --detach --rm --name eng-platform-api-ci --publish 8000:8000 eng-platform-api:ci
+          trap 'docker stop eng-platform-api-ci' EXIT
+          for _ in {1..20}; do curl --fail --silent http://localhost:8000/health && break; sleep 1; done
+          curl --fail-with-body --silent --request POST http://localhost:8000/api/service-factory/plan --header 'Content-Type: application/json' --data '{"repository":"test-org/test-repo","service_name":"test-api","service_type":"api","runtime":"python","gcp_project":"test-project","owner":"platform"}' | grep --quiet 'platform_deploy_workflow'

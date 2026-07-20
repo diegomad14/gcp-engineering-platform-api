@@ -75,6 +75,7 @@ class CatalogResponse(BaseModel):
 # ── Releases ─────────────────────────────────────────────────────────
 
 ReleaseServiceAction = Literal[
+    "released",
     "promoted",
     "deployed",
     "rolled_back",
@@ -257,13 +258,14 @@ class QualityProject(BaseModel):
     branch: str = ""
     profile: str = ""
     quality_gate_status: QualityGateStatus = "NOT_CONFIGURED"
-    coverage: float = 0.0
+    coverage: float | None = None
     bugs: int = 0
     vulnerabilities: int = 0
     code_smells: int = 0
     url: str = ""
     updated_at: str = ""
     checks: list[QualityCheck] = Field(default_factory=list)
+    evidence_source: Literal["normalized-report", "github-actions", "none"] = "none"
 
 
 class QualitySummary(BaseModel):

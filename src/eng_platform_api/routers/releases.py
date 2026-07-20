@@ -11,15 +11,7 @@ router = APIRouter(prefix="/api/releases", tags=["releases"])
 
 
 def _release_identity(item: ReleaseItem) -> tuple[str, ...]:
-    if item.github_run_url:
-        return ("run", item.github_run_url, item.service_name)
-    return (
-        "release",
-        item.service_name,
-        item.version,
-        item.status,
-        item.created_at,
-    )
+    return (item.service_name, item.repository, item.version)
 
 
 @router.post("/", response_model=list[ReleaseItem], status_code=201)
@@ -41,7 +33,7 @@ async def list_releases(
 
 @router.get("/summary", response_model=ReleaseSummary)
 async def get_release_summary():
-    """Merge persisted service rows with GitHub-discovered workflow runs."""
+    """Merge persisted service rows with GitHub semantic releases."""
     recent = releases_store.get_releases(limit=100)
     github = github_actions.get_release_summary()
     seen = {_release_identity(item) for item in recent}
