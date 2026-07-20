@@ -1,5 +1,5 @@
 service_name: cgm-sanplat-web
-repository: diegomad14/parametrizacion-correos-cgm
+repository: diegomad14/cgm-sanplat-web
 owner: cgm
 cost_center: cgm
 project_id: cgm-assistant-prod
@@ -10,7 +10,7 @@ deployment:
   workflow_file: platform-deploy.yml
   image_name: cgm-sanplat-web
   artifact_repository: cgm-sanplat-repo
-  build_context: frontend
+  build_context: .
   health_path: /
 finops:
   service: cgm-sanplat-web
