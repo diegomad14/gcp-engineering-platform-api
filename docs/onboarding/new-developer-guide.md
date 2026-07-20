@@ -11,6 +11,8 @@ unwritten team knowledge.
 
 Short actionable checklist (no explanations): [`docs/checklists/new-developer-onboarding.md`](../checklists/new-developer-onboarding.md).
 
+Deploy runbook for any integrated service: [`docs/onboarding/deploy-any-service.md`](deploy-any-service.md).
+
 ## 1. Prerequisites
 
 - **Python ≥3.11** (`pyproject.toml`); CI runs **3.12** — install 3.12 for exact parity.
@@ -227,7 +229,25 @@ detail of this convention and what lives in each repo vs. the wiki.
    normally **don't** create the tag by hand. A commit with `[skip release]`
    in the message skips this step.
 
-## 8. Troubleshooting runbook
+## 8. Deploy any integrated service
+
+After a PR is merged and a `vX.Y.Z` tag exists, deploy from Engineering
+Platform, not from GCP Console:
+
+1. Sign in with GitHub in `eng-platform-web`.
+2. Open `/deployments`.
+3. Pick the Cloud Run service name from the catalog.
+4. Select an eligible release tag.
+5. Confirm the service, tag, SHA, current revision, and environment.
+6. Watch the candidate, promote, production validation, and rollback metadata
+   stages from the UI.
+
+If a service card is blocked, it is cataloged but not deployment-ready. Open
+`/factory`, generate the adoption artifacts, and use the generated agent prompt
+to create PR-ready workflow/catalog changes. Do not bypass the blocker with
+manual `gcloud` commands.
+
+## 9. Troubleshooting runbook
 
 | Symptom | Cause | Action |
 |---|---|---|
@@ -250,7 +270,7 @@ detail of this convention and what lives in each repo vs. the wiki.
 *(Quality/Release rows adapted from the "Matriz de fallos" in
 `wiki/conceptos/release_process.md` in the Obsidian vault.)*
 
-## 9. Security and operations — Do / Don't
+## 10. Security and operations — Do / Don't
 
 **DO:**
 - Use `ENG_PLATFORM_MOCK_MODE=true` for local development without real credentials.

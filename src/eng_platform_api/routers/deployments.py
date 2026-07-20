@@ -30,6 +30,18 @@ def _service_or_404(service_name: str):
     return service
 
 
+def _require_deployment_ready(service) -> None:
+    if service.deployment_ready:
+        return
+    blockers = (
+        "; ".join(service.deployment_blockers) or "service is not deployment-ready"
+    )
+    raise HTTPException(
+        status_code=409,
+        detail=f"Service '{service.service_name}' is not ready for platform deploy: {blockers}",
+    )
+
+
 def _active_deployment(service_name: str) -> DeploymentItem | None:
     return next(
         (
@@ -88,6 +100,7 @@ async def create_deployment(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     service = _service_or_404(service_name)
+    _require_deployment_ready(service)
     requested_by = require_deployer(request)
     key = idempotency_key or str(uuid.uuid4())
     existing = deployment_store.find_by_idempotency_key(key)
@@ -146,6 +159,7 @@ async def rollback_deployment(
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
     service = _service_or_404(service_name)
+    _require_deployment_ready(service)
     requested_by = require_deployer(request)
     target = deployment_store.get(target_deployment_id)
     if target is None or target.service_name != service_name:

@@ -12,13 +12,15 @@ Developer fills in service metadata
   v
 Service Factory generates:
   ├── gcp-service-release.yaml      (service contract)
-  ├── caller-pr-check.yml           (calls reusable PR check)
-  ├── caller-release-candidate.yml  (calls reusable release candidate)
-  ├── caller-promote.yml            (calls reusable promote)
-  ├── caller-rollback.yml           (calls reusable rollback)
+  ├── platform-deploy.yml           (GitHub-native deploy entrypoint)
+  ├── platform-rollback.yml         (GitHub-native rollback entrypoint)
+  ├── semantic-release.yml          (immutable tag generation)
+  ├── ci.yml                        (quality gate)
+  ├── catalog/services/<svc>.yaml   (platform catalog entry)
   ├── .quality-gate.yml             (open source quality policy)
   ├── cloud-run-service-labels.yaml (label manifest)
-  └── onboarding-checklist.md       (generated checklist)
+  ├── onboarding-checklist.md       (generated checklist)
+  └── agent-handoff-prompt.md       (copyable prompt for PR-ready adoption)
   |
   v
 Developer copies artifacts into the service repository
@@ -55,16 +57,15 @@ Platform team reviews and approves
 ### gcp-service-release.yaml
 The service's release contract, consumed by the platform API for catalog registration.
 
-### Caller Workflows
-Thin wrappers that call the platform's reusable workflows with the service's parameters:
-```yaml
-jobs:
-  pr-check:
-    uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-pr-check.yml@v1
-    with:
-      backend-enabled: true
-      python-version: "3.11"
-```
+### Platform Workflows
+`platform-deploy.yml` and `platform-rollback.yml` expose the
+`workflow_dispatch` interface called by Engineering Platform `/deployments`.
+Developers should not call these workflows directly with `gh workflow run`.
+
+### Agent Handoff Prompt
+The prompt tells Codex/Claude how to create PR-ready adoption changes while
+forbidding secrets, service account JSON, GCP Console deploys, direct
+`gh workflow run`, and manual `gcloud run deploy`.
 
 ### Service Labels Manifest
 Documents the required GCP labels for cost attribution:
@@ -81,8 +82,9 @@ labels:
 The platform provides `service-onboarding-plan.yml` — a manual `workflow_dispatch` that:
 1. Accepts service metadata inputs.
 2. Generates all artifacts.
-3. Uploads them as workflow artifacts (or opens a PR if token configured).
+3. Shows them in the UI for copy/paste or agent-assisted PR creation.
 4. Does NOT create GCP resources, IAM bindings, or Secret Manager entries.
+5. Does NOT open PRs or deploy production in the current iteration.
 
 ## What the Service Factory Does NOT Do
 

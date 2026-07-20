@@ -315,6 +315,83 @@ def test_dispatch_uses_independent_service_catalog_configuration():
     assert inputs["project_id"] == "cgm-assistant-prod"
 
 
+def test_catalog_services_include_deployment_readiness(client):
+    response = client.get("/api/catalog/services")
+    assert response.status_code == 200
+    service = next(
+        item
+        for item in response.json()["services"]
+        if item["service_name"] == "eng-platform-api"
+    )
+    assert service["deployment_ready"] is True
+    assert service["deployment_blockers"] == []
+
+
+def test_deployment_readiness_reports_missing_fields():
+    from eng_platform_api.models import CatalogService, ServiceDeploymentConfig
+    from eng_platform_api.services.catalog import deployment_blockers
+
+    service = CatalogService(
+        service_name="blocked-svc",
+        repository="",
+        owner="platform",
+        project_id="",
+        region="",
+        deployment=ServiceDeploymentConfig(
+            enabled=False,
+            workflow_file="",
+            image_name="",
+            artifact_repository="",
+            build_context="",
+            health_path="",
+        ),
+    )
+
+    blockers = deployment_blockers(service)
+    assert "deployment.enabled is false" in blockers
+    assert "repository is required" in blockers
+    assert "deployment.workflow_file is required" in blockers
+
+
+def test_create_deployment_rejects_service_that_is_not_deployment_ready(client):
+    from eng_platform_api.models import CatalogService, ServiceDeploymentConfig
+
+    blocked = CatalogService(
+        service_name="blocked-svc",
+        repository="diegomad14/blocked-svc",
+        owner="platform",
+        project_id="cgm-assistant-prod",
+        region="us-central1",
+        deployment=ServiceDeploymentConfig(
+            enabled=False,
+            workflow_file="",
+            image_name="blocked-svc",
+            artifact_repository="cgm-sanplat-repo",
+            build_context=".",
+            health_path="/health",
+        ),
+        deployment_ready=False,
+        deployment_blockers=["deployment.enabled is false"],
+    )
+    with (
+        mock.patch(
+            "eng_platform_api.routers.deployments.catalog.get_service",
+            return_value=blocked,
+        ),
+        mock.patch(
+            "eng_platform_api.routers.deployments.github_deployments.get_tag"
+        ) as get_tag,
+    ):
+        response = client.post(
+            "/api/services/blocked-svc/deployments",
+            json={"tag": "v1.0.0"},
+        )
+
+    assert response.status_code == 409
+    assert "not ready for platform deploy" in response.json()["detail"]
+    get_tag.assert_not_called()
+
+
 def test_rollback_target_must_exist(client):
     response = client.post(
         "/api/services/eng-platform-api/deployments/missing/rollback",

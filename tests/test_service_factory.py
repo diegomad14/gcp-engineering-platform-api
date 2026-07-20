@@ -47,8 +47,19 @@ def test_generate_service_plan():
     assert "app:" not in data["labels_manifest"]
     assert "gcp-service-release.yaml" in " ".join(data["checklist"])
     assert ".quality-gate.yml" in data["generated_files"]
+    assert ".github/workflows/platform-deploy.yml" in data["generated_files"]
+    assert ".github/workflows/platform-rollback.yml" in data["generated_files"]
+    assert ".github/workflows/semantic-release.yml" in data["generated_files"]
+    assert f"catalog/services/{data['service_name']}.yaml" in data["generated_files"]
+    assert "agent-handoff-prompt.md" in data["generated_files"]
     assert "SonarQube" not in data["yaml_contract"]
     assert "reusable-quality-gate.yml" in data["caller_pr_check"]
+    assert "workflow_dispatch" in data["platform_deploy_workflow"]
+    assert "github_deployment_id" in data["platform_deploy_workflow"]
+    assert "target_revision" in data["platform_rollback_workflow"]
+    assert "semantic-release" in data["semantic_release_workflow"]
+    assert "service_name: test-api" in data["catalog_entry"]
+    assert "Never use GCP Console" in data["agent_prompt"]
     assert data["sonar_properties"] == ""
 
 

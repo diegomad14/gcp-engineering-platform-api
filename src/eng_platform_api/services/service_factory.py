@@ -5,6 +5,7 @@ Does NOT create GCP resources, IAM bindings, or secrets.
 """
 
 import textwrap
+from pathlib import Path
 
 from ..models import ServiceFactoryPlan, ServiceFactoryRequest, ServiceFactoryTemplate
 
@@ -30,6 +31,9 @@ _KNOWN_TEMPLATES = [
         type="integration",
     ),
 ]
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_TEMPLATE_DIR = _REPO_ROOT / "templates" / "github-actions"
 
 
 def _build_yaml_contract(req: ServiceFactoryRequest) -> str:
@@ -201,6 +205,104 @@ def _build_quality_config(req: ServiceFactoryRequest) -> str:
     """)
 
 
+def _build_catalog_entry(req: ServiceFactoryRequest) -> str:
+    return textwrap.dedent(f"""\
+    service_name: {req.service_name}
+    repository: {req.repository}
+    owner: {req.owner}
+    cost_center: {req.cost_center}
+    project_id: {req.gcp_project}
+    region: {req.region}
+    environment: {req.environment}
+    release_model: candidate-promote-rollback
+    quality:
+      enabled: true
+      profile: {req.quality_profile or req.runtime}
+      coverage_threshold: {req.coverage_threshold}
+    deployment:
+      enabled: true
+      workflow_file: platform-deploy.yml
+      image_name: {req.cloud_run_service_name or req.service_name}
+      artifact_repository: cgm-sanplat-repo
+      build_context: {req.quality_working_directory}
+      health_path: {req.health_path}
+    finops:
+      service: {req.service_name}
+      env: {req.environment}
+      owner: {req.owner}
+      cost_center: {req.cost_center}
+    """)
+
+
+def _build_platform_deploy_workflow() -> str:
+    return (_TEMPLATE_DIR / "platform-deploy.yml").read_text()
+
+
+def _build_platform_rollback_workflow() -> str:
+    rollback_template = _TEMPLATE_DIR / "platform-rollback.yml"
+    if rollback_template.exists():
+        return rollback_template.read_text()
+    return (_REPO_ROOT / ".github" / "workflows" / "platform-rollback.yml").read_text()
+
+
+def _build_semantic_release_workflow() -> str:
+    return textwrap.dedent("""\
+    name: Semantic Release
+
+    on:
+      push:
+        branches: [main]
+
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    concurrency:
+      group: semantic-release
+      cancel-in-progress: false
+
+    jobs:
+      release:
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+            with:
+              fetch-depth: 0
+          - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+            with:
+              node-version: "22"
+          - name: Create semantic version tag and GitHub release
+            env:
+              GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            run: >-
+              npx --yes
+              --package semantic-release@25.0.7
+              --package @semantic-release/commit-analyzer@13.0.1
+              --package @semantic-release/release-notes-generator@14.1.1
+              --package @semantic-release/github@12.0.9
+              semantic-release
+    """)
+
+
+def _build_agent_prompt(req: ServiceFactoryRequest) -> str:
+    return textwrap.dedent(f"""\
+    Implement Engineering Platform adoption for `{req.service_name}` in `{req.repository}`.
+
+    Requirements:
+    - Create a branch `chore/adopt-engineering-platform-deploy`.
+    - Add generated workflows under `.github/workflows/`.
+    - Add the generated quality config and service release contract.
+    - Open a PR with a Conventional Commit title.
+    - Do not commit secrets, `.env`, service account JSON, tokens, customer data, or wiki-only notes.
+    - Validate with actionlint and the repo's normal test/build commands.
+    - After merge, wait for semantic-release to create a `vX.Y.Z` tag.
+    - Deploy only from Engineering Platform `/deployments` by selecting service `{req.service_name}` and the generated tag.
+
+    Never use GCP Console, `gcloud run deploy`, `gcloud run services update-traffic`, `gh workflow run`, or direct GitHub API calls for normal production deploy.
+    """)
+
+
 def _build_labels_manifest(req: ServiceFactoryRequest) -> str:
     """Generate the Cloud Run labels manifest."""
     return textwrap.dedent(f"""\
@@ -222,19 +324,18 @@ def _build_labels_manifest(req: ServiceFactoryRequest) -> str:
 def _build_checklist(req: ServiceFactoryRequest) -> list[str]:
     """Generate an onboarding checklist."""
     return [
-        f"Create GCP Cloud Run service: {req.service_name} in {req.gcp_project} ({req.region})",
+        f"Confirm Cloud Run service exists: {req.service_name} in {req.gcp_project} ({req.region})",
         f"Apply labels: service={req.service_name}, env={req.environment}, owner={req.owner}, cost_center={req.cost_center}",
-        "Create Artifact Registry repository (if not exists)",
-        f"Create runtime service account: {req.service_name}-runtime@{req.gcp_project}.iam.gserviceaccount.com",
-        f"Create deployer service account: {req.service_name}-deployer@{req.gcp_project}.iam.gserviceaccount.com",
-        "Configure WIF/OIDC for deployer SA (see docs/standards/github-actions-wif.md)",
+        "Confirm Artifact Registry repository exists",
+        "Confirm runtime and deployer service accounts exist",
+        "Configure WIF/OIDC for the deployer SA (see docs/standards/github-actions-wif.md)",
         "Add QUALITY_API_TOKEN to GitHub organization/repository secrets",
         "Add ENG_PLATFORM_API_URL, GCP_WIF_PROVIDER, GCP_WIF_SERVICE_ACCOUNT, GCP_PROJECT_ID, GCP_REGION to GitHub vars",
-        "Copy generated caller workflows to .github/workflows/ in the service repository",
+        "Copy generated platform-deploy.yml, platform-rollback.yml, CI/quality, and semantic-release workflows into the service repository",
         "Copy gcp-service-release.yaml to the service repository",
-        "Open PR with generated artifacts",
-        "Complete platform adoption readiness checklist",
-        "Schedule platform review",
+        "Add the generated catalog entry to Engineering Platform API catalog/services/<service>.yaml",
+        "Open PRs with generated artifacts and catalog entry",
+        "Merge, wait for semantic-release tag, then deploy from Engineering Platform /deployments",
     ]
 
 
@@ -251,13 +352,15 @@ def generate_plan(req: ServiceFactoryRequest) -> ServiceFactoryPlan:
         service_name=service_name,
         generated_files=[
             "gcp-service-release.yaml",
-            "caller-pr-check.yml",
-            "caller-release-candidate.yml",
-            "caller-promote.yml",
-            "caller-rollback.yml",
+            ".github/workflows/ci.yml",
+            ".github/workflows/platform-deploy.yml",
+            ".github/workflows/platform-rollback.yml",
+            ".github/workflows/semantic-release.yml",
+            f"catalog/services/{service_name}.yaml",
             ".quality-gate.yml",
             "cloud-run-service-labels.yaml",
             "onboarding-checklist.md",
+            "agent-handoff-prompt.md",
         ],
         checklist=_build_checklist(req),
         yaml_contract=contract_yaml,
@@ -297,6 +400,11 @@ def generate_plan(req: ServiceFactoryRequest) -> ServiceFactoryPlan:
             req.quality_working_directory,
             req.coverage_threshold,
         ),
+        platform_deploy_workflow=_build_platform_deploy_workflow(),
+        platform_rollback_workflow=_build_platform_rollback_workflow(),
+        semantic_release_workflow=_build_semantic_release_workflow(),
+        catalog_entry=_build_catalog_entry(req),
+        agent_prompt=_build_agent_prompt(req),
         labels_manifest=_build_labels_manifest(req),
         quality_config=_build_quality_config(req),
         sonar_properties="",

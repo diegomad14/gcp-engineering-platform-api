@@ -34,6 +34,26 @@ Actionable version, no explanations. For the "why" behind each step, see
 - [ ] Human review approved
 - [ ] Merged to `main` (tag/release is generated automatically — don't create the tag by hand)
 
+## Deploy an integrated service
+
+- [ ] Signed in to Engineering Platform with GitHub
+- [ ] GitHub user is allowlisted to deploy
+- [ ] Service card in `/deployments` shows no readiness blockers
+- [ ] Eligible `vX.Y.Z` tag exists for the selected service
+- [ ] Deploy started from `/deployments/{service}` only
+- [ ] Candidate, promote, and production validation stages reviewed
+- [ ] GitHub workflow logs reviewed if any stage fails
+- [ ] Rollback action used only from deployment history to a known-good revision
+
+## Adopt a blocked or new service
+
+- [ ] Service Factory plan generated
+- [ ] Generated platform deploy, rollback, CI/quality, and semantic-release workflows reviewed
+- [ ] Generated catalog entry added to Engineering Platform API
+- [ ] Agent handoff prompt used only for PR-ready repo changes
+- [ ] Adoption PRs pass actionlint and repo quality checks
+- [ ] Service returns to `/deployments` with `deployment_ready=true`
+
 ## Security (read and understood)
 
 - [ ] Never commit secrets/tokens/.env/PII to git, logs, the catalog, or the wiki
