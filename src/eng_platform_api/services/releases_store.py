@@ -4,6 +4,7 @@ import json
 import os
 import threading
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional, cast
 
@@ -21,14 +22,18 @@ _COLLECTION = os.getenv("ENG_PLATFORM_RELEASES_FIRESTORE_COLLECTION", "")
 _store_lock = threading.RLock()
 
 
+@lru_cache(maxsize=4)
+def _firestore_client(project_id: str):
+    from google.cloud import firestore
+
+    return firestore.Client(project=project_id) if project_id else firestore.Client()
+
+
 def _firestore_collection():
     if not _COLLECTION:
         return None
-    from google.cloud import firestore
-
     project_id = os.getenv("ENG_PLATFORM_GCP_PROJECT_ID", "").strip()
-    client = firestore.Client(project=project_id) if project_id else firestore.Client()
-    return client.collection(_COLLECTION)
+    return _firestore_client(project_id).collection(_COLLECTION)
 
 
 def _resolve_path() -> Path:

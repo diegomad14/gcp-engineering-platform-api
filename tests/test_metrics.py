@@ -55,7 +55,7 @@ def test_metrics_for_services_queries_services_concurrently():
         mock.patch.object(
             gcp_monitoring,
             "_get_metrics_for_service",
-            side_effect=lambda project, service: CloudRunServiceMetrics(
+            side_effect=lambda project, service, minutes: CloudRunServiceMetrics(
                 service_name=service
             ),
         ) as get_service_metrics,
@@ -75,7 +75,7 @@ def test_metrics_summary_refreshes_expired_cache():
         region="us-central1",
     )
     expected = [CloudRunServiceMetrics(service_name="test-api")]
-    gcp_monitoring._metrics_cache = None
+    gcp_monitoring._metrics_cache = {}
     with (
         mock.patch.object(gcp_monitoring.config, "mock_mode", True),
         mock.patch(
@@ -89,10 +89,22 @@ def test_metrics_summary_refreshes_expired_cache():
         summary = gcp_monitoring.get_metrics_summary()
 
     assert summary.services == expected
-    get_metrics.assert_called_once_with(["test-api"])
+    get_metrics.assert_called_once_with(["test-api"], minutes=1440)
 
 
 def test_metrics_summary_uses_short_cache():
     summary = MetricsSummary(period="last_24h", services=[])
-    gcp_monitoring._metrics_cache = (gcp_monitoring.monotonic(), summary)
+    gcp_monitoring._metrics_cache = {1440: (gcp_monitoring.monotonic(), summary)}
     assert gcp_monitoring.get_metrics_summary() is summary
+
+
+def test_metrics_endpoint_supports_one_hour_window():
+    summary = MetricsSummary(period="1h", services=[])
+    with mock.patch.object(
+        gcp_monitoring, "get_metrics_summary", return_value=summary
+    ) as get_summary:
+        response = client.get("/api/metrics/cloud-run/summary?window=1h")
+
+    assert response.status_code == 200
+    assert response.json()["period"] == "1h"
+    get_summary.assert_called_once_with(60)

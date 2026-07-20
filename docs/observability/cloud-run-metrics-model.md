@@ -25,7 +25,7 @@ Cloud Run services automatically export metrics to Cloud Monitoring. The platfor
 |--------|-------------|
 | Error rate % | `(5xx_count / total_count) * 100` |
 | p95 latency | From `request_latencies` distribution |
-| Instance max | Max value of `instance_count` over period |
+| Peak instances | Max observed value of `instance_count` over period; this is not the configured autoscaling limit |
 
 ## Monitoring API Query Pattern
 
@@ -42,7 +42,7 @@ filter_str = (
 
 ```json
 {
-  "period": "last_24h",
+  "period": "1h",
   "services": [
     {
       "service_name": "cgm-sanplat-api",
@@ -74,7 +74,8 @@ ENG_PLATFORM_GCP_PROJECT_ID=cgm-assistant-prod
 
 - Metrics sampled every 60 seconds by Cloud Monitoring.
 - Visible within ~120 seconds.
-- Platform API adds no additional latency beyond Monitoring API response time.
+- `GET /api/metrics/cloud-run/summary` accepts `window=1h|24h`; `24h` remains the API default for compatibility and the UI defaults to `1h`.
+- Summaries are cached per window for 60 seconds and Monitoring calls run outside the FastAPI event loop.
 
 ## Future: Alerts & Uptime
 

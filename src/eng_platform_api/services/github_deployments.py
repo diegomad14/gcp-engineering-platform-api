@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from threading import Lock
+from time import monotonic
 from typing import Any
 
 from github import Github, GithubIntegration
@@ -43,6 +46,9 @@ _STAGE_TO_STATUS = {
 _ROLLBACK_STAGES = [("rollback", "Roll back production")]
 TERMINAL_STATUSES = frozenset({"SUCCEEDED", "FAILED", "ROLLED_BACK", "ROLLBACK_FAILED"})
 _LIVE_STATUSES = frozenset({"SUCCEEDED", "ROLLED_BACK"})
+_TAG_CACHE_TTL_SECONDS = 300
+_tag_metadata_cache: dict[tuple[str, int, int], tuple[float, ReleaseTagPage]] = {}
+_tag_metadata_cache_lock = Lock()
 
 
 def default_stages(kind: str = "deploy") -> list[DeploymentStage]:
@@ -104,9 +110,7 @@ def list_tags(
             str(offset + len(items)) if offset + len(items) < len(mock_tags) else None
         )
         return ReleaseTagPage(items=items, next_cursor=next_cursor)
-    repo = github_client().get_repo(repository)
-    tags = repo.get_tags()
-    page: list[ReleaseTag] = []
+    metadata = _tag_metadata_page(repository, offset, limit)
     previous = deployment_store.list_for_service(service_name, limit=100)
     active = next(
         (item for item in previous if item.status not in TERMINAL_STATUSES), None
@@ -114,37 +118,60 @@ def list_tags(
     current_live_tag = next(
         (item.tag for item in previous if item.status in _LIVE_STATUSES), None
     )
-    for index, tag in enumerate(tags):
-        if index < offset:
-            continue
-        if len(page) >= limit:
-            break
+    page: list[ReleaseTag] = []
+    for tag in metadata.items:
         eligible = bool(_SEMVER.fullmatch(tag.name))
         reason = "" if eligible else "Tag does not follow semantic versioning"
-        created_at = ""
-        try:
-            commit = repo.get_commit(tag.commit.sha)
-            created_at = _iso(commit.commit.committer.date)
-        except Exception:
-            pass
         if eligible and active is not None:
             eligible = False
             reason = f"Deployment {active.tag} is already active for this service"
         elif eligible and tag.name == current_live_tag:
             eligible = False
             reason = "This tag is already live in production"
-        page.append(
-            ReleaseTag(
+        page.append(tag.model_copy(update={"eligible": eligible, "reason": reason}))
+    return ReleaseTagPage(items=page, next_cursor=metadata.next_cursor)
+
+
+def _tag_metadata_page(repository: str, offset: int, limit: int) -> ReleaseTagPage:
+    key = (repository, offset, limit)
+    with _tag_metadata_cache_lock:
+        cached = _tag_metadata_cache.get(key)
+        now = monotonic()
+        if cached and now - cached[0] < _TAG_CACHE_TTL_SECONDS:
+            return cached[1]
+
+        repo = github_client().get_repo(repository)
+        selected: list[Any] = []
+        for index, tag in enumerate(repo.get_tags()):
+            if index < offset:
+                continue
+            if len(selected) >= limit:
+                break
+            selected.append(tag)
+
+        def metadata(tag: Any) -> ReleaseTag:
+            created_at = ""
+            try:
+                commit = repo.get_commit(tag.commit.sha)
+                created_at = _iso(commit.commit.committer.date)
+            except Exception:
+                pass
+            return ReleaseTag(
                 name=tag.name,
                 sha=tag.commit.sha,
                 created_at=created_at,
                 url=f"https://github.com/{repository}/releases/tag/{tag.name}",
-                eligible=eligible,
-                reason=reason,
             )
+
+        workers = min(5, max(1, len(selected)))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            items = list(executor.map(metadata, selected))
+        result = ReleaseTagPage(
+            items=items,
+            next_cursor=str(offset + len(items)) if len(items) == limit else None,
         )
-    next_cursor = str(offset + len(page)) if len(page) == limit else None
-    return ReleaseTagPage(items=page, next_cursor=next_cursor)
+        _tag_metadata_cache[key] = (monotonic(), result)
+        return result
 
 
 def get_tag(repository: str, service_name: str, name: str) -> ReleaseTag | None:

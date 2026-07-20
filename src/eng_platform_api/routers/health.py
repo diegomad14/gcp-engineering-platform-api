@@ -1,5 +1,6 @@
 """Health check router."""
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from fastapi import APIRouter
@@ -21,22 +22,25 @@ async def health_check():
 
 
 @router.get("/api/health/services", response_model=ServicesHealthResponse)
-async def services_health_check():
+def services_health_check():
     """Aggregate best-effort health for catalog Cloud Run services."""
     checked_at = datetime.now(timezone.utc).isoformat()
-    services: list[ServiceHealthItem] = []
-    for service in catalog.get_services().services:
+    catalog_services = catalog.get_services().services
+
+    def inspect(service) -> ServiceHealthItem:
         detail = catalog.get_service_detail(service.service_name)
-        services.append(
-            ServiceHealthItem(
-                service_name=service.service_name,
-                project_id=service.project_id,
-                region=service.region,
-                status=detail.status if detail else "degraded",
-                checked_at=checked_at,
-                error=detail.error if detail else "Service not found",
-            )
+        return ServiceHealthItem(
+            service_name=service.service_name,
+            project_id=service.project_id,
+            region=service.region,
+            status=detail.status if detail else "degraded",
+            checked_at=checked_at,
+            error=detail.error if detail else "Service not found",
         )
+
+    workers = min(6, max(1, len(catalog_services)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        services = list(executor.map(inspect, catalog_services))
 
     aggregate_status = "ok"
     if any(service.status == "degraded" for service in services):

@@ -128,8 +128,8 @@ def test_summary_ignores_report_from_previous_repository():
     )
     with (
         mock.patch(
-            "eng_platform_api.routers.quality.quality_store.get_latest_reports",
-            return_value=[old_report],
+            "eng_platform_api.routers.quality.quality_store.get_latest_report",
+            return_value=old_report,
         ),
         mock.patch(
             "eng_platform_api.routers.quality.catalog.get_services",

@@ -8,6 +8,9 @@ Sources:
 
 import json
 import pathlib
+from functools import lru_cache
+from threading import Lock
+from time import monotonic
 from typing import Optional
 
 from google.cloud import run_v2
@@ -31,6 +34,14 @@ _CATALOG_PATH = (
 )
 _PROJECT_ID = "cgm-assistant-prod"
 _REGION = "us-central1"
+_DETAIL_CACHE_TTL_SECONDS = 30
+_detail_cache: dict[str, tuple[float, ServiceDetail]] = {}
+_detail_cache_lock = Lock()
+
+
+@lru_cache(maxsize=1)
+def _run_client() -> run_v2.ServicesClient:
+    return run_v2.ServicesClient()
 
 
 def deployment_blockers(service: CatalogService) -> list[str]:
@@ -129,8 +140,14 @@ def get_service_detail(service_name: str) -> Optional[ServiceDetail]:
         detail.status = "healthy"
         return detail
 
+    with _detail_cache_lock:
+        cached = _detail_cache.get(service_name)
+        now = monotonic()
+        if cached and now - cached[0] < _DETAIL_CACHE_TTL_SECONDS:
+            return cached[1]
+
     try:
-        client = run_v2.ServicesClient()
+        client = _run_client()
         live = client.get_service(
             name=(
                 f"projects/{service.project_id}/locations/{service.region}"
@@ -158,4 +175,6 @@ def get_service_detail(service_name: str) -> Optional[ServiceDetail]:
     except Exception as exc:
         detail.status = "degraded"
         detail.error = str(exc)
+    with _detail_cache_lock:
+        _detail_cache[service_name] = (monotonic(), detail)
     return detail

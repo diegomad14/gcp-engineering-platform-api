@@ -198,6 +198,20 @@ class DeploymentList(BaseModel):
     total: int = 0
 
 
+class DeploymentOverviewItem(BaseModel):
+    service_name: str
+    status: str = "unknown"
+    latest_ready_revision: str = ""
+    deployment_ready: bool = False
+    deployment_blockers: list[str] = Field(default_factory=list)
+    last_deployment: DeploymentItem | None = None
+
+
+class DeploymentOverview(BaseModel):
+    items: list[DeploymentOverviewItem] = Field(default_factory=list)
+    generated_at: str = ""
+
+
 class AuthSession(BaseModel):
     authenticated: bool = False
     can_deploy: bool = False

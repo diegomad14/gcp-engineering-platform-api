@@ -284,6 +284,73 @@ def test_get_and_list_reconstruct_from_store(client):
     assert listing.json()["total"] == 1
 
 
+def test_terminal_deployments_do_not_call_github(client):
+    from eng_platform_api.services import deployment_store
+
+    terminal = _succeeded_deployment()
+    deployment_store.save(terminal, "")
+    with mock.patch(
+        "eng_platform_api.routers.deployments.github_deployments.refresh"
+    ) as refresh:
+        listing = client.get("/api/services/eng-platform-api/deployments")
+        detail = client.get(f"/api/deployments/{terminal.id}")
+
+    assert listing.status_code == 200
+    assert detail.status_code == 200
+    refresh.assert_not_called()
+
+
+def test_latest_deployments_use_one_grouped_firestore_query():
+    from eng_platform_api.services import deployment_store
+
+    first = _succeeded_deployment()
+    second = first.model_copy(
+        update={"id": "other", "service_name": "eng-platform-web"}
+    )
+    collection = mock.MagicMock()
+    collection.where.return_value.stream.return_value = [
+        mock.MagicMock(to_dict=mock.MagicMock(return_value=first.model_dump())),
+        mock.MagicMock(to_dict=mock.MagicMock(return_value=second.model_dump())),
+    ]
+    with mock.patch.object(
+        deployment_store, "_firestore_collection", return_value=collection
+    ):
+        latest = deployment_store.latest_for_services(
+            ["eng-platform-api", "eng-platform-web"]
+        )
+
+    collection.where.assert_called_once_with(
+        "service_name", "in", ["eng-platform-api", "eng-platform-web"]
+    )
+    assert set(latest) == {"eng-platform-api", "eng-platform-web"}
+
+
+def test_deployment_overview_aggregates_services(client):
+    from eng_platform_api.routers import deployments
+    from eng_platform_api.services import catalog, deployment_store
+
+    deployments._overview_cache = None
+    deployment_store.save(_succeeded_deployment(), "")
+    with mock.patch.object(
+        catalog,
+        "get_service_detail",
+        return_value=SimpleNamespace(
+            status="healthy",
+            latest_ready_revision="eng-platform-api-00010-abc",
+        ),
+    ):
+        response = client.get("/api/deployments/overview")
+
+    assert response.status_code == 200
+    item = next(
+        row
+        for row in response.json()["items"]
+        if row["service_name"] == "eng-platform-api"
+    )
+    assert item["status"] == "healthy"
+    assert item["last_deployment"]["status"] == "SUCCEEDED"
+
+
 def test_dispatch_uses_independent_service_catalog_configuration():
     from eng_platform_api.services import catalog, github_deployments
 

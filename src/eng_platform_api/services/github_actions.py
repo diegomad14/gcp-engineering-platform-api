@@ -1,5 +1,6 @@
 """GitHub release and CI evidence for catalog services."""
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from ..config import config
@@ -60,12 +61,39 @@ def _release_item(
     )
 
 
+def _release_items_for_repository(repository: str) -> list[ReleaseItem]:
+    services = catalog.get_services_by_repository(repository)
+    try:
+        releases = _fetch_recent_releases(repository)
+    except Exception:
+        return []
+    recent: list[ReleaseItem] = []
+    deployments = {
+        service.service_name: deployment_store.list_for_service(
+            service.service_name, limit=100
+        )
+        for service in services
+    }
+    for release in releases:
+        tag = getattr(release, "tag_name", "") or ""
+        if not github_deployments._SEMVER.fullmatch(tag):
+            continue
+        for service in services:
+            recent.append(
+                _release_item(
+                    service,
+                    release,
+                    deployments[service.service_name],
+                )
+            )
+    return recent
+
+
 def get_release_summary() -> ReleaseSummary:
     if config.mock_mode:
         fallback = _fallback_releases()
         return ReleaseSummary(recent=fallback, total_releases=len(fallback))
 
-    recent: list[ReleaseItem] = []
     repositories = sorted(
         {
             service.repository
@@ -73,30 +101,10 @@ def get_release_summary() -> ReleaseSummary:
             if service.repository
         }
     )
-    for repository in repositories:
-        services = catalog.get_services_by_repository(repository)
-        try:
-            releases = _fetch_recent_releases(repository)
-        except Exception:
-            continue
-        deployments = {
-            service.service_name: deployment_store.list_for_service(
-                service.service_name, limit=100
-            )
-            for service in services
-        }
-        for release in releases:
-            tag = getattr(release, "tag_name", "") or ""
-            if not github_deployments._SEMVER.fullmatch(tag):
-                continue
-            for service in services:
-                recent.append(
-                    _release_item(
-                        service,
-                        release,
-                        deployments[service.service_name],
-                    )
-                )
+    workers = min(6, max(1, len(repositories)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        groups = list(executor.map(_release_items_for_repository, repositories))
+    recent = [item for group in groups for item in group]
 
     recent.sort(key=lambda release: release.created_at, reverse=True)
     recent = recent[:20]
