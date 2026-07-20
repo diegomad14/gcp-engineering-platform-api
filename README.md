@@ -2,11 +2,18 @@
 
 FastAPI control plane for independent Cloud Run services.
 
+## New here?
+
+See [`docs/onboarding/new-developer-guide.md`](docs/onboarding/new-developer-guide.md)
+for full setup, the contribution checklist, an architecture map and a
+troubleshooting runbook. Quick checklist:
+[`docs/checklists/new-developer-onboarding.md`](docs/checklists/new-developer-onboarding.md).
+
 ## Local development
 
 ```bash
-cd apps/platform-api
 pip install -e ".[dev]"
+export ENG_PLATFORM_MOCK_MODE=true
 uvicorn eng_platform_api.main:app --reload --port 8000
 python3 -m pytest -q
 ```

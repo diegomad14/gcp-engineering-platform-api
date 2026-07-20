@@ -1,5 +1,6 @@
 .env
 .env.*
+!.env.example
 .venv/
 *.egg-info/
 __pycache__/
