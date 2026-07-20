@@ -310,7 +310,7 @@ def test_dispatch_uses_independent_service_catalog_configuration():
     repository.get_workflow.assert_called_once_with("platform-deploy.yml")
     inputs = workflow.create_dispatch.call_args.kwargs["inputs"]
     assert inputs["service_name"] == "cgm-sanplat-web"
-    assert inputs["build_context"] == "frontend"
+    assert inputs["build_context"] == "."
     assert inputs["health_path"] == "/"
     assert inputs["project_id"] == "cgm-assistant-prod"
 

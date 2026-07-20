@@ -18,21 +18,17 @@ def test_list_services():
     assert {"cgm-sanplat-api", "cgm-sanplat-web", "eng-platform-api"} <= names
 
 
-def test_services_sharing_repository_remain_independent():
+def test_each_service_points_to_its_own_repository():
     services = client.get("/api/catalog/services").json()["services"]
-    cgm = [
-        service
+    by_name = {service["service_name"]: service for service in services}
+    assert by_name["cgm-sanplat-api"]["repository"] == "diegomad14/cgm-sanplat-api"
+    assert by_name["cgm-sanplat-web"]["repository"] == "diegomad14/cgm-sanplat-web"
+    assert by_name["cgm-bot-api"]["repository"] == "diegomad14/cgm-bot-core"
+    # Post-split, no service deploys from the archived monorepo.
+    assert all(
+        service["repository"] != "diegomad14/parametrizacion-correos-cgm"
         for service in services
-        if service["repository"] == "diegomad14/parametrizacion-correos-cgm"
-    ]
-    assert {service["service_name"] for service in cgm} == {
-        "cgm-sanplat-api",
-        "cgm-sanplat-web",
-    }
-    bot = next(
-        service for service in services if service["service_name"] == "cgm-bot-api"
     )
-    assert bot["repository"] == "diegomad14/cgm-bot-core"
 
 
 def test_get_service_found():
