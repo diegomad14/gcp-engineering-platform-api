@@ -614,7 +614,9 @@ def test_list_tags_refetches_from_github_after_cache_ttl_expires():
         ):
             repo.get_tags.return_value = stale_tags
             with mock.patch.object(github_deployments, "monotonic", return_value=0.0):
-                first = github_deployments.list_tags(repository, "some-service", limit=10)
+                first = github_deployments.list_tags(
+                    repository, "some-service", limit=10
+                )
             assert {tag.name for tag in first.items} == {"v1.0.0"}
 
             repo.get_tags.return_value = fresh_tags
