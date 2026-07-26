@@ -46,7 +46,7 @@ _STAGE_TO_STATUS = {
 _ROLLBACK_STAGES = [("rollback", "Roll back production")]
 TERMINAL_STATUSES = frozenset({"SUCCEEDED", "FAILED", "ROLLED_BACK", "ROLLBACK_FAILED"})
 _LIVE_STATUSES = frozenset({"SUCCEEDED", "ROLLED_BACK"})
-_TAG_CACHE_TTL_SECONDS = 300
+_TAG_CACHE_TTL_SECONDS = 30
 _tag_metadata_cache: dict[tuple[str, int, int], tuple[float, ReleaseTagPage]] = {}
 _tag_metadata_cache_lock = Lock()
 
