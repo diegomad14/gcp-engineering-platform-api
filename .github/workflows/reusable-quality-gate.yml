@@ -55,7 +55,7 @@ on:
       platform-ref:
         required: false
         type: string
-        default: "v1"
+        default: "v0.14.1"
     secrets:
       QUALITY_API_TOKEN:
         required: true
@@ -73,7 +73,7 @@ jobs:
       - name: Checkout quality gate implementation
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
-          repository: diegomad14/gcp-engineering-platform
+          repository: diegomad14/gcp-engineering-platform-api
           ref: ${{ inputs.platform-ref }}
           path: .eng-platform
 
