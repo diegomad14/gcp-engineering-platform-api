@@ -587,6 +587,54 @@ def test_list_tags_eligibility_follows_current_live_tag():
     assert by_name["v0.4.0"].eligible is True
 
 
+def test_list_tags_refetches_from_github_after_cache_ttl_expires():
+    """A tag pushed after the last poll must show up once the short-lived
+    in-process cache expires, instead of staying hidden for the full TTL
+    with no way to invalidate it (tags are created externally by
+    semantic-release, outside this API)."""
+    from eng_platform_api.services import github_deployments
+
+    repository = "diegomad14/cache-ttl-test-repo"
+    github_deployments._tag_metadata_cache.pop((repository, 0, 10), None)
+
+    stale_tags = [SimpleNamespace(name="v1.0.0", commit=SimpleNamespace(sha="a" * 40))]
+    fresh_tags = [
+        SimpleNamespace(name="v1.1.0", commit=SimpleNamespace(sha="b" * 40)),
+        SimpleNamespace(name="v1.0.0", commit=SimpleNamespace(sha="a" * 40)),
+    ]
+    repo = mock.MagicMock()
+    repo.get_commit.side_effect = RuntimeError("no commit metadata in test")
+    github = mock.MagicMock()
+    github.get_repo.return_value = repo
+
+    try:
+        with (
+            mock.patch.object(github_deployments.config, "mock_mode", False),
+            mock.patch.object(github_deployments, "github_client", return_value=github),
+        ):
+            repo.get_tags.return_value = stale_tags
+            with mock.patch.object(github_deployments, "monotonic", return_value=0.0):
+                first = github_deployments.list_tags(
+                    repository, "some-service", limit=10
+                )
+            assert {tag.name for tag in first.items} == {"v1.0.0"}
+
+            repo.get_tags.return_value = fresh_tags
+            with mock.patch.object(github_deployments, "monotonic", return_value=10.0):
+                still_cached = github_deployments.list_tags(
+                    repository, "some-service", limit=10
+                )
+            assert {tag.name for tag in still_cached.items} == {"v1.0.0"}
+
+            with mock.patch.object(github_deployments, "monotonic", return_value=31.0):
+                after_ttl = github_deployments.list_tags(
+                    repository, "some-service", limit=10
+                )
+            assert {tag.name for tag in after_ttl.items} == {"v1.0.0", "v1.1.0"}
+    finally:
+        github_deployments._tag_metadata_cache.pop((repository, 0, 10), None)
+
+
 def test_start_rollback_mock_mode_returns_synthetic_item():
     from eng_platform_api.services import catalog, github_deployments
 
