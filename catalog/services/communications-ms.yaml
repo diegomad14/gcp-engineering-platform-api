@@ -6,6 +6,10 @@ project_id: cgm-assistant-prod
 region: us-central1
 environment: prod
 release_model: manual
+quality:
+  enabled: true
+  profile: python
+  coverage_threshold: 70
 deployment:
   workflow_file: platform-deploy.yml
   image_name: communications-ms
