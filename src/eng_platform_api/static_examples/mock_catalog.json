@@ -56,7 +56,7 @@
       "region": "us-central1",
       "environment": "prod",
       "validation_targets": [],
-      "quality": { "enabled": false, "profile": "python", "coverage_threshold": 70 },
+      "quality": { "enabled": true, "profile": "python", "coverage_threshold": 70 },
       "deployment": { "workflow_file": "platform-deploy.yml", "image_name": "communications-ms", "artifact_repository": "cgm-sanplat-repo", "build_context": ".", "health_path": "/health" },
       "finops": { "service": "communications-ms", "env": "prod", "owner": "cgm", "cost_center": "cgm" }
     },

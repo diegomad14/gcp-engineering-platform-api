@@ -24,6 +24,7 @@ def test_each_service_points_to_its_own_repository():
     assert by_name["cgm-sanplat-api"]["repository"] == "diegomad14/cgm-sanplat-api"
     assert by_name["cgm-sanplat-web"]["repository"] == "diegomad14/cgm-sanplat-web"
     assert by_name["cgm-bot-api"]["repository"] == "diegomad14/cgm-bot-core"
+    assert by_name["communications-ms"]["quality"]["enabled"] is True
     # Post-split, no service deploys from the archived monorepo.
     assert all(
         service["repository"] != "diegomad14/parametrizacion-correos-cgm"
