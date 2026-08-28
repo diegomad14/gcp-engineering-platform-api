@@ -30,6 +30,10 @@ Windows):
   Python, curl, jq and the pinned GitHub Runner are installed before an
   incident occurs.
 
+The VM and image builder require a **Linux x86_64** host (or WSL2). On macOS,
+`cloud-localds` and `libguestfs-tools` are not available, so the controller
+fails closed before starting a VM; use a Linux host for the actual runner.
+
 The image must be supplied explicitly and verified with its SHA-256 checksum;
 the runner archive is independently pinned and verified too. It must not
 contain repository credentials, GCP keys, SSH keys or personal files. The
@@ -86,6 +90,24 @@ Cleanup restores the exact previous repository variable, removes the
 repository runner by ID and destroys the temporary VM disk. If the variable
 was changed by another operator, cleanup refuses to overwrite it and leaves a
 clear reconciliation error.
+
+## Validate the runner before an incident
+
+`validate` runs the same disposable-VM lifecycle as `up` but never touches
+`CGM_ACTIONS_RUNNER` and never reruns a workflow. It boots the VM, registers a
+repo-scoped runner, waits for it to come online, verifies the labels
+`self-hosted`, `linux`, `x64` and `cgm-release-local`, then deregisters the
+runner and destroys the VM:
+
+```bash
+./scripts/ops/local-release-runner/start.sh validate \
+  --repo diegomad14/<REPO> \
+  --image /approved/images/cgm-release-local-ubuntu-24.04-amd64.qcow2 \
+  --image-sha256 '<IMAGE_SHA256>'
+```
+
+Use `validate` when the contingency is not yet active to prove the image and
+controller are ready, without mutating the repository's runner variable.
 
 ## Security contract
 
