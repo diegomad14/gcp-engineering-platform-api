@@ -59,7 +59,7 @@ else
 fi
 qemu-img convert -O qcow2 "$DOWNLOADED" "$OUTPUT"
 chmod 600 "$OUTPUT"
-virt-customize -a "$OUTPUT" \
+virt-customize --network -a "$OUTPUT" \
   --copy-in "$MANIFEST:/tmp" \
   --run "$PROVISIONER" \
   --delete /etc/machine-id \

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -Eeuo pipefail
+set -eu
 
 export DEBIAN_FRONTEND=noninteractive
 MANIFEST=/tmp/approved-artifacts.json
