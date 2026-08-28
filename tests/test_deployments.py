@@ -467,6 +467,7 @@ def test_dispatch_failure_marks_github_deployment_failed():
     )
     github = mock.MagicMock()
     github.get_repo.return_value = repository
+    tag = _tag()
 
     with (
         mock.patch.object(github_deployments.config, "mock_mode", False),
@@ -475,7 +476,7 @@ def test_dispatch_failure_marks_github_deployment_failed():
         with pytest.raises(github_deployments.GitHubDispatchError) as raised:
             github_deployments.start_deployment(
                 service=service,
-                tag=_tag(),
+                tag=tag,
                 requested_by="diegomad14",
             )
 
@@ -1076,6 +1077,7 @@ def test_start_deployment_status_update_failure_is_recorded():
     github_deployment.create_status.side_effect = RuntimeError("status failed")
     github = mock.MagicMock()
     github.get_repo.return_value = repository
+    tag = _tag()
 
     with (
         mock.patch.object(github_deployments.config, "mock_mode", False),
@@ -1084,7 +1086,7 @@ def test_start_deployment_status_update_failure_is_recorded():
         with pytest.raises(github_deployments.GitHubDispatchError) as raised:
             github_deployments.start_deployment(
                 service=service,
-                tag=_tag(),
+                tag=tag,
                 requested_by="diegomad14",
             )
 
