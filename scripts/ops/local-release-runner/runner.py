@@ -246,9 +246,11 @@ def verify_file_sha256(path: Path, expected: str, label: str) -> None:
 
 
 def require_prerequisites(image: Path, image_sha256: str) -> None:
-    for tool in ("gh", "qemu-system-x86_64", "qemu-img", "cloud-localds"):
+    for tool in ("gh", "qemu-system-x86_64", "qemu-img"):
         if not command_exists(tool):
             raise ControllerError(f"Required host tool is missing: {tool}")
+    if not any(command_exists(tool) for tool in ("cloud-localds", "hdiutil")):
+        raise ControllerError("Required ISO tool is missing: cloud-localds or hdiutil")
     if not image.is_file():
         raise ControllerError(f"VM image does not exist: {image}")
     verify_file_sha256(image, image_sha256, "--image-sha256")
@@ -324,6 +326,44 @@ def qemu_accel() -> list[str]:
     return ["-accel", "tcg,thread=multi"]
 
 
+def create_seed_iso(user_data_path: Path, meta_data_path: Path, seed_iso: Path) -> None:
+    if command_exists("cloud-localds"):
+        result = run_command(
+            ["cloud-localds", str(seed_iso), str(user_data_path), str(meta_data_path)],
+            check=False,
+        )
+        if result.returncode != 0:
+            raise ControllerError(
+                f"Could not create NoCloud seed: {result.stderr.strip()}"
+            )
+        return
+    if command_exists("hdiutil"):
+        seed_dir = seed_iso.parent / "seed"
+        seed_dir.mkdir(parents=True, exist_ok=True)
+        (seed_dir / "user-data").write_text(user_data_path.read_text())
+        (seed_dir / "meta-data").write_text(meta_data_path.read_text())
+        result = run_command(
+            [
+                "hdiutil",
+                "makehybrid",
+                "-iso",
+                "-joliet",
+                "-default-volume-name",
+                "cidata",
+                "-o",
+                str(seed_iso),
+                str(seed_dir),
+            ],
+            check=False,
+        )
+        if result.returncode != 0:
+            raise ControllerError(
+                f"Could not create NoCloud seed: {result.stderr.strip()}"
+            )
+        return
+    raise ControllerError("No supported ISO tool is available")
+
+
 def create_vm_files(image: Path, user_data: str, work_dir: Path) -> tuple[Path, Path]:
     vm_disk = work_dir / "runner.qcow2"
     seed_iso = work_dir / "seed.iso"
@@ -347,11 +387,9 @@ def create_vm_files(image: Path, user_data: str, work_dir: Path) -> tuple[Path, 
         )
     user_data_path = work_dir / "user-data"
     user_data_path.write_text(user_data)
-    result = run_command(
-        ["cloud-localds", str(seed_iso), str(user_data_path)], check=False
-    )
-    if result.returncode != 0:
-        raise ControllerError(f"Could not create NoCloud seed: {result.stderr.strip()}")
+    meta_data_path = work_dir / "meta-data"
+    meta_data_path.write_text("instance-id: cgm-release-local\n")
+    create_seed_iso(user_data_path, meta_data_path, seed_iso)
     return vm_disk, seed_iso
 
 

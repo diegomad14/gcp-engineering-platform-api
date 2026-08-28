@@ -199,3 +199,102 @@ def test_rerun_same_run_refuses_active_run():
             },
             30,
         )
+
+
+def test_create_seed_iso_prefers_cloud_localds(tmp_path):
+    user_data = tmp_path / "user-data"
+    user_data.write_text("#cloud-config\n")
+    meta_data = tmp_path / "meta-data"
+    meta_data.write_text("instance-id: cgm-release-local\n")
+    seed_iso = tmp_path / "seed.iso"
+
+    with (
+        mock.patch.object(
+            local_runner,
+            "command_exists",
+            side_effect=lambda name: name == "cloud-localds",
+        ),
+        mock.patch.object(
+            local_runner, "run_command", return_value=mock.Mock(returncode=0)
+        ) as run,
+    ):
+        local_runner.create_seed_iso(user_data, meta_data, seed_iso)
+
+    run.assert_called_once()
+    assert run.call_args.args[0][:2] == ["cloud-localds", str(seed_iso)]
+
+
+def test_create_seed_iso_uses_hdiutil_on_macos(tmp_path):
+    user_data = tmp_path / "user-data"
+    user_data.write_text("#cloud-config\n")
+    meta_data = tmp_path / "meta-data"
+    meta_data.write_text("instance-id: cgm-release-local\n")
+    seed_iso = tmp_path / "seed.iso"
+
+    with (
+        mock.patch.object(
+            local_runner,
+            "command_exists",
+            side_effect=lambda name: name == "hdiutil",
+        ),
+        mock.patch.object(
+            local_runner, "run_command", return_value=mock.Mock(returncode=0)
+        ) as run,
+    ):
+        local_runner.create_seed_iso(user_data, meta_data, seed_iso)
+
+    run.assert_called_once()
+    args = run.call_args.args[0]
+    assert args[:3] == ["hdiutil", "makehybrid", "-iso"]
+    assert "-default-volume-name" in args
+    seed_dir = seed_iso.parent / "seed"
+    assert (seed_dir / "user-data").read_text() == "#cloud-config\n"
+    assert (seed_dir / "meta-data").read_text() == "instance-id: cgm-release-local\n"
+
+
+def test_create_seed_iso_requires_an_iso_tool(tmp_path):
+    user_data = tmp_path / "user-data"
+    user_data.write_text("#cloud-config\n")
+    meta_data = tmp_path / "meta-data"
+    meta_data.write_text("instance-id: cgm-release-local\n")
+    seed_iso = tmp_path / "seed.iso"
+
+    with mock.patch.object(local_runner, "command_exists", return_value=False):
+        with pytest.raises(local_runner.ControllerError, match="ISO tool"):
+            local_runner.create_seed_iso(user_data, meta_data, seed_iso)
+
+
+def test_require_prerequisites_rejects_missing_iso_tool(tmp_path):
+    image = tmp_path / "image.qcow2"
+
+    def command_exists(name: str) -> bool:
+        return name in {"gh", "qemu-system-x86_64", "qemu-img"}
+
+    with mock.patch.object(local_runner, "command_exists", side_effect=command_exists):
+        with pytest.raises(
+            local_runner.ControllerError, match="cloud-localds or hdiutil"
+        ):
+            local_runner.require_prerequisites(image, "a" * 64)
+
+
+def test_create_vm_files_writes_metadata_and_uses_hdiutil(tmp_path):
+    image = tmp_path / "base.qcow2"
+    image.write_bytes(b"base")
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    with (
+        mock.patch.object(
+            local_runner,
+            "command_exists",
+            side_effect=lambda name: name == "hdiutil",
+        ),
+        mock.patch.object(
+            local_runner, "run_command", return_value=mock.Mock(returncode=0)
+        ) as run,
+    ):
+        local_runner.create_vm_files(image, "#cloud-config\n", work_dir)
+
+    assert (work_dir / "meta-data").read_text() == "instance-id: cgm-release-local\n"
+    assert (work_dir / "user-data").read_text() == "#cloud-config\n"
+    assert any(call.args[0][0] == "hdiutil" for call in run.call_args_list)
