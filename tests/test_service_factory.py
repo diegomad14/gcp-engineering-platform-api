@@ -57,6 +57,7 @@ def test_generate_service_plan():
     assert "agent-handoff-prompt.md" in data["generated_files"]
     assert "SonarQube" not in data["yaml_contract"]
     assert "reusable-quality-gate.yml" in data["caller_pr_check"]
+    assert "reusable-quality-gate.yml@v0.15.0" in data["caller_pr_check"]
     assert "workflow_dispatch" in data["platform_deploy_workflow"]
     assert "github_deployment_id" in data["platform_deploy_workflow"]
     assert "target_revision" in data["platform_rollback_workflow"]
@@ -67,6 +68,9 @@ def test_generate_service_plan():
     assert "cgm-release-local" in " ".join(data["checklist"])
     assert "CGM_ACTIONS_RUNNER" in data["agent_prompt"]
     assert "disposable-VM" in data["agent_prompt"]
+    assert "runner_label" in data["caller_promote"]
+    assert "runner_label" in data["caller_rollback"]
+    assert "runner_label: ${{ inputs.runner_label }}" in data["caller_promote"]
     assert "service_name: test-api" in data["catalog_entry"]
     assert "Never use GCP Console" in data["agent_prompt"]
     assert data["sonar_properties"] == ""

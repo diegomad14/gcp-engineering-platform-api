@@ -8,7 +8,8 @@ import pytest
 
 SCRIPT = Path(__file__).parents[1] / "scripts/ops/local-release-runner/runner.py"
 SPEC = importlib.util.spec_from_file_location("local_release_runner", SCRIPT)
-assert SPEC and SPEC.loader
+assert SPEC is not None
+assert SPEC.loader is not None
 local_runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(local_runner)
 
@@ -75,6 +76,50 @@ def test_approved_runner_manifest_has_valid_pins():
 
     assert version == "2.337.0"
     assert sha256 == "70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613"
+
+
+def test_validate_approved_runner_accepts_manifest_values():
+    version, sha256 = local_runner.approved_runner_artifact()
+    local_runner.validate_approved_runner(version, sha256)
+
+
+def test_validate_approved_runner_rejects_unknown_version():
+    with pytest.raises(local_runner.ControllerError, match="approved-artifacts.json"):
+        local_runner.validate_approved_runner("2.000.0", "a" * 64)
+
+
+def test_verify_runner_labels_accepts_expected_labels():
+    with mock.patch.object(
+        local_runner,
+        "runner_by_name",
+        return_value={
+            "status": "online",
+            "labels": [
+                {"name": "self-hosted"},
+                {"name": "linux"},
+                {"name": "x64"},
+                {"name": "cgm-release-local"},
+            ],
+        },
+    ):
+        local_runner.verify_runner_labels("owner/repo", "cgm-release-local-1-1")
+
+
+def test_verify_runner_labels_rejects_missing_label():
+    with mock.patch.object(
+        local_runner,
+        "runner_by_name",
+        return_value={
+            "status": "online",
+            "labels": [
+                {"name": "self-hosted"},
+                {"name": "linux"},
+                {"name": "x64"},
+            ],
+        },
+    ):
+        with pytest.raises(local_runner.ControllerError, match="missing labels"):
+            local_runner.verify_runner_labels("owner/repo", "cgm-release-local-1-1")
 
 
 def test_powershell_wrapper_never_registers_runner_on_host():

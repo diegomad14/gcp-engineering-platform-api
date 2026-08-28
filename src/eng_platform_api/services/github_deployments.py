@@ -49,6 +49,8 @@ _LIVE_STATUSES = frozenset({"SUCCEEDED", "ROLLED_BACK"})
 _TAG_CACHE_TTL_SECONDS = 30
 _tag_metadata_cache: dict[tuple[str, int, int], tuple[float, ReleaseTagPage]] = {}
 _tag_metadata_cache_lock = Lock()
+GITHUB_WORKFLOW_DISPATCH_FAILED = "GitHub workflow dispatch failed"
+GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED = "GitHub rollback workflow dispatch failed"
 
 
 class GitHubDispatchError(RuntimeError):
@@ -56,7 +58,7 @@ class GitHubDispatchError(RuntimeError):
 
     def __init__(self, item: DeploymentItem):
         self.item = item
-        super().__init__(item.error or "GitHub workflow dispatch failed")
+        super().__init__(item.error or GITHUB_WORKFLOW_DISPATCH_FAILED)
 
 
 def default_stages(kind: str = "deploy") -> list[DeploymentStage]:
@@ -264,14 +266,14 @@ def start_deployment(
     except Exception as exc:
         item.status = "FAILED"
         item.current_stage = "dispatch"
-        item.error = "GitHub workflow dispatch failed"
+        item.error = GITHUB_WORKFLOW_DISPATCH_FAILED
         try:
             github_deployment.create_status(
                 state="failure",
                 description=item.error,
             )
         except Exception:
-            item.error = "GitHub workflow dispatch failed; status update failed"
+            item.error = f"{GITHUB_WORKFLOW_DISPATCH_FAILED}; status update failed"
         raise GitHubDispatchError(item) from exc
     return item
 
@@ -349,7 +351,7 @@ def start_rollback(
     except Exception as exc:
         item.status = "FAILED"
         item.current_stage = "dispatch"
-        item.error = "GitHub rollback workflow dispatch failed"
+        item.error = GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED
         try:
             github_deployment.create_status(
                 state="failure",
@@ -357,10 +359,46 @@ def start_rollback(
             )
         except Exception:
             item.error = (
-                "GitHub rollback workflow dispatch failed; status update failed"
+                f"{GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED}; status update failed"
             )
         raise GitHubDispatchError(item) from exc
     return item
+
+
+def _retry_workflow_and_inputs(
+    repo: Any, service: CatalogService, item: DeploymentItem, target_revision: str
+) -> tuple[Any, dict[str, str]]:
+    if item.kind == "rollback":
+        revision = item.production_revision or target_revision
+        if not revision:
+            raise ValueError("Rollback retry has no target revision")
+        workflow = repo.get_workflow(config.github.rollback_workflow)
+        inputs = {
+            "service_name": service.service_name,
+            "target_tag": item.tag,
+            "target_revision": revision,
+            "github_deployment_id": str(item.github_deployment_id),
+            "project_id": service.project_id,
+            "region": service.region,
+            "health_path": service.deployment.health_path,
+        }
+        item.production_revision = revision
+        return workflow, inputs
+    workflow = repo.get_workflow(
+        service.deployment.workflow_file or config.github.deployment_workflow
+    )
+    inputs = {
+        "service_name": service.service_name,
+        "tag": item.tag,
+        "github_deployment_id": str(item.github_deployment_id),
+        "project_id": service.project_id,
+        "region": service.region,
+        "image_name": service.deployment.image_name or service.service_name,
+        "artifact_repository": service.deployment.artifact_repository,
+        "build_context": service.deployment.build_context,
+        "health_path": service.deployment.health_path,
+    }
+    return workflow, inputs
 
 
 def retry_dispatch(
@@ -392,45 +430,18 @@ def retry_dispatch(
             state="queued",
             description="Dispatch retry queued by Engineering Platform",
         )
-        if item.kind == "rollback":
-            revision = item.production_revision or target_revision
-            if not revision:
-                raise ValueError("Rollback retry has no target revision")
-            workflow = repo.get_workflow(config.github.rollback_workflow)
-            inputs = {
-                "service_name": service.service_name,
-                "target_tag": item.tag,
-                "target_revision": revision,
-                "github_deployment_id": str(item.github_deployment_id),
-                "project_id": service.project_id,
-                "region": service.region,
-                "health_path": service.deployment.health_path,
-            }
-            item.production_revision = revision
-        else:
-            workflow = repo.get_workflow(
-                service.deployment.workflow_file or config.github.deployment_workflow
-            )
-            inputs = {
-                "service_name": service.service_name,
-                "tag": item.tag,
-                "github_deployment_id": str(item.github_deployment_id),
-                "project_id": service.project_id,
-                "region": service.region,
-                "image_name": service.deployment.image_name or service.service_name,
-                "artifact_repository": service.deployment.artifact_repository,
-                "build_context": service.deployment.build_context,
-                "health_path": service.deployment.health_path,
-            }
+        workflow, inputs = _retry_workflow_and_inputs(
+            repo, service, item, target_revision
+        )
         workflow.create_dispatch(ref=item.tag, inputs=inputs)
     except Exception as exc:
         item.status = "FAILED"
         item.current_stage = "dispatch"
         item.updated_at = now
         item.error = (
-            "GitHub rollback workflow dispatch failed"
+            GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED
             if item.kind == "rollback"
-            else "GitHub workflow dispatch failed"
+            else GITHUB_WORKFLOW_DISPATCH_FAILED
         )
         try:
             github_deployment.create_status(state="failure", description=item.error)

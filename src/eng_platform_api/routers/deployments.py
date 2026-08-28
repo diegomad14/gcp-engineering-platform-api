@@ -68,6 +68,49 @@ def _active_deployment(service_name: str) -> DeploymentItem | None:
     )
 
 
+def _require_matching_idempotency(
+    existing: DeploymentItem, service_name: str, tag: str, kind: str
+) -> None:
+    if (
+        existing.service_name != service_name
+        or existing.tag != tag
+        or existing.kind != kind
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Idempotency-Key was already used for another deployment",
+        )
+
+
+def _save_dispatch_error(
+    exc: github_deployments.GitHubDispatchError, key: str, detail: str
+) -> None:
+    try:
+        deployment_store.save(exc.item, key)
+        _invalidate_overview_cache()
+    except Exception as store_exc:
+        raise HTTPException(status_code=502, detail=_GITHUB_UNAVAILABLE) from store_exc
+    raise HTTPException(status_code=502, detail=detail) from exc
+
+
+def _retry_failed_dispatch(
+    service, existing: DeploymentItem, key: str, detail: str, target_revision: str = ""
+) -> DeploymentItem:
+    try:
+        retried = github_deployments.retry_dispatch(
+            service=service, item=existing, target_revision=target_revision
+        )
+    except github_deployments.GitHubDispatchError as exc:
+        deployment_store.save(exc.item, key)
+        _invalidate_overview_cache()
+        raise HTTPException(status_code=502, detail=detail) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=_GITHUB_UNAVAILABLE) from exc
+    saved = deployment_store.save(retried, key)
+    _invalidate_overview_cache()
+    return saved
+
+
 @router.get(
     "/services/{service_name}/tags",
     response_model=ReleaseTagPage,
@@ -120,34 +163,14 @@ def create_deployment(
     key = idempotency_key or str(uuid.uuid4())
     existing = deployment_store.find_by_idempotency_key(key)
     if existing is not None:
-        if (
-            existing.service_name != service_name
-            or existing.tag != payload.tag
-            or existing.kind != "deploy"
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail="Idempotency-Key was already used for another deployment",
-            )
+        _require_matching_idempotency(existing, service_name, payload.tag, "deploy")
         if existing.status == "FAILED" and existing.current_stage == "dispatch":
-            try:
-                retried = github_deployments.retry_dispatch(
-                    service=service,
-                    item=existing,
-                )
-                saved = deployment_store.save(retried, key)
-                _invalidate_overview_cache()
-                return saved
-            except github_deployments.GitHubDispatchError as exc:
-                deployment_store.save(exc.item, key)
-                _invalidate_overview_cache()
-                raise HTTPException(
-                    status_code=502, detail="GitHub workflow dispatch failed"
-                ) from exc
-            except Exception as exc:
-                raise HTTPException(
-                    status_code=502, detail=_GITHUB_UNAVAILABLE
-                ) from exc
+            return _retry_failed_dispatch(
+                service,
+                existing,
+                key,
+                github_deployments.GITHUB_WORKFLOW_DISPATCH_FAILED,
+            )
         return existing
     active = _active_deployment(service_name)
     if active is not None:
@@ -175,16 +198,9 @@ def create_deployment(
     except HTTPException:
         raise
     except github_deployments.GitHubDispatchError as exc:
-        try:
-            deployment_store.save(exc.item, key)
-            _invalidate_overview_cache()
-        except Exception as store_exc:
-            raise HTTPException(
-                status_code=502, detail=_GITHUB_UNAVAILABLE
-            ) from store_exc
-        raise HTTPException(
-            status_code=502, detail="GitHub workflow dispatch failed"
-        ) from exc
+        _save_dispatch_error(
+            exc, key, github_deployments.GITHUB_WORKFLOW_DISPATCH_FAILED
+        )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=_GITHUB_UNAVAILABLE) from exc
 
@@ -225,36 +241,15 @@ def rollback_deployment(
     key = idempotency_key or str(uuid.uuid4())
     existing = deployment_store.find_by_idempotency_key(key)
     if existing is not None:
-        if (
-            existing.service_name != service_name
-            or existing.tag != target.tag
-            or existing.kind != "rollback"
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail="Idempotency-Key was already used for another deployment",
-            )
+        _require_matching_idempotency(existing, service_name, target.tag, "rollback")
         if existing.status == "FAILED" and existing.current_stage == "dispatch":
-            try:
-                retried = github_deployments.retry_dispatch(
-                    service=service,
-                    item=existing,
-                    target_revision=target.production_revision,
-                )
-                saved = deployment_store.save(retried, key)
-                _invalidate_overview_cache()
-                return saved
-            except github_deployments.GitHubDispatchError as exc:
-                deployment_store.save(exc.item, key)
-                _invalidate_overview_cache()
-                raise HTTPException(
-                    status_code=502,
-                    detail="GitHub rollback workflow dispatch failed",
-                ) from exc
-            except Exception as exc:
-                raise HTTPException(
-                    status_code=502, detail=_GITHUB_UNAVAILABLE
-                ) from exc
+            return _retry_failed_dispatch(
+                service,
+                existing,
+                key,
+                github_deployments.GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED,
+                target.production_revision,
+            )
         return existing
     active = _active_deployment(service_name)
     if active is not None:
@@ -277,16 +272,9 @@ def rollback_deployment(
     except HTTPException:
         raise
     except github_deployments.GitHubDispatchError as exc:
-        try:
-            deployment_store.save(exc.item, key)
-            _invalidate_overview_cache()
-        except Exception as store_exc:
-            raise HTTPException(
-                status_code=502, detail=_GITHUB_UNAVAILABLE
-            ) from store_exc
-        raise HTTPException(
-            status_code=502, detail="GitHub rollback workflow dispatch failed"
-        ) from exc
+        _save_dispatch_error(
+            exc, key, github_deployments.GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED
+        )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=_GITHUB_UNAVAILABLE) from exc
 

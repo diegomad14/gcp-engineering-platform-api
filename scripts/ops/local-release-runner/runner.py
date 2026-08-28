@@ -114,6 +114,16 @@ def validate_runner_version(value: str) -> None:
         raise ControllerError("--runner-version must be a semantic version")
 
 
+def validate_approved_runner(version: str, sha256: str) -> None:
+    validate_runner_version(version)
+    validate_pin(sha256, "--runner-sha256")
+    approved_version, approved_sha256 = approved_runner_artifact()
+    if (version, sha256.lower()) != (approved_version, approved_sha256.lower()):
+        raise ControllerError(
+            "Runner version/hash do not match approved-artifacts.json"
+        )
+
+
 def variable_value(repo: str) -> str | None:
     result = gh(["variable", "get", "CGM_ACTIONS_RUNNER", "--repo", repo], check=False)
     if result.returncode == 0:
@@ -447,6 +457,16 @@ def wait_for_runner(
     raise ControllerError("Temporary runner did not become online before timeout")
 
 
+def verify_runner_labels(repo: str, name: str) -> None:
+    found = runner_by_name(repo, name)
+    if not found or found.get("status") != "online":
+        raise ControllerError("Temporary runner is not online")
+    labels = {str(label.get("name")) for label in found.get("labels", [])}
+    missing = {"self-hosted", "linux", "x64", LABEL} - labels
+    if missing:
+        raise ControllerError(f"Temporary runner is missing labels: {sorted(missing)}")
+
+
 def wait_for_run(repo: str, run_id: int, timeout: int) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -520,16 +540,7 @@ def run_up(args: argparse.Namespace) -> int:
     validate_repo(args.repo)
     if args.run_id <= 0:
         raise ControllerError("--run-id must be positive")
-    validate_runner_version(args.runner_version)
-    validate_pin(args.runner_sha256, "--runner-sha256")
-    approved_version, approved_sha256 = approved_runner_artifact()
-    if (args.runner_version, args.runner_sha256.lower()) != (
-        approved_version,
-        approved_sha256.lower(),
-    ):
-        raise ControllerError(
-            "Runner version/hash do not match approved-artifacts.json"
-        )
+    validate_approved_runner(args.runner_version, args.runner_sha256)
     image = Path(args.image).expanduser().resolve()
     require_prerequisites(image, args.image_sha256)
     run = target_run(args.repo, args.run_id)
@@ -634,6 +645,79 @@ def run_up(args: argparse.Namespace) -> int:
         raise
 
 
+def run_validate(args: argparse.Namespace) -> int:
+    validate_repo(args.repo)
+    validate_approved_runner(args.runner_version, args.runner_sha256)
+    image = Path(args.image).expanduser().resolve()
+    require_prerequisites(image, args.image_sha256)
+
+    runner_name = f"cgm-release-local-{int(time.time())}-{os.getpid()}"
+    work_dir = Path(tempfile.mkdtemp(prefix="cgm-release-runner-"))
+    path = (
+        Path(args.state_file).expanduser().resolve()
+        if args.state_file
+        else STATE_ROOT / f"{args.repo.replace('/', '_')}-validate-{runner_name}.json"
+    )
+    state = {
+        "version": STATE_VERSION,
+        "repo": args.repo,
+        "runner_name": runner_name,
+        "runner_id": None,
+        "previous_runner_variable": None,
+        "variable_change_started": False,
+        "variable_changed": False,
+        "vm_pid": None,
+        "vm_dir": str(work_dir),
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    write_state(path, state)
+    try:
+        registration = gh_json(
+            [
+                "api",
+                "--method",
+                "POST",
+                f"repos/{args.repo}/actions/runners/registration-token",
+            ]
+        )
+        token = registration.get("token")
+        if not token:
+            raise ControllerError("GitHub did not return a runner registration token")
+        user_data = make_user_data(
+            repository=args.repo,
+            runner_token=token,
+            runner_name=runner_name,
+            runner_version=args.runner_version,
+            runner_sha256=args.runner_sha256,
+        )
+        vm_disk, seed_iso = create_vm_files(image, user_data, work_dir)
+        process = launch_vm(vm_disk, seed_iso)
+        state["vm_pid"] = process.pid
+        write_state(path, state)
+        wait_for_runner(args.repo, runner_name, args.runner_timeout, state, path)
+        for secret_path in (work_dir / "seed.iso", work_dir / "user-data"):
+            secret_path.unlink(missing_ok=True)
+        verify_runner_labels(args.repo, runner_name)
+        print(f"Local runner validated for {args.repo}; state: {path}")
+        errors = cleanup(path, state)
+        if errors:
+            for error in errors:
+                print(f"CLEANUP ERROR: {error}", file=sys.stderr)
+            return 2
+        return 0
+    except KeyboardInterrupt:
+        print("Interrupted; cleaning up the local runner", file=sys.stderr)
+        errors = cleanup(path, state)
+        for error in errors:
+            print(f"CLEANUP ERROR: {error}", file=sys.stderr)
+        return 130 if not errors else 2
+    except Exception:
+        cleanup_errors = cleanup(path, state)
+        for error in cleanup_errors:
+            print(f"CLEANUP ERROR: {error}", file=sys.stderr)
+        raise
+
+
 def run_down(args: argparse.Namespace) -> int:
     path = Path(args.state_file).expanduser().resolve()
     state = read_state(path)
@@ -657,6 +741,16 @@ def parser() -> argparse.ArgumentParser:
     up.add_argument("--runner-timeout", type=int, default=300)
     up.add_argument("--run-timeout", type=int, default=7200)
     up.add_argument("--state-file")
+    validate = subparsers.add_parser(
+        "validate", help="register a temporary runner, verify labels, then clean up"
+    )
+    validate.add_argument("--repo", required=True)
+    validate.add_argument("--image", required=True)
+    validate.add_argument("--image-sha256", required=True)
+    validate.add_argument("--runner-version", default=approved_version)
+    validate.add_argument("--runner-sha256", default=approved_sha256)
+    validate.add_argument("--runner-timeout", type=int, default=300)
+    validate.add_argument("--state-file")
     down = subparsers.add_parser("down", help="recover an interrupted incident")
     down.add_argument("--state-file", required=True)
     return parser
@@ -665,9 +759,12 @@ def parser() -> argparse.ArgumentParser:
 if __name__ == "__main__":
     arguments = parser().parse_args()
     try:
-        exit_code = (
-            run_up(arguments) if arguments.command == "up" else run_down(arguments)
-        )
+        if arguments.command == "up":
+            exit_code = run_up(arguments)
+        elif arguments.command == "validate":
+            exit_code = run_validate(arguments)
+        else:
+            exit_code = run_down(arguments)
     except ControllerError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         exit_code = 2
