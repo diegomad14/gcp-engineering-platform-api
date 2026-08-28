@@ -27,6 +27,11 @@ on:
         description: "Commit SHA approved by the quality gate"
         required: true
         type: string
+      runner_label:
+        description: "Emergency runner label; leave empty for hosted runner"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -34,7 +39,7 @@ permissions:
 
 jobs:
   promote:
-    uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-cloud-run-promote.yml@v1
+    uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-cloud-run-promote.yml@v0.15.0
     with:
       project-id: ${{ vars.GCP_PROJECT_ID }}
       region: ${{ vars.GCP_REGION }}
@@ -54,5 +59,6 @@ jobs:
       expected-openapi-paths: "77"
       promote-api: true
       promote-web: ${{ vars.HAS_FRONTEND == 'true' }}
+      runner_label: ${{ inputs.runner_label }}
     secrets:
       QUALITY_API_TOKEN: ${{ secrets.QUALITY_API_TOKEN }}

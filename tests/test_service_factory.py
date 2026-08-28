@@ -61,6 +61,12 @@ def test_generate_service_plan():
     assert "github_deployment_id" in data["platform_deploy_workflow"]
     assert "target_revision" in data["platform_rollback_workflow"]
     assert "semantic-release" in data["semantic_release_workflow"]
+    assert "CGM_ACTIONS_RUNNER" in data["semantic_release_workflow"]
+    assert "CGM_ACTIONS_RUNNER" in data["platform_deploy_workflow"]
+    assert "CGM_ACTIONS_RUNNER" in data["platform_rollback_workflow"]
+    assert "cgm-release-local" in " ".join(data["checklist"])
+    assert "CGM_ACTIONS_RUNNER" in data["agent_prompt"]
+    assert "disposable-VM" in data["agent_prompt"]
     assert "service_name: test-api" in data["catalog_entry"]
     assert "Never use GCP Console" in data["agent_prompt"]
     assert data["sonar_properties"] == ""

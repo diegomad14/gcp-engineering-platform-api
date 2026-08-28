@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   api-quality:
-    uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-quality-gate.yml@v1
+    uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-quality-gate.yml@v0.15.0
     with:
       service-name: ${{ vars.API_SERVICE_NAME }}
       profile: python
@@ -26,7 +26,7 @@ jobs:
 
   web-quality:
     if: ${{ vars.HAS_FRONTEND == 'true' }}
-    uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-quality-gate.yml@v1
+    uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-quality-gate.yml@v0.15.0
     with:
       service-name: ${{ vars.WEB_SERVICE_NAME }}
       profile: node

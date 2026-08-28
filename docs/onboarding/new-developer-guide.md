@@ -13,6 +13,10 @@ Short actionable checklist (no explanations): [`docs/checklists/new-developer-on
 
 Deploy runbook for any integrated service: [`docs/onboarding/deploy-any-service.md`](deploy-any-service.md).
 
+GitHub Actions continuity runbook: use the canonical Obsidian
+`release_process` section and `Runbook - GitHub Actions bloqueado` for billing,
+quota, runner and break-glass incidents.
+
 ## 1. Prerequisites
 
 - **Python ≥3.11** (`pyproject.toml`); CI runs **3.12** — install 3.12 for exact parity.

@@ -19,7 +19,7 @@ Example:
 ```yaml
 jobs:
   quality:
-    uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-quality-gate.yml@v1
+    uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-quality-gate.yml@v0.15.0
     with:
       service-name: example-api
       profile: python

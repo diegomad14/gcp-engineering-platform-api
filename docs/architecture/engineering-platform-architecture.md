@@ -12,12 +12,12 @@ Developer
   v
 GitHub App Repo (source of truth for app code)
   |
-  +--> uses: platform/.github/workflows/reusable-pr-check.yml@v1
-  +--> uses: platform/.github/workflows/reusable-quality-gate.yml@v1
-  +--> uses: platform/.github/workflows/reusable-cloud-run-release-candidate.yml@v1
-  +--> uses: platform/.github/workflows/reusable-cloud-run-promote.yml@v1
-  +--> uses: platform/.github/workflows/reusable-cloud-run-rollback.yml@v1
-  +--> uses: platform/.github/workflows/service-onboarding-plan.yml@v1
+  +--> uses: platform/.github/workflows/reusable-pr-check.yml@v0.15.0
+  +--> uses: platform/.github/workflows/reusable-quality-gate.yml@v0.15.0
+  +--> uses: platform/.github/workflows/reusable-cloud-run-release-candidate.yml@v0.15.0
+  +--> uses: platform/.github/workflows/reusable-cloud-run-promote.yml@v0.15.0
+  +--> uses: platform/.github/workflows/reusable-cloud-run-rollback.yml@v0.15.0
+  +--> uses: platform/.github/workflows/service-onboarding-plan.yml@v0.15.0
   |
   v
 GitHub Actions (Execution Engine)
@@ -40,7 +40,7 @@ Optional: eng-platform-api + eng-platform-web on Cloud Run
 - **Reusable workflows** in `.github/workflows/` using `workflow_call`.
 - **Quality evidence** produced by Ruff/ESLint, tests, Semgrep and Trivy, then
   persisted by the Platform API per service and commit.
-- Called from app repos via `uses: diegomad14/gcp-engineering-platform-api/.github/workflows/<name>.yml@v1`.
+- Called from app repos via `uses: diegomad14/gcp-engineering-platform-api/.github/workflows/<name>.yml@v0.15.0`.
 - WIF/OIDC authentication to GCP.
 - Candidate → validate → promote → rollback lifecycle.
 

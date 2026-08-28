@@ -207,6 +207,78 @@ def test_create_deployment_hides_upstream_error_details(client):
     assert response.json()["detail"] == "GitHub unavailable"
 
 
+def test_create_deployment_persists_failed_dispatch_for_idempotent_recovery(client):
+    from eng_platform_api.services import deployment_store, github_deployments
+
+    failed = _deployment().model_copy(
+        update={
+            "id": "73",
+            "github_deployment_id": 73,
+            "status": "FAILED",
+            "current_stage": "dispatch",
+            "error": "GitHub workflow dispatch failed",
+        }
+    )
+    with (
+        mock.patch(
+            "eng_platform_api.routers.deployments.github_deployments.get_tag",
+            return_value=_tag(),
+        ),
+        mock.patch(
+            "eng_platform_api.routers.deployments.github_deployments.start_deployment",
+            side_effect=github_deployments.GitHubDispatchError(failed),
+        ),
+    ):
+        response = client.post(
+            "/api/services/eng-platform-api/deployments",
+            json={"tag": "v0.5.0"},
+            headers={"Idempotency-Key": "dispatch-failure"},
+        )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "GitHub workflow dispatch failed"
+    saved = deployment_store.get("73")
+    assert saved is not None
+    assert saved.status == "FAILED"
+    assert saved.github_deployment_id == 73
+    assert saved.current_stage == "dispatch"
+
+
+def test_create_deployment_retries_failed_dispatch_with_same_deployment(client):
+    from eng_platform_api.services import deployment_store
+
+    failed = _deployment().model_copy(
+        update={
+            "id": "73",
+            "github_deployment_id": 73,
+            "status": "FAILED",
+            "current_stage": "dispatch",
+            "error": "GitHub workflow dispatch failed",
+        }
+    )
+    deployment_store.save(failed, "dispatch-failure")
+    retried = failed.model_copy(
+        update={"status": "QUEUED", "current_stage": "queued", "error": ""}
+    )
+
+    with mock.patch(
+        "eng_platform_api.routers.deployments.github_deployments.retry_dispatch",
+        return_value=retried,
+    ) as retry:
+        response = client.post(
+            "/api/services/eng-platform-api/deployments",
+            json={"tag": "v0.5.0"},
+            headers={"Idempotency-Key": "dispatch-failure"},
+        )
+
+    assert response.status_code == 202
+    assert response.json()["id"] == "73"
+    assert response.json()["github_deployment_id"] == 73
+    assert response.json()["sha"] == "a" * 40
+    assert response.json()["status"] == "QUEUED"
+    retry.assert_called_once()
+
+
 def test_deployment_reads_hide_upstream_error_details(client):
     from eng_platform_api.services import deployment_store
 
@@ -380,6 +452,40 @@ def test_dispatch_uses_independent_service_catalog_configuration():
     assert inputs["build_context"] == "."
     assert inputs["health_path"] == "/"
     assert inputs["project_id"] == "cgm-assistant-prod"
+
+
+def test_dispatch_failure_marks_github_deployment_failed():
+    from eng_platform_api.services import catalog, github_deployments
+
+    service = catalog.get_service("cgm-sanplat-web")
+    assert service is not None
+    repository = mock.MagicMock()
+    github_deployment = mock.MagicMock(id=74)
+    repository.create_deployment.return_value = github_deployment
+    repository.get_workflow.return_value.create_dispatch.side_effect = RuntimeError(
+        "payment blocked"
+    )
+    github = mock.MagicMock()
+    github.get_repo.return_value = repository
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+        pytest.raises(github_deployments.GitHubDispatchError) as raised,
+    ):
+        github_deployments.start_deployment(
+            service=service,
+            tag=_tag(),
+            requested_by="diegomad14",
+        )
+
+    assert raised.value.item.id == "74"
+    assert raised.value.item.status == "FAILED"
+    assert raised.value.item.current_stage == "dispatch"
+    assert raised.value.item.error == "GitHub workflow dispatch failed"
+    assert [
+        call.kwargs["state"] for call in github_deployment.create_status.call_args_list
+    ] == ["queued", "failure"]
 
 
 def test_catalog_services_include_deployment_readiness(client):
@@ -685,6 +791,48 @@ def test_start_rollback_dispatches_with_independent_service_configuration():
     assert inputs["target_tag"] == target.tag
     assert inputs["target_revision"] == target.production_revision
     assert inputs["project_id"] == "cgm-assistant-prod"
+
+
+def test_retry_dispatch_reuses_github_deployment_and_release_identity():
+    from eng_platform_api.services import catalog, github_deployments
+
+    service = catalog.get_service("eng-platform-api")
+    assert service is not None
+    item = _deployment().model_copy(
+        update={
+            "id": "73",
+            "github_deployment_id": 73,
+            "status": "FAILED",
+            "current_stage": "dispatch",
+            "error": "GitHub workflow dispatch failed",
+        }
+    )
+    github_deployment = mock.MagicMock(id=73)
+    repository = mock.MagicMock()
+    repository.get_deployment.return_value = github_deployment
+    workflow = repository.get_workflow.return_value
+    github = mock.MagicMock()
+    github.get_repo.return_value = repository
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        retried = github_deployments.retry_dispatch(service=service, item=item)
+
+    assert retried.id == "73"
+    assert retried.github_deployment_id == 73
+    assert retried.tag == "v0.5.0"
+    assert retried.sha == "a" * 40
+    assert retried.status == "QUEUED"
+    assert retried.error == ""
+    repository.create_deployment.assert_not_called()
+    repository.get_deployment.assert_called_once_with(73)
+    assert workflow.create_dispatch.call_args.kwargs["ref"] == "v0.5.0"
+    assert (
+        workflow.create_dispatch.call_args.kwargs["inputs"]["github_deployment_id"]
+        == "73"
+    )
 
 
 def test_refresh_recaptures_production_revision_after_run_id_already_cached():
