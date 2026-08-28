@@ -24,15 +24,17 @@ Windows):
 
 - Python 3.11+;
 - authenticated `gh` with repository Actions administration permissions;
-- `qemu-system-x86_64`, `qemu-img` and `cloud-localds`;
+- `qemu-system-x86_64`, `qemu-img`, and either `cloud-localds` (Linux) or
+  `hdiutil` (macOS) to create the NoCloud seed;
 - an approved image built on a trusted Linux builder with `virt-customize`
   (`libguestfs-tools`). Docker Engine, GitHub CLI, Google Cloud CLI, Node/npm,
   Python, curl, jq and the pinned GitHub Runner are installed before an
   incident occurs.
 
-The VM and image builder require a **Linux x86_64** host (or WSL2). On macOS,
-`cloud-localds` and `libguestfs-tools` are not available, so the controller
-fails closed before starting a VM; use a Linux host for the actual runner.
+The controller runs on macOS, Linux and Windows/WSL2. The VM is still **x86_64**,
+so on Apple Silicon it runs by emulation. The approved image must still be built
+on a Linux x86_64 builder with `libguestfs-tools` (see above); `cloud-localds` is
+only required on Linux.
 
 The image must be supplied explicitly and verified with its SHA-256 checksum;
 the runner archive is independently pinned and verified too. It must not
