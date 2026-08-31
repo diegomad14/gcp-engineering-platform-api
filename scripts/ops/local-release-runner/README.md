@@ -26,15 +26,16 @@ Windows):
 - authenticated `gh` with repository Actions administration permissions;
 - `qemu-system-x86_64`, `qemu-img`, and either `cloud-localds` (Linux) or
   `hdiutil` (macOS) to create the NoCloud seed;
-- an approved image built on a trusted Linux builder with `virt-customize`
-  (`libguestfs-tools`). Docker Engine, GitHub CLI, Google Cloud CLI, Node/npm,
-  Python, curl, jq and the pinned GitHub Runner are installed before an
-  incident occurs.
+- an approved image built from the pinned Ubuntu cloud image. Docker Engine,
+  GitHub CLI, Google Cloud CLI, Node/npm, Python, curl, jq and the pinned
+  GitHub Runner are installed at first boot by the provision script embedded
+  in the NoCloud seed, so no libguestfs (virt-customize/virt-resize) is
+  required anywhere.
 
 The controller runs on macOS, Linux and Windows/WSL2. The VM is still **x86_64**,
-so on Apple Silicon it runs by emulation. The approved image must still be built
-on a Linux x86_64 builder with `libguestfs-tools` (see above); `cloud-localds` is
-only required on Linux.
+so on Apple Silicon it runs by emulation. The approved image is resized to
+20 GiB with `qemu-img`; the root partition grows on first boot via cloud-init
+growpart. `cloud-localds` is only required on Linux hosts.
 
 The image must be supplied explicitly and verified with its SHA-256 checksum;
 the runner archive is independently pinned and verified too. It must not

@@ -31,6 +31,12 @@ def test_user_data_does_not_include_registration_token_in_plaintext():
     bootstrap = (SCRIPT.parent / "guest-bootstrap.sh").read_bytes()
     assert base64.b64encode(bootstrap).decode() in data
     assert "CGM_RUNNER_TOKEN" in data
+    provision = (SCRIPT.parent / "image-provision.sh").read_bytes()
+    assert base64.b64encode(provision).decode() in data
+    assert "cgm-release-runner-provision.sh" in data
+    manifest = (SCRIPT.parent / "approved-artifacts.json").read_bytes()
+    assert base64.b64encode(manifest).decode() in data
+    assert "/tmp/approved-artifacts.json" in data
 
 
 def test_deploy_profile_rejects_pull_requests():

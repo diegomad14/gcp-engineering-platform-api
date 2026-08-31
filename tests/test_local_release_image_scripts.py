@@ -62,16 +62,11 @@ def build_environment(tmp_path):
         "operation=$1; shift\n"
         '[[ "${CGM_FAIL_TOOL:-}" == "qemu-$operation" ]] && exit 1\n'
         'case "$operation" in\n'
-        '  create) printf build > "${@: -2:1}" ;;\n'
+        "  resize) : ;;\n"
         '  convert) cp "${@: -2:1}" "${@: -1}" ;;\n'
         '  check) test -s "$1" ;;\n'
         "esac\n",
     )
-    for tool in ("virt-resize", "virt-customize"):
-        _write_executable(
-            fake_bin / tool,
-            f'[[ "${{CGM_FAIL_TOOL:-}}" == {tool} ]] && exit 1\nexit 0\n',
-        )
     return script, fake_bin
 
 
@@ -82,13 +77,13 @@ def test_build_publishes_only_after_success(build_environment, tmp_path):
     result = _run(script, output, fake_bin)
 
     assert result.returncode == 0, (result.stdout, result.stderr)
-    assert output.read_bytes() == b"build"
+    assert output.read_bytes() == b"base"
     assert output.stat().st_mode & 0o777 == 0o600
     assert "IMAGE_SHA256=" in result.stdout
 
 
 @pytest.mark.parametrize(
-    "failure", ["curl", "virt-resize", "virt-customize", "qemu-check", "qemu-convert"]
+    "failure", ["curl", "qemu-resize", "qemu-check", "qemu-convert"]
 )
 def test_build_failure_never_publishes_partial_image(
     build_environment, tmp_path, failure

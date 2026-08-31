@@ -443,16 +443,30 @@ def make_user_data(
     runner_sha256: str,
     start_docker: bool = True,
 ) -> str:
+    provision_path = Path(__file__).with_name("image-provision.sh")
+    provision = provision_path.read_text()
+    manifest = Path(__file__).with_name("approved-artifacts.json").read_text()
     template_path = Path(__file__).with_name("guest-bootstrap.sh")
     bootstrap = template_path.read_text()
+    encoded_provision = encode(provision)
+    encoded_manifest = encode(manifest)
     encoded_bootstrap = encode(bootstrap)
     return f"""#cloud-config
 write_files:
+  - path: /usr/local/sbin/cgm-release-runner-provision.sh
+    permissions: '0700'
+    encoding: b64
+    content: {encoded_provision}
   - path: /usr/local/sbin/cgm-release-runner-bootstrap.sh
     permissions: '0700'
     encoding: b64
     content: {encoded_bootstrap}
+  - path: /tmp/approved-artifacts.json
+    permissions: '0444'
+    encoding: b64
+    content: {encoded_manifest}
 runcmd:
+  - [ /usr/local/sbin/cgm-release-runner-provision.sh ]
   - [ bash, -c, "CGM_REPOSITORY=$(echo {encode(repository)} | base64 -d) CGM_RUNNER_TOKEN=$(echo {encode(runner_token)} | base64 -d) CGM_RUNNER_NAME=$(echo {encode(runner_name)} | base64 -d) CGM_RUNNER_LABEL=$(echo {encode(runner_label)} | base64 -d) CGM_RUNNER_VERSION=$(echo {encode(runner_version)} | base64 -d) CGM_RUNNER_SHA256=$(echo {encode(runner_sha256)} | base64 -d) CGM_SKIP_DOCKER=$(echo {encode("1" if not start_docker else "0")} | base64 -d) /usr/local/sbin/cgm-release-runner-bootstrap.sh" ]
 """
 

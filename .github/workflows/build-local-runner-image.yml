@@ -22,22 +22,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            jq libguestfs-tools qemu-system-x86 qemu-utils linux-image-generic
-          # Hosted runners have no kernel under /boot, so supermin cannot build
-          # the libguestfs appliance at runtime. Install a kernel and build the
-          # fixed appliance up front so the direct backend works.
-          sudo /usr/sbin/libguestfs-make-fixed-appliance "$RUNNER_TEMP/guestfs-appliance"
-          echo "LIBGUESTFS_PATH=$RUNNER_TEMP/guestfs-appliance" >> "$GITHUB_ENV"
+            jq qemu-utils
       - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
         with:
           version: 1.3.3
       - name: Build and validate approved image
         id: image
-        env:
-          LIBGUESTFS_BACKEND: direct
-          # Hosted runners expose no /dev/kvm, so force the direct backend
-          # into TCG emulation instead of failing guestfs_launch.
-          LIBGUESTFS_BACKEND_SETTINGS: force_tcg
         run: |
           set -euo pipefail
           IMAGE="$RUNNER_TEMP/cgm-release-local-ubuntu-24.04-amd64.qcow2"
