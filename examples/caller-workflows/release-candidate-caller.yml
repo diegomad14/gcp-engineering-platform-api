@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   release-candidate:
-    uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-cloud-run-release-candidate.yml@v1
+    uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-cloud-run-release-candidate.yml@v0.15.0
     with:
       project-id: ${{ vars.GCP_PROJECT_ID }}
       region: ${{ vars.GCP_REGION }}
@@ -36,5 +36,6 @@ jobs:
       runtime-service-account: ${{ vars.RUNTIME_SERVICE_ACCOUNT }}
       build-api: true
       build-web: ${{ vars.HAS_FRONTEND == 'true' }}
+      runner_label: ${{ vars.CGM_ACTIONS_RUNNER }}
     secrets:
       QUALITY_API_TOKEN: ${{ secrets.QUALITY_API_TOKEN }}

@@ -126,6 +126,38 @@ def test_create_deployment_and_idempotent_replay(client):
     assert second.status_code == 202
     assert first.json()["id"] == second.json()["id"]
     assert start.call_count == 1
+    assert start.call_args.kwargs["runner_label"] == ""
+
+
+def test_create_deployment_dispatches_and_audits_contingency_runner(client):
+    contingency = _deployment().model_copy(update={"runner_label": "cgm-release-local"})
+    with (
+        mock.patch(
+            "eng_platform_api.routers.deployments.github_deployments.get_tag",
+            return_value=_tag(),
+        ),
+        mock.patch(
+            "eng_platform_api.routers.deployments.github_deployments.start_deployment",
+            return_value=contingency,
+        ) as start,
+    ):
+        response = client.post(
+            "/api/services/eng-platform-api/deployments",
+            json={"tag": "v0.5.0", "runner_label": "cgm-release-local"},
+        )
+
+    assert response.status_code == 202
+    assert response.json()["runner_label"] == "cgm-release-local"
+    assert start.call_args.kwargs["runner_label"] == "cgm-release-local"
+
+
+def test_create_deployment_rejects_unknown_runner_label(client):
+    response = client.post(
+        "/api/services/eng-platform-api/deployments",
+        json={"tag": "v0.5.0", "runner_label": "untrusted-runner"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_ineligible_tag_is_rejected(client):
@@ -150,6 +182,20 @@ def test_idempotency_key_cannot_be_reused_for_another_tag(client):
         json={"tag": "v0.5.1"},
         headers={"Idempotency-Key": "one-request"},
     )
+    assert response.status_code == 409
+    assert "another deployment" in response.json()["detail"]
+
+
+def test_idempotency_key_cannot_change_runner_label(client):
+    from eng_platform_api.services import deployment_store
+
+    deployment_store.save(_deployment(), "one-request")
+    response = client.post(
+        "/api/services/eng-platform-api/deployments",
+        json={"tag": "v0.5.0", "runner_label": "cgm-release-local"},
+        headers={"Idempotency-Key": "one-request"},
+    )
+
     assert response.status_code == 409
     assert "another deployment" in response.json()["detail"]
 
@@ -205,6 +251,78 @@ def test_create_deployment_hides_upstream_error_details(client):
         )
     assert response.status_code == 502
     assert response.json()["detail"] == "GitHub unavailable"
+
+
+def test_create_deployment_persists_failed_dispatch_for_idempotent_recovery(client):
+    from eng_platform_api.services import deployment_store, github_deployments
+
+    failed = _deployment().model_copy(
+        update={
+            "id": "73",
+            "github_deployment_id": 73,
+            "status": "FAILED",
+            "current_stage": "dispatch",
+            "error": "GitHub workflow dispatch failed",
+        }
+    )
+    with (
+        mock.patch(
+            "eng_platform_api.routers.deployments.github_deployments.get_tag",
+            return_value=_tag(),
+        ),
+        mock.patch(
+            "eng_platform_api.routers.deployments.github_deployments.start_deployment",
+            side_effect=github_deployments.GitHubDispatchError(failed),
+        ),
+    ):
+        response = client.post(
+            "/api/services/eng-platform-api/deployments",
+            json={"tag": "v0.5.0"},
+            headers={"Idempotency-Key": "dispatch-failure"},
+        )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "GitHub workflow dispatch failed"
+    saved = deployment_store.get("73")
+    assert saved is not None
+    assert saved.status == "FAILED"
+    assert saved.github_deployment_id == 73
+    assert saved.current_stage == "dispatch"
+
+
+def test_create_deployment_retries_failed_dispatch_with_same_deployment(client):
+    from eng_platform_api.services import deployment_store
+
+    failed = _deployment().model_copy(
+        update={
+            "id": "73",
+            "github_deployment_id": 73,
+            "status": "FAILED",
+            "current_stage": "dispatch",
+            "error": "GitHub workflow dispatch failed",
+        }
+    )
+    deployment_store.save(failed, "dispatch-failure")
+    retried = failed.model_copy(
+        update={"status": "QUEUED", "current_stage": "queued", "error": ""}
+    )
+
+    with mock.patch(
+        "eng_platform_api.routers.deployments.github_deployments.retry_dispatch",
+        return_value=retried,
+    ) as retry:
+        response = client.post(
+            "/api/services/eng-platform-api/deployments",
+            json={"tag": "v0.5.0"},
+            headers={"Idempotency-Key": "dispatch-failure"},
+        )
+
+    assert response.status_code == 202
+    assert response.json()["id"] == "73"
+    assert response.json()["github_deployment_id"] == 73
+    assert response.json()["sha"] == "a" * 40
+    assert response.json()["status"] == "QUEUED"
+    retry.assert_called_once()
 
 
 def test_deployment_reads_hide_upstream_error_details(client):
@@ -380,6 +498,41 @@ def test_dispatch_uses_independent_service_catalog_configuration():
     assert inputs["build_context"] == "."
     assert inputs["health_path"] == "/"
     assert inputs["project_id"] == "cgm-assistant-prod"
+
+
+def test_dispatch_failure_marks_github_deployment_failed():
+    from eng_platform_api.services import catalog, github_deployments
+
+    service = catalog.get_service("cgm-sanplat-web")
+    assert service is not None
+    repository = mock.MagicMock()
+    github_deployment = mock.MagicMock(id=74)
+    repository.create_deployment.return_value = github_deployment
+    repository.get_workflow.return_value.create_dispatch.side_effect = RuntimeError(
+        "payment blocked"
+    )
+    github = mock.MagicMock()
+    github.get_repo.return_value = repository
+    tag = _tag()
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        with pytest.raises(github_deployments.GitHubDispatchError) as raised:
+            github_deployments.start_deployment(
+                service=service,
+                tag=tag,
+                requested_by="diegomad14",
+            )
+
+    assert raised.value.item.id == "74"
+    assert raised.value.item.status == "FAILED"
+    assert raised.value.item.current_stage == "dispatch"
+    assert raised.value.item.error == "GitHub workflow dispatch failed"
+    assert [
+        call.kwargs["state"] for call in github_deployment.create_status.call_args_list
+    ] == ["queued", "failure"]
 
 
 def test_catalog_services_include_deployment_readiness(client):
@@ -687,6 +840,48 @@ def test_start_rollback_dispatches_with_independent_service_configuration():
     assert inputs["project_id"] == "cgm-assistant-prod"
 
 
+def test_retry_dispatch_reuses_github_deployment_and_release_identity():
+    from eng_platform_api.services import catalog, github_deployments
+
+    service = catalog.get_service("eng-platform-api")
+    assert service is not None
+    item = _deployment().model_copy(
+        update={
+            "id": "73",
+            "github_deployment_id": 73,
+            "status": "FAILED",
+            "current_stage": "dispatch",
+            "error": "GitHub workflow dispatch failed",
+        }
+    )
+    github_deployment = mock.MagicMock(id=73)
+    repository = mock.MagicMock()
+    repository.get_deployment.return_value = github_deployment
+    workflow = repository.get_workflow.return_value
+    github = mock.MagicMock()
+    github.get_repo.return_value = repository
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        retried = github_deployments.retry_dispatch(service=service, item=item)
+
+    assert retried.id == "73"
+    assert retried.github_deployment_id == 73
+    assert retried.tag == "v0.5.0"
+    assert retried.sha == "a" * 40
+    assert retried.status == "QUEUED"
+    assert retried.error == ""
+    repository.create_deployment.assert_not_called()
+    repository.get_deployment.assert_called_once_with(73)
+    assert workflow.create_dispatch.call_args.kwargs["ref"] == "v0.5.0"
+    assert (
+        workflow.create_dispatch.call_args.kwargs["inputs"]["github_deployment_id"]
+        == "73"
+    )
+
+
 def test_refresh_recaptures_production_revision_after_run_id_already_cached():
     """A poll made while the deploy was still running caches github_run_id
     before production_revision is posted; a later poll must still pick it up
@@ -904,3 +1099,427 @@ def test_deployment_statuses_supply_run_and_revision_evidence():
     assert item.candidate_url == "https://candidate.example"
     assert item.production_revision == "service-00012-production"
     assert item.production_url == "https://production.example"
+
+
+def _failed_item(**overrides):
+    return _deployment().model_copy(
+        update={
+            "status": "FAILED",
+            "current_stage": "dispatch",
+            "error": "GitHub workflow dispatch failed",
+            **overrides,
+        }
+    )
+
+
+def test_start_deployment_status_update_failure_is_recorded():
+    from eng_platform_api.services import catalog, github_deployments
+
+    service = catalog.get_service("cgm-sanplat-web")
+    assert service is not None
+    repository = mock.MagicMock()
+    github_deployment = mock.MagicMock(id=75)
+    repository.create_deployment.return_value = github_deployment
+    github_deployment.create_status.side_effect = RuntimeError("status failed")
+    github = mock.MagicMock()
+    github.get_repo.return_value = repository
+    tag = _tag()
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        with pytest.raises(github_deployments.GitHubDispatchError) as raised:
+            github_deployments.start_deployment(
+                service=service,
+                tag=tag,
+                requested_by="diegomad14",
+            )
+
+    assert (
+        raised.value.item.error
+        == "GitHub workflow dispatch failed; status update failed"
+    )
+
+
+def test_start_rollback_dispatch_failure_marks_github_deployment_failed():
+    from eng_platform_api.services import catalog, github_deployments
+
+    service = catalog.get_service("cgm-sanplat-web")
+    assert service is not None
+    target = _succeeded_deployment(tag="v0.4.0")
+    repository = mock.MagicMock()
+    github_deployment = mock.MagicMock(id=88)
+    repository.create_deployment.return_value = github_deployment
+    repository.get_workflow.return_value.create_dispatch.side_effect = RuntimeError(
+        "payment blocked"
+    )
+    github = mock.MagicMock()
+    github.get_repo.return_value = repository
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        with pytest.raises(github_deployments.GitHubDispatchError) as raised:
+            github_deployments.start_rollback(
+                service=service,
+                target=target,
+                requested_by="diegomad14",
+            )
+
+    assert raised.value.item.error == "GitHub rollback workflow dispatch failed"
+    assert [
+        call.kwargs["state"] for call in github_deployment.create_status.call_args_list
+    ] == ["queued", "failure"]
+
+
+def test_start_rollback_status_update_failure_is_recorded():
+    from eng_platform_api.services import catalog, github_deployments
+
+    service = catalog.get_service("cgm-sanplat-web")
+    assert service is not None
+    target = _succeeded_deployment(tag="v0.4.0")
+    repository = mock.MagicMock()
+    github_deployment = mock.MagicMock(id=88)
+    repository.create_deployment.return_value = github_deployment
+    github_deployment.create_status.side_effect = RuntimeError("status failed")
+    github = mock.MagicMock()
+    github.get_repo.return_value = repository
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        with pytest.raises(github_deployments.GitHubDispatchError) as raised:
+            github_deployments.start_rollback(
+                service=service,
+                target=target,
+                requested_by="diegomad14",
+            )
+
+    assert (
+        raised.value.item.error
+        == "GitHub rollback workflow dispatch failed; status update failed"
+    )
+
+
+def test_retry_dispatch_requires_failed_dispatch_status():
+    from eng_platform_api.services import catalog, github_deployments
+
+    service = catalog.get_service("eng-platform-api")
+    item = _deployment().model_copy(
+        update={"status": "QUEUED", "current_stage": "queued"}
+    )
+    with pytest.raises(ValueError, match="Only failed dispatches"):
+        github_deployments.retry_dispatch(service=service, item=item)
+
+
+def test_retry_dispatch_requires_github_deployment_id():
+    from eng_platform_api.services import catalog, github_deployments
+
+    service = catalog.get_service("eng-platform-api")
+    item = _failed_item(github_deployment_id=None)
+    with pytest.raises(ValueError, match="no GitHub Deployment id"):
+        github_deployments.retry_dispatch(service=service, item=item)
+
+
+def test_retry_dispatch_requires_matching_service():
+    from eng_platform_api.services import catalog, github_deployments
+
+    service = catalog.get_service("eng-platform-api")
+    item = _failed_item(
+        service_name="other-service",
+        repository="diegomad14/other-repository",
+    )
+    with pytest.raises(ValueError, match="does not match"):
+        github_deployments.retry_dispatch(service=service, item=item)
+
+
+def test_retry_dispatch_rollback_without_revision_sets_failed_item():
+    from eng_platform_api.services import catalog, github_deployments
+
+    service = catalog.get_service("eng-platform-api")
+    item = _failed_item(kind="rollback", production_revision="")
+    github_deployment = mock.MagicMock(id=73)
+    repository = mock.MagicMock()
+    repository.get_deployment.return_value = github_deployment
+    github = mock.MagicMock()
+    github.get_repo.return_value = repository
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        with pytest.raises(github_deployments.GitHubDispatchError) as raised:
+            github_deployments.retry_dispatch(
+                service=service,
+                item=item,
+                target_revision="",
+            )
+
+    assert raised.value.item.error == "GitHub rollback workflow dispatch failed"
+
+
+def test_retry_dispatch_rollback_branch_reuses_target_revision():
+    from eng_platform_api.services import catalog, github_deployments
+
+    service = catalog.get_service("eng-platform-api")
+    item = _failed_item(
+        kind="rollback",
+        production_revision="eng-platform-api-00010-abc",
+    )
+    github_deployment = mock.MagicMock(id=73)
+    repository = mock.MagicMock()
+    repository.get_deployment.return_value = github_deployment
+    workflow = repository.get_workflow.return_value
+    github = mock.MagicMock()
+    github.get_repo.return_value = repository
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        retried = github_deployments.retry_dispatch(
+            service=service,
+            item=item,
+            target_revision="",
+        )
+
+    assert retried.status == "QUEUED"
+    assert retried.production_revision == "eng-platform-api-00010-abc"
+    repository.get_workflow.assert_called_once_with("platform-rollback.yml")
+    inputs = workflow.create_dispatch.call_args.kwargs["inputs"]
+    assert inputs["target_revision"] == "eng-platform-api-00010-abc"
+
+
+def test_retry_dispatch_failure_sets_failed_item():
+    from eng_platform_api.services import catalog, github_deployments
+
+    service = catalog.get_service("eng-platform-api")
+    item = _failed_item()
+    github_deployment = mock.MagicMock(id=73)
+    repository = mock.MagicMock()
+    repository.get_deployment.return_value = github_deployment
+    repository.get_workflow.return_value.create_dispatch.side_effect = RuntimeError(
+        "blocked"
+    )
+    github = mock.MagicMock()
+    github.get_repo.return_value = repository
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        with pytest.raises(github_deployments.GitHubDispatchError) as raised:
+            github_deployments.retry_dispatch(service=service, item=item)
+
+    assert raised.value.item.error == "GitHub workflow dispatch failed"
+    assert [
+        call.kwargs["state"] for call in github_deployment.create_status.call_args_list
+    ] == ["queued", "failure"]
+
+
+def test_retry_dispatch_status_update_failure_is_recorded():
+    from eng_platform_api.services import catalog, github_deployments
+
+    service = catalog.get_service("eng-platform-api")
+    item = _failed_item()
+    github_deployment = mock.MagicMock(id=73)
+    repository = mock.MagicMock()
+    repository.get_deployment.return_value = github_deployment
+    github_deployment.create_status.side_effect = RuntimeError("status failed")
+    github = mock.MagicMock()
+    github.get_repo.return_value = repository
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        with pytest.raises(github_deployments.GitHubDispatchError) as raised:
+            github_deployments.retry_dispatch(service=service, item=item)
+
+    assert (
+        raised.value.item.error
+        == "GitHub workflow dispatch failed; status update failed"
+    )
+
+
+def test_create_deployment_idempotency_kind_mismatch(client):
+    from eng_platform_api.services import deployment_store
+
+    deployment_store.save(_failed_item(kind="rollback"), "kind-mismatch")
+    response = client.post(
+        "/api/services/eng-platform-api/deployments",
+        json={"tag": "v0.5.0"},
+        headers={"Idempotency-Key": "kind-mismatch"},
+    )
+    assert response.status_code == 409
+    assert "another deployment" in response.json()["detail"]
+
+
+def test_create_deployment_retry_generic_error_is_github_unavailable(client):
+    from eng_platform_api.services import deployment_store
+
+    deployment_store.save(_failed_item(), "retry-generic")
+    with mock.patch(
+        "eng_platform_api.routers.deployments.github_deployments.retry_dispatch",
+        side_effect=ValueError("unexpected"),
+    ):
+        response = client.post(
+            "/api/services/eng-platform-api/deployments",
+            json={"tag": "v0.5.0"},
+            headers={"Idempotency-Key": "retry-generic"},
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "GitHub unavailable"
+
+
+def test_create_deployment_retry_failed_dispatch_sets_502(client):
+    from eng_platform_api.services import deployment_store, github_deployments
+
+    failed = _failed_item()
+    deployment_store.save(failed, "retry-dispatch-failure")
+    with mock.patch(
+        "eng_platform_api.routers.deployments.github_deployments.retry_dispatch",
+        side_effect=github_deployments.GitHubDispatchError(failed),
+    ):
+        response = client.post(
+            "/api/services/eng-platform-api/deployments",
+            json={"tag": "v0.5.0"},
+            headers={"Idempotency-Key": "retry-dispatch-failure"},
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "GitHub workflow dispatch failed"
+
+
+def test_create_deployment_dispatch_error_store_save_failure_is_github_unavailable(
+    client,
+):
+    from eng_platform_api.services import github_deployments
+
+    failed = _failed_item()
+    with (
+        mock.patch(
+            "eng_platform_api.routers.deployments.github_deployments.get_tag",
+            return_value=_tag(),
+        ),
+        mock.patch(
+            "eng_platform_api.routers.deployments.github_deployments.start_deployment",
+            side_effect=github_deployments.GitHubDispatchError(failed),
+        ),
+        mock.patch(
+            "eng_platform_api.routers.deployments.deployment_store.save",
+            side_effect=RuntimeError("store unavailable"),
+        ),
+    ):
+        response = client.post(
+            "/api/services/eng-platform-api/deployments",
+            json={"tag": "v0.5.0"},
+            headers={"Idempotency-Key": "save-failure"},
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "GitHub unavailable"
+
+
+def test_rollback_idempotency_kind_mismatch(client):
+    from eng_platform_api.services import deployment_store
+
+    target = _succeeded_deployment()
+    deployment_store.save(target, "")
+    deployment_store.save(_deployment(), "rb-kind-mismatch")
+    response = client.post(
+        f"/api/services/eng-platform-api/deployments/{target.id}/rollback",
+        headers={"Idempotency-Key": "rb-kind-mismatch"},
+    )
+    assert response.status_code == 409
+    assert "another deployment" in response.json()["detail"]
+
+
+def test_rollback_retry_generic_error_is_github_unavailable(client):
+    from eng_platform_api.services import deployment_store
+
+    target = _succeeded_deployment()
+    deployment_store.save(target, "")
+    failed_rollback = _deployment().model_copy(
+        update={
+            "id": "rb-failed",
+            "tag": target.tag,
+            "kind": "rollback",
+            "status": "FAILED",
+            "current_stage": "dispatch",
+            "error": "GitHub rollback workflow dispatch failed",
+        }
+    )
+    deployment_store.save(failed_rollback, "rb-retry-generic")
+    with mock.patch(
+        "eng_platform_api.routers.deployments.github_deployments.retry_dispatch",
+        side_effect=ValueError("unexpected"),
+    ):
+        response = client.post(
+            f"/api/services/eng-platform-api/deployments/{target.id}/rollback",
+            headers={"Idempotency-Key": "rb-retry-generic"},
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "GitHub unavailable"
+
+
+def test_rollback_retry_failed_dispatch_sets_502(client):
+    from eng_platform_api.services import deployment_store, github_deployments
+
+    target = _succeeded_deployment()
+    deployment_store.save(target, "")
+    failed_rollback = _deployment().model_copy(
+        update={
+            "id": "rb-failed",
+            "tag": target.tag,
+            "kind": "rollback",
+            "status": "FAILED",
+            "current_stage": "dispatch",
+            "error": "GitHub rollback workflow dispatch failed",
+        }
+    )
+    deployment_store.save(failed_rollback, "rb-retry-dispatch")
+    with mock.patch(
+        "eng_platform_api.routers.deployments.github_deployments.retry_dispatch",
+        side_effect=github_deployments.GitHubDispatchError(failed_rollback),
+    ):
+        response = client.post(
+            f"/api/services/eng-platform-api/deployments/{target.id}/rollback",
+            headers={"Idempotency-Key": "rb-retry-dispatch"},
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "GitHub rollback workflow dispatch failed"
+
+
+def test_rollback_dispatch_error_store_save_failure_is_github_unavailable(client):
+    from eng_platform_api.services import deployment_store, github_deployments
+
+    target = _succeeded_deployment()
+    deployment_store.save(target, "")
+    failed_rollback = _deployment().model_copy(
+        update={
+            "id": "rb-failed",
+            "tag": target.tag,
+            "kind": "rollback",
+            "status": "FAILED",
+            "current_stage": "dispatch",
+            "error": "GitHub rollback workflow dispatch failed",
+        }
+    )
+    with (
+        mock.patch(
+            "eng_platform_api.routers.deployments.github_deployments.start_rollback",
+            side_effect=github_deployments.GitHubDispatchError(failed_rollback),
+        ),
+        mock.patch(
+            "eng_platform_api.routers.deployments.deployment_store.save",
+            side_effect=RuntimeError("store unavailable"),
+        ),
+    ):
+        response = client.post(
+            f"/api/services/eng-platform-api/deployments/{target.id}/rollback",
+            headers={"Idempotency-Key": "rb-save-failure"},
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "GitHub unavailable"

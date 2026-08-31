@@ -1,0 +1,73 @@
+name: Build Local Runner Image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-local-runner-image
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install image tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            jq libguestfs-tools qemu-system-x86 qemu-utils
+      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
+        with:
+          version: 1.3.4
+      - name: Build and validate approved image
+        id: image
+        env:
+          LIBGUESTFS_BACKEND: direct
+        run: |
+          set -euo pipefail
+          IMAGE="$RUNNER_TEMP/cgm-release-local-ubuntu-24.04-amd64.qcow2"
+          ./scripts/ops/local-release-runner/build-image.sh "$IMAGE"
+          qemu-img check "$IMAGE"
+          SHA256=$(sha256sum "$IMAGE" | awk '{print $1}')
+          echo "path=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+      - name: Publish immutable OCI artifact
+        id: publish
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_PATH: ${{ steps.image.outputs.path }}
+        run: |
+          set -euo pipefail
+          REFERENCE="ghcr.io/diegomad14/cgm-release-runner-image"
+          TAG="ubuntu-20260814-runner-2.337.0"
+          MEDIA_TYPE="application/vnd.cgm.release-runner.qcow2"
+          echo "$GHCR_TOKEN" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
+          oras push "$REFERENCE:$TAG" \
+            "$IMAGE_PATH:$MEDIA_TYPE" \
+            --annotation "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --annotation "org.opencontainers.image.revision=${{ github.sha }}" \
+            --annotation "org.opencontainers.image.version=$TAG"
+          DIGEST=$(oras resolve "$REFERENCE:$TAG")
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+      - name: Publish approval evidence
+        env:
+          IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+          IMAGE_SHA256: ${{ steps.image.outputs.sha256 }}
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          {
+            echo "## Local runner image"
+            echo
+            echo "- Reference: \`ghcr.io/diegomad14/cgm-release-runner-image\`"
+            echo "- Tag: \`ubuntu-20260814-runner-2.337.0\`"
+            echo "- OCI digest: \`$IMAGE_DIGEST\`"
+            echo "- QCOW2 SHA-256: \`$IMAGE_SHA256\`"
+            echo "- Source revision: \`$SOURCE_REVISION\`"
+          } >> "$GITHUB_STEP_SUMMARY"

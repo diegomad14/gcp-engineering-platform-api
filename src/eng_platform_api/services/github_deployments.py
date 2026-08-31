@@ -19,6 +19,7 @@ from ..models import (
     CatalogService,
     ReleaseTag,
     ReleaseTagPage,
+    RunnerLabel,
 )
 from . import deployment_store
 
@@ -49,6 +50,16 @@ _LIVE_STATUSES = frozenset({"SUCCEEDED", "ROLLED_BACK"})
 _TAG_CACHE_TTL_SECONDS = 30
 _tag_metadata_cache: dict[tuple[str, int, int], tuple[float, ReleaseTagPage]] = {}
 _tag_metadata_cache_lock = Lock()
+GITHUB_WORKFLOW_DISPATCH_FAILED = "GitHub workflow dispatch failed"
+GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED = "GitHub rollback workflow dispatch failed"
+
+
+class GitHubDispatchError(RuntimeError):
+    """A GitHub Deployment was created but its workflow could not be dispatched."""
+
+    def __init__(self, item: DeploymentItem):
+        self.item = item
+        super().__init__(item.error or GITHUB_WORKFLOW_DISPATCH_FAILED)
 
 
 def default_stages(kind: str = "deploy") -> list[DeploymentStage]:
@@ -154,7 +165,8 @@ def _tag_metadata_page(repository: str, offset: int, limit: int) -> ReleaseTagPa
             try:
                 commit = repo.get_commit(tag.commit.sha)
                 created_at = _iso(commit.commit.committer.date)
-            except Exception:
+            # Commit metadata is optional evidence; the tag remains usable.
+            except Exception:  # nosec B110
                 pass
             return ReleaseTag(
                 name=tag.name,
@@ -186,7 +198,11 @@ def get_tag(repository: str, service_name: str, name: str) -> ReleaseTag | None:
 
 
 def start_deployment(
-    *, service: CatalogService, tag: ReleaseTag, requested_by: str
+    *,
+    service: CatalogService,
+    tag: ReleaseTag,
+    requested_by: str,
+    runner_label: RunnerLabel = "",
 ) -> DeploymentItem:
     repository = service.repository
     service_name = service.service_name
@@ -199,6 +215,7 @@ def start_deployment(
             repository=repository,
             tag=tag.name,
             sha=tag.sha,
+            runner_label=runner_label,
             status="QUEUED",
             current_stage="queued",
             stages=default_stages(),
@@ -216,33 +233,13 @@ def start_deployment(
         description=f"Deploy {service_name} {tag.name}",
         payload={"service_name": service_name, "tag": tag.name},
     )
-    github_deployment.create_status(
-        state="queued",
-        description="Queued by Engineering Platform",
-    )
-    workflow = repo.get_workflow(
-        service.deployment.workflow_file or config.github.deployment_workflow
-    )
-    workflow.create_dispatch(
-        ref=tag.name,
-        inputs={
-            "service_name": service_name,
-            "tag": tag.name,
-            "github_deployment_id": str(github_deployment.id),
-            "project_id": service.project_id,
-            "region": service.region,
-            "image_name": service.deployment.image_name or service_name,
-            "artifact_repository": service.deployment.artifact_repository,
-            "build_context": service.deployment.build_context,
-            "health_path": service.deployment.health_path,
-        },
-    )
-    return DeploymentItem(
+    item = DeploymentItem(
         id=str(github_deployment.id),
         service_name=service_name,
         repository=repository,
         tag=tag.name,
         sha=tag.sha,
+        runner_label=runner_label,
         status="QUEUED",
         current_stage="queued",
         stages=default_stages(),
@@ -251,6 +248,42 @@ def start_deployment(
         updated_at=now,
         github_deployment_id=github_deployment.id,
     )
+    try:
+        github_deployment.create_status(
+            state="queued",
+            description="Queued by Engineering Platform",
+        )
+        workflow = repo.get_workflow(
+            service.deployment.workflow_file or config.github.deployment_workflow
+        )
+        workflow.create_dispatch(
+            ref=tag.name,
+            inputs={
+                "service_name": service_name,
+                "tag": tag.name,
+                "github_deployment_id": str(github_deployment.id),
+                "project_id": service.project_id,
+                "region": service.region,
+                "image_name": service.deployment.image_name or service_name,
+                "artifact_repository": service.deployment.artifact_repository,
+                "build_context": service.deployment.build_context,
+                "health_path": service.deployment.health_path,
+                "runner_label": runner_label,
+            },
+        )
+    except Exception as exc:
+        item.status = "FAILED"
+        item.current_stage = "dispatch"
+        item.error = GITHUB_WORKFLOW_DISPATCH_FAILED
+        try:
+            github_deployment.create_status(
+                state="failure",
+                description=item.error,
+            )
+        except Exception:
+            item.error = f"{GITHUB_WORKFLOW_DISPATCH_FAILED}; status update failed"
+        raise GitHubDispatchError(item) from exc
+    return item
 
 
 def start_rollback(
@@ -275,6 +308,7 @@ def start_rollback(
             requested_by=requested_by,
             created_at=now,
             updated_at=now,
+            production_revision=target.production_revision,
         )
     repo = github_client().get_repo(repository)
     github_deployment = repo.create_deployment(
@@ -288,24 +322,7 @@ def start_rollback(
         ),
         payload={"service_name": service_name, "tag": target.tag},
     )
-    github_deployment.create_status(
-        state="queued",
-        description="Rollback queued by Engineering Platform",
-    )
-    workflow = repo.get_workflow(config.github.rollback_workflow)
-    workflow.create_dispatch(
-        ref=target.tag,
-        inputs={
-            "service_name": service_name,
-            "target_tag": target.tag,
-            "target_revision": target.production_revision,
-            "github_deployment_id": str(github_deployment.id),
-            "project_id": service.project_id,
-            "region": service.region,
-            "health_path": service.deployment.health_path,
-        },
-    )
-    return DeploymentItem(
+    item = DeploymentItem(
         id=str(github_deployment.id),
         service_name=service_name,
         repository=repository,
@@ -319,7 +336,133 @@ def start_rollback(
         created_at=now,
         updated_at=now,
         github_deployment_id=github_deployment.id,
+        production_revision=target.production_revision,
     )
+    try:
+        github_deployment.create_status(
+            state="queued",
+            description="Rollback queued by Engineering Platform",
+        )
+        workflow = repo.get_workflow(config.github.rollback_workflow)
+        workflow.create_dispatch(
+            ref=target.tag,
+            inputs={
+                "service_name": service_name,
+                "target_tag": target.tag,
+                "target_revision": target.production_revision,
+                "github_deployment_id": str(github_deployment.id),
+                "project_id": service.project_id,
+                "region": service.region,
+                "health_path": service.deployment.health_path,
+            },
+        )
+    except Exception as exc:
+        item.status = "FAILED"
+        item.current_stage = "dispatch"
+        item.error = GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED
+        try:
+            github_deployment.create_status(
+                state="failure",
+                description=item.error,
+            )
+        except Exception:
+            item.error = (
+                f"{GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED}; status update failed"
+            )
+        raise GitHubDispatchError(item) from exc
+    return item
+
+
+def _retry_workflow_and_inputs(
+    repo: Any, service: CatalogService, item: DeploymentItem, target_revision: str
+) -> tuple[Any, dict[str, str]]:
+    if item.kind == "rollback":
+        revision = item.production_revision or target_revision
+        if not revision:
+            raise ValueError("Rollback retry has no target revision")
+        workflow = repo.get_workflow(config.github.rollback_workflow)
+        inputs = {
+            "service_name": service.service_name,
+            "target_tag": item.tag,
+            "target_revision": revision,
+            "github_deployment_id": str(item.github_deployment_id),
+            "project_id": service.project_id,
+            "region": service.region,
+            "health_path": service.deployment.health_path,
+        }
+        item.production_revision = revision
+        return workflow, inputs
+    workflow = repo.get_workflow(
+        service.deployment.workflow_file or config.github.deployment_workflow
+    )
+    inputs = {
+        "service_name": service.service_name,
+        "tag": item.tag,
+        "github_deployment_id": str(item.github_deployment_id),
+        "project_id": service.project_id,
+        "region": service.region,
+        "image_name": service.deployment.image_name or service.service_name,
+        "artifact_repository": service.deployment.artifact_repository,
+        "build_context": service.deployment.build_context,
+        "health_path": service.deployment.health_path,
+        "runner_label": item.runner_label,
+    }
+    return workflow, inputs
+
+
+def retry_dispatch(
+    *,
+    service: CatalogService,
+    item: DeploymentItem,
+    target_revision: str = "",
+) -> DeploymentItem:
+    """Retry a dispatch that failed before GitHub created a workflow run.
+
+    The existing GitHub Deployment is reused so the retry preserves the
+    platform id, release SHA/tag and idempotency correlation.
+    """
+    if item.status != "FAILED" or item.current_stage != "dispatch":
+        raise ValueError("Only failed dispatches can be retried")
+    if not item.github_deployment_id:
+        raise ValueError("Failed dispatch has no GitHub Deployment id")
+    if (
+        item.service_name != service.service_name
+        or item.repository != service.repository
+    ):
+        raise ValueError("Failed dispatch does not match the selected service")
+
+    repo = github_client().get_repo(item.repository)
+    github_deployment = repo.get_deployment(item.github_deployment_id)
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        github_deployment.create_status(
+            state="queued",
+            description="Dispatch retry queued by Engineering Platform",
+        )
+        workflow, inputs = _retry_workflow_and_inputs(
+            repo, service, item, target_revision
+        )
+        workflow.create_dispatch(ref=item.tag, inputs=inputs)
+    except Exception as exc:
+        item.status = "FAILED"
+        item.current_stage = "dispatch"
+        item.updated_at = now
+        item.error = (
+            GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED
+            if item.kind == "rollback"
+            else GITHUB_WORKFLOW_DISPATCH_FAILED
+        )
+        try:
+            github_deployment.create_status(state="failure", description=item.error)
+        except Exception:
+            item.error = f"{item.error}; status update failed"
+        raise GitHubDispatchError(item) from exc
+
+    item.status = "QUEUED"
+    item.current_stage = "queued"
+    item.updated_at = now
+    item.error = ""
+    return item
 
 
 def _job_stage(name: str) -> str | None:

@@ -26,7 +26,7 @@
 ## Recommended Plan
 
 1. Inventory current app repository workflows and remove custom release logic in a dedicated app repo PR.
-2. Adopt caller workflows from `examples/caller-workflows/` pinned to `diegomad14/gcp-engineering-platform-api@v1`.
+2. Adopt caller workflows from `examples/caller-workflows/` pinned to `diegomad14/gcp-engineering-platform-api@v0.15.0`.
 3. Configure repository variables: `APP_ID=cgm-integration-platform`, `APP_NAME=CGM Integration Platform`, `GCP_PROJECT_ID`, `GCP_REGION`, `GCP_WIF_PROVIDER`, `GCP_WIF_SERVICE_ACCOUNT`, `API_SERVICE_NAME`, `WEB_SERVICE_NAME`, `ARTIFACT_REPO`, image names, URLs, `RUNTIME_SERVICE_ACCOUNT`, and optional `PLATFORM_API_URL`.
 4. Migrate `release-candidate` first and validate no-traffic candidate behavior.
 5. Migrate `promote-prod` after candidate validation; keep strict traffic/revision checks and treat post-promote CORS/OpenAPI/Web diagnostics as warnings.

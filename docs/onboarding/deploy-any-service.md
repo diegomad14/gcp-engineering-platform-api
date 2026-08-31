@@ -33,6 +33,14 @@ credentials, `gcloud run deploy`, `gh workflow run`, or direct GitHub API calls.
 9. Use the rollback action from deployment history only when returning to a
    previously successful production revision.
 
+If GitHub blocks the workflow for billing, quota or runner availability, stop
+and follow the canonical `release_process` section and `Runbook - GitHub
+Actions bloqueado`. Resolve billing/quota first or use the approved
+`CGM_ACTIONS_RUNNER=cgm-release-local` fallback from the disposable-VM
+controller with the same SHA and tag. Do not create another tag or dispatch a
+parallel workflow manually. The local fallback is only for runner
+availability; it cannot bypass a GitHub billing or account suspension.
+
 ## If a Service Is Blocked
 
 If `/deployments` shows readiness blockers, the service is cataloged but not

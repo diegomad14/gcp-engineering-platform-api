@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "base_image": {
+    "distribution": "Ubuntu 24.04 LTS Noble",
+    "date": "20260814",
+    "url": "https://cloud-images.ubuntu.com/noble/20260814/noble-server-cloudimg-amd64.img",
+    "sha256": "6e40c07ae715f744f84af0bec76415cc1987dd115b4b8de437818561f01a3733"
+  },
+  "github_runner": {
+    "version": "2.337.0",
+    "sha256": "70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613"
+  }
+}

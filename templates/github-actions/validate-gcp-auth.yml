@@ -26,4 +26,3 @@ jobs:
             --project="${{ vars.GCP_PROJECT_ID }}" \
             --region="${{ vars.GCP_REGION }}" \
             --format="table(metadata.name,status.url)"
-

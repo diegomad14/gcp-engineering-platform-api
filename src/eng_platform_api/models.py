@@ -6,6 +6,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
+RunnerLabel = Literal["", "cgm-release-local"]
+
+
 # ── Catalog ──────────────────────────────────────────────────────────
 
 
@@ -167,6 +170,7 @@ class DeploymentCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     tag: str = Field(min_length=1, max_length=128)
+    runner_label: RunnerLabel = ""
 
 
 class DeploymentItem(BaseModel):
@@ -175,6 +179,7 @@ class DeploymentItem(BaseModel):
     repository: str
     tag: str
     sha: str = ""
+    runner_label: RunnerLabel = ""
     kind: Literal["deploy", "rollback"] = "deploy"
     status: DeploymentStatus = "QUEUED"
     current_stage: str = "queued"
