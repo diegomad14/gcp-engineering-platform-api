@@ -25,9 +25,9 @@ jobs:
             jq libguestfs-tools qemu-system-x86 qemu-utils linux-image-generic
           # Hosted runners have no kernel under /boot, so supermin cannot build
           # the libguestfs appliance at runtime. Install a kernel and build the
-          # appliance up front for the direct backend (the tool lives in
-          # /usr/sbin, outside sudo's default PATH).
-          sudo /usr/sbin/update-guestfs-appliance
+          # fixed appliance up front so the direct backend works.
+          sudo /usr/sbin/libguestfs-make-fixed-appliance "$RUNNER_TEMP/guestfs-appliance"
+          echo "LIBGUESTFS_PATH=$RUNNER_TEMP/guestfs-appliance" >> "$GITHUB_ENV"
       - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
         with:
           version: 1.3.3
