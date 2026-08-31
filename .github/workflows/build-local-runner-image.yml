@@ -35,6 +35,9 @@ jobs:
         id: image
         env:
           LIBGUESTFS_BACKEND: direct
+          # Hosted runners expose no /dev/kvm, so force the direct backend
+          # into TCG emulation instead of failing guestfs_launch.
+          LIBGUESTFS_BACKEND_SETTINGS: force_tcg
         run: |
           set -euo pipefail
           IMAGE="$RUNNER_TEMP/cgm-release-local-ubuntu-24.04-amd64.qcow2"
