@@ -180,6 +180,7 @@ class DeploymentItem(BaseModel):
     tag: str
     sha: str = ""
     runner_label: RunnerLabel = ""
+    effective_runner_label: str = ""
     kind: Literal["deploy", "rollback"] = "deploy"
     status: DeploymentStatus = "QUEUED"
     current_stage: str = "queued"

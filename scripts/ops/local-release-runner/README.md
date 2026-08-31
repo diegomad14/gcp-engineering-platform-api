@@ -73,15 +73,23 @@ argument identifies the repository containing the blocked workflow:
 ./scripts/ops/local-release-runner/start.sh up \
   --repo diegomad14/cgm-bot-core \
   --run-id 32447686865 \
+  --expected-sha '<40_CHARACTER_COMMIT_SHA>' \
+  --profile ci \
   --image /approved/images/cgm-release-local-ubuntu-24.04-amd64.qcow2 \
   --image-sha256 '<IMAGE_SHA256>'
 ```
 
-When Engineering Platform dispatched the run with the explicit
-`runner_label=cgm-release-local` input, add `--selection-mode explicit`. This
-preserves the queued run without changing `CGM_ACTIONS_RUNNER` or issuing a
-cancel/rerun. The default `variable` mode remains available for older queued
-workflows that selected their runner through the repository variable.
+Use `ci` for allowlisted checks on an internal pull request, `release` for
+allowlisted `main` push workflows, and `deploy` for a tagged deploy or rollback.
+CI rejects forks and PRs whose base is not `main`. The controller derives the
+only accepted custom label as `cgm-release-local-<SHA>` and recovers all
+allowlisted failing runs for that same SHA. Completed CI/release runs are
+eligible only when their job annotations prove a GitHub Billing failure.
+
+Engineering Platform dispatches contingency deploys with the SHA-bound label.
+For those already-queued runs, add `--selection-mode explicit`; the controller
+preserves the same run without changing `CGM_ACTIONS_RUNNER`. CI and release
+use the default `variable` mode and re-run the existing failed run IDs.
 
 The runner version/hash are loaded from `approved-artifacts.json`. Overrides
 are accepted only when they match that manifest exactly.
@@ -97,6 +105,8 @@ PowerShell hosts use the equivalent wrapper:
 .\scripts\ops\local-release-runner\start.ps1 up `
   --repo diegomad14/cgm-bot-core `
   --run-id 32447686865 `
+  --expected-sha '<40_CHARACTER_COMMIT_SHA>' `
+  --profile ci `
   --image C:\approved\images\cgm-release-local-ubuntu-24.04-amd64.qcow2 `
   --image-sha256 '<IMAGE_SHA256>'
 ```
@@ -118,7 +128,7 @@ clear reconciliation error.
 `validate` runs the same disposable-VM lifecycle as `up` but never touches
 `CGM_ACTIONS_RUNNER` and never reruns a workflow. It boots the VM, registers a
 repo-scoped runner, waits for it to come online, verifies the labels
-`self-hosted`, `linux`, `x64` and `cgm-release-local`, then deregisters the
+`self-hosted`, `linux`, `x64` and a disposable SHA-shaped label, then deregisters the
 runner and destroys the VM. The default `release` profile also starts Docker
 and proves `docker info`; use `registration` only for the shorter registration
 smoke test:
@@ -134,8 +144,9 @@ smoke test:
 Use `validate` when the contingency is not yet active to prove the image and
 controller are ready, without mutating the repository's runner variable.
 
-The protected **Local runner production E2E** workflow accepts only an already
-approved image digest and an existing queued `run_id`. Store the temporary
+The protected **Local runner production E2E** workflow accepts only an
+allowlisted target repository, exact SHA, profile, approved image digest and
+existing `run_id`. Store the temporary
 fine-grained administrator token only in its `scrum54-validation` environment
 as `CGM_RUNNER_ADMIN_TOKEN`. Revoke the token and delete the environment secret
 immediately after the supervised validation; the guest receives only GitHub's
@@ -144,8 +155,8 @@ short-lived runner registration token.
 ## Security contract
 
 - Direct host runners are prohibited.
-- The runner is repository-scoped and uses only `cgm-release-local`.
-- Pull requests cannot select the label.
+- The runner is repository-scoped and uses only `cgm-release-local-<SHA>`.
+- Only internal PRs targeting `main` can use the label; forks are rejected.
 - Workflows continue to authenticate to GCP through WIF/OIDC.
 - No JSON service-account keys, PATs or host credentials enter the guest.
 - The Actions registration token exists only in the temporary NoCloud seed and
