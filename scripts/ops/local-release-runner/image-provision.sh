@@ -52,6 +52,8 @@ done
 
 cp "$MANIFEST" /opt/cgm-release-approved-artifacts.json
 chmod 0444 /opt/cgm-release-approved-artifacts.json
+chown -R ubuntu:ubuntu /opt/actions-runner
+usermod -aG docker ubuntu
 systemctl enable docker
 apt-get clean
 rm -rf /var/lib/apt/lists/* /tmp/approved-artifacts.json

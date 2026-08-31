@@ -19,6 +19,7 @@ from ..models import (
     CatalogService,
     ReleaseTag,
     ReleaseTagPage,
+    RunnerLabel,
 )
 from . import deployment_store
 
@@ -197,7 +198,11 @@ def get_tag(repository: str, service_name: str, name: str) -> ReleaseTag | None:
 
 
 def start_deployment(
-    *, service: CatalogService, tag: ReleaseTag, requested_by: str
+    *,
+    service: CatalogService,
+    tag: ReleaseTag,
+    requested_by: str,
+    runner_label: RunnerLabel = "",
 ) -> DeploymentItem:
     repository = service.repository
     service_name = service.service_name
@@ -210,6 +215,7 @@ def start_deployment(
             repository=repository,
             tag=tag.name,
             sha=tag.sha,
+            runner_label=runner_label,
             status="QUEUED",
             current_stage="queued",
             stages=default_stages(),
@@ -233,6 +239,7 @@ def start_deployment(
         repository=repository,
         tag=tag.name,
         sha=tag.sha,
+        runner_label=runner_label,
         status="QUEUED",
         current_stage="queued",
         stages=default_stages(),
@@ -261,6 +268,7 @@ def start_deployment(
                 "artifact_repository": service.deployment.artifact_repository,
                 "build_context": service.deployment.build_context,
                 "health_path": service.deployment.health_path,
+                "runner_label": runner_label,
             },
         )
     except Exception as exc:
@@ -397,6 +405,7 @@ def _retry_workflow_and_inputs(
         "artifact_repository": service.deployment.artifact_repository,
         "build_context": service.deployment.build_context,
         "health_path": service.deployment.health_path,
+        "runner_label": item.runner_label,
     }
     return workflow, inputs
 

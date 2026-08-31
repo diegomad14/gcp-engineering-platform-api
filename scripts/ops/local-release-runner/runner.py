@@ -297,6 +297,7 @@ def make_user_data(
     runner_name: str,
     runner_version: str,
     runner_sha256: str,
+    start_docker: bool = True,
 ) -> str:
     template_path = Path(__file__).with_name("guest-bootstrap.sh")
     bootstrap = template_path.read_text()
@@ -308,7 +309,7 @@ write_files:
     encoding: b64
     content: {encoded_bootstrap}
 runcmd:
-  - [ bash, -c, "CGM_REPOSITORY=$(echo {encode(repository)} | base64 -d) CGM_RUNNER_TOKEN=$(echo {encode(runner_token)} | base64 -d) CGM_RUNNER_NAME=$(echo {encode(runner_name)} | base64 -d) CGM_RUNNER_VERSION=$(echo {encode(runner_version)} | base64 -d) CGM_RUNNER_SHA256=$(echo {encode(runner_sha256)} | base64 -d) /usr/local/sbin/cgm-release-runner-bootstrap.sh" ]
+  - [ bash, -c, "CGM_REPOSITORY=$(echo {encode(repository)} | base64 -d) CGM_RUNNER_TOKEN=$(echo {encode(runner_token)} | base64 -d) CGM_RUNNER_NAME=$(echo {encode(runner_name)} | base64 -d) CGM_RUNNER_VERSION=$(echo {encode(runner_version)} | base64 -d) CGM_RUNNER_SHA256=$(echo {encode(runner_sha256)} | base64 -d) CGM_SKIP_DOCKER=$(echo {encode("1" if not start_docker else "0")} | base64 -d) /usr/local/sbin/cgm-release-runner-bootstrap.sh" ]
 """
 
 
@@ -320,6 +321,8 @@ def qemu_accel() -> list[str]:
     if system == "Linux" and Path("/dev/kvm").exists():
         return ["-accel", "kvm"]
     if system == "Darwin":
+        if platform.machine() == "arm64":
+            return ["-accel", "tcg,thread=multi"]
         return ["-accel", "hvf"]
     if system == "Windows":
         return ["-accel", "whpx"]
@@ -481,28 +484,33 @@ def delete_runner(repo: str, runner_id: int | None, runner_name: str) -> None:
             )
 
 
-def wait_for_runner(
+def wait_for_runner_ready(
     repo: str, name: str, timeout: int, state: dict[str, Any], path: Path
 ) -> None:
     deadline = time.monotonic() + timeout
+    last_status = "absent"
+    last_missing = {"self-hosted", "linux", "x64", LABEL}
     while time.monotonic() < deadline:
         found = runner_by_name(repo, name)
-        if found and found.get("status") == "online":
-            state["runner_id"] = found.get("id")
-            write_state(path, state)
-            return
+        if found:
+            runner_id = found.get("id")
+            if runner_id and state.get("runner_id") != runner_id:
+                state["runner_id"] = runner_id
+                write_state(path, state)
+            last_status = str(found.get("status") or "unknown")
+            labels = {
+                str(label.get("name"))
+                for label in found.get("labels", [])
+                if isinstance(label, dict)
+            }
+            last_missing = {"self-hosted", "linux", "x64", LABEL} - labels
+            if last_status == "online" and not last_missing:
+                return
         time.sleep(5)
-    raise ControllerError("Temporary runner did not become online before timeout")
-
-
-def verify_runner_labels(repo: str, name: str) -> None:
-    found = runner_by_name(repo, name)
-    if not found or found.get("status") != "online":
-        raise ControllerError("Temporary runner is not online")
-    labels = {str(label.get("name")) for label in found.get("labels", [])}
-    missing = {"self-hosted", "linux", "x64", LABEL} - labels
-    if missing:
-        raise ControllerError(f"Temporary runner is missing labels: {sorted(missing)}")
+    raise ControllerError(
+        "Temporary runner did not become ready before timeout: "
+        f"status={last_status}, missing_labels={sorted(last_missing)}"
+    )
 
 
 def wait_for_run(repo: str, run_id: int, timeout: int) -> dict[str, Any]:
@@ -542,6 +550,33 @@ def rerun_same_run(repo: str, run_id: int, run: dict[str, Any], timeout: int) ->
     if cancelled.get("conclusion") == "success":
         return
     gh(["run", "rerun", str(run_id), "--repo", repo])
+
+
+def activate_runner_selection(
+    *,
+    repo: str,
+    run_id: int,
+    run: dict[str, Any],
+    timeout: int,
+    selection_mode: str,
+    state: dict[str, Any],
+    path: Path,
+) -> None:
+    if selection_mode == "explicit":
+        # The workflow was dispatched with runner_label=cgm-release-local. As
+        # soon as this runner becomes online, GitHub resumes the existing run;
+        # canceling it here would race an already-started production release.
+        return
+    state["variable_change_started"] = True
+    write_state(path, state)
+    set_variable(repo, LABEL)
+    state["variable_changed"] = True
+    write_state(path, state)
+    rerun_same_run(repo, run_id, run, timeout)
+
+
+def run_succeeded(run: dict[str, Any]) -> bool:
+    return run.get("status") == "completed" and run.get("conclusion") == "success"
 
 
 def cleanup(state_path_value: Path, state: dict[str, Any]) -> list[str]:
@@ -612,6 +647,7 @@ def run_up(args: argparse.Namespace) -> int:
         "run_url": run.get("url"),
         "sha": run.get("headSha"),
         "workflow": run.get("workflowName"),
+        "selection_mode": args.selection_mode,
         "runner_name": runner_name,
         "runner_id": None,
         "previous_runner_variable": previous,
@@ -645,19 +681,20 @@ def run_up(args: argparse.Namespace) -> int:
         process = launch_vm(vm_disk, seed_iso)
         state["vm_pid"] = process.pid
         write_state(path, state)
-        wait_for_runner(args.repo, runner_name, args.runner_timeout, state, path)
+        wait_for_runner_ready(args.repo, runner_name, args.runner_timeout, state, path)
         # cloud-init has completed registration once the runner is online; the
         # NoCloud seed is no longer needed and contains the registration token.
         for secret_path in (work_dir / "seed.iso", work_dir / "user-data"):
             secret_path.unlink(missing_ok=True)
-        # Persist intent before the remote mutation so `down` can recover even
-        # if the developer process is interrupted between these two actions.
-        state["variable_change_started"] = True
-        write_state(path, state)
-        set_variable(args.repo, LABEL)
-        state["variable_changed"] = True
-        write_state(path, state)
-        rerun_same_run(args.repo, args.run_id, run, args.run_timeout)
+        activate_runner_selection(
+            repo=args.repo,
+            run_id=args.run_id,
+            run=run,
+            timeout=args.run_timeout,
+            selection_mode=args.selection_mode,
+            state=state,
+            path=path,
+        )
         print(f"Local runner online for {args.repo}; state: {path}")
         final = wait_for_run(args.repo, args.run_id, args.run_timeout)
         print(
@@ -669,7 +706,7 @@ def run_up(args: argparse.Namespace) -> int:
             for error in errors:
                 print(f"CLEANUP ERROR: {error}", file=sys.stderr)
             return 2
-        return 0
+        return 0 if run_succeeded(final) else 2
     except KeyboardInterrupt:
         print("Interrupted; cleaning up the local runner", file=sys.stderr)
         errors = cleanup(path, state)
@@ -727,15 +764,15 @@ def run_validate(args: argparse.Namespace) -> int:
             runner_name=runner_name,
             runner_version=args.runner_version,
             runner_sha256=args.runner_sha256,
+            start_docker=args.profile == "release",
         )
         vm_disk, seed_iso = create_vm_files(image, user_data, work_dir)
         process = launch_vm(vm_disk, seed_iso)
         state["vm_pid"] = process.pid
         write_state(path, state)
-        wait_for_runner(args.repo, runner_name, args.runner_timeout, state, path)
+        wait_for_runner_ready(args.repo, runner_name, args.runner_timeout, state, path)
         for secret_path in (work_dir / "seed.iso", work_dir / "user-data"):
             secret_path.unlink(missing_ok=True)
-        verify_runner_labels(args.repo, runner_name)
         print(f"Local runner validated for {args.repo}; state: {path}")
         errors = cleanup(path, state)
         if errors:
@@ -778,6 +815,12 @@ def parser() -> argparse.ArgumentParser:
     up.add_argument("--runner-sha256", default=approved_sha256)
     up.add_argument("--runner-timeout", type=int, default=300)
     up.add_argument("--run-timeout", type=int, default=7200)
+    up.add_argument(
+        "--selection-mode",
+        choices=("variable", "explicit"),
+        default="variable",
+        help="use the repository variable fallback or an explicit workflow input",
+    )
     up.add_argument("--state-file")
     validate = subparsers.add_parser(
         "validate", help="register a temporary runner, verify labels, then clean up"
@@ -788,6 +831,9 @@ def parser() -> argparse.ArgumentParser:
     validate.add_argument("--runner-version", default=approved_version)
     validate.add_argument("--runner-sha256", default=approved_sha256)
     validate.add_argument("--runner-timeout", type=int, default=300)
+    validate.add_argument(
+        "--profile", choices=("registration", "release"), default="release"
+    )
     validate.add_argument("--state-file")
     down = subparsers.add_parser("down", help="recover an interrupted incident")
     down.add_argument("--state-file", required=True)
@@ -795,6 +841,11 @@ def parser() -> argparse.ArgumentParser:
 
 
 if __name__ == "__main__":
+
+    def _interrupt_on_termination(_signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _interrupt_on_termination)
     arguments = parser().parse_args()
     try:
         if arguments.command == "up":

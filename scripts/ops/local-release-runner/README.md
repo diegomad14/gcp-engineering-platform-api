@@ -41,9 +41,23 @@ the runner archive is independently pinned and verified too. It must not
 contain repository credentials, GCP keys, SSH keys or personal files. The
 guest gets outbound NAT only; no host directory or Docker socket is mounted.
 
-`approved-artifacts.json` is the reviewed source of Ubuntu and GitHub Runner
-versions/checksums. Build the image before an incident and retain the
-`IMAGE_SHA256` printed by the command:
+`approved-artifacts.json` is the reviewed source of Ubuntu, GitHub Runner and
+the released runner image versions/checksums. The manual **Build local runner
+image** workflow is available only from `main`. It builds on `ubuntu-24.04`,
+publishes the compressed QCOW2 to
+`ghcr.io/diegomad14/cgm-release-runner-image`, and reports both its OCI digest
+and QCOW2 SHA-256. A follow-up review pins those values in the manifest.
+
+After that review, download the approved image by immutable digest. The command
+verifies both the OCI digest (through ORAS) and the QCOW2 SHA-256 before moving
+the file into place:
+
+```bash
+./scripts/ops/local-release-runner/fetch-image.sh \
+  /approved/images/cgm-release-local-ubuntu-24.04-amd64.qcow2
+```
+
+To reproduce the build locally on a trusted Linux x86_64 builder, run:
 
 ```bash
 ./scripts/ops/local-release-runner/build-image.sh \
@@ -62,6 +76,12 @@ argument identifies the repository containing the blocked workflow:
   --image /approved/images/cgm-release-local-ubuntu-24.04-amd64.qcow2 \
   --image-sha256 '<IMAGE_SHA256>'
 ```
+
+When Engineering Platform dispatched the run with the explicit
+`runner_label=cgm-release-local` input, add `--selection-mode explicit`. This
+preserves the queued run without changing `CGM_ACTIONS_RUNNER` or issuing a
+cancel/rerun. The default `variable` mode remains available for older queued
+workflows that selected their runner through the repository variable.
 
 The runner version/hash are loaded from `approved-artifacts.json`. Overrides
 are accepted only when they match that manifest exactly.
@@ -99,17 +119,27 @@ clear reconciliation error.
 `CGM_ACTIONS_RUNNER` and never reruns a workflow. It boots the VM, registers a
 repo-scoped runner, waits for it to come online, verifies the labels
 `self-hosted`, `linux`, `x64` and `cgm-release-local`, then deregisters the
-runner and destroys the VM:
+runner and destroys the VM. The default `release` profile also starts Docker
+and proves `docker info`; use `registration` only for the shorter registration
+smoke test:
 
 ```bash
 ./scripts/ops/local-release-runner/start.sh validate \
   --repo diegomad14/<REPO> \
   --image /approved/images/cgm-release-local-ubuntu-24.04-amd64.qcow2 \
-  --image-sha256 '<IMAGE_SHA256>'
+  --image-sha256 '<IMAGE_SHA256>' \
+  --profile release
 ```
 
 Use `validate` when the contingency is not yet active to prove the image and
 controller are ready, without mutating the repository's runner variable.
+
+The protected **Local runner production E2E** workflow accepts only an already
+approved image digest and an existing queued `run_id`. Store the temporary
+fine-grained administrator token only in its `scrum54-validation` environment
+as `CGM_RUNNER_ADMIN_TOKEN`. Revoke the token and delete the environment secret
+immediately after the supervised validation; the guest receives only GitHub's
+short-lived runner registration token.
 
 ## Security contract
 

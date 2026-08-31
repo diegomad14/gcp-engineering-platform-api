@@ -1,0 +1,101 @@
+name: Local Runner E2E Controller
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Queued Platform Deploy run ID to recover
+        required: true
+        type: string
+      image_digest:
+        description: Approved OCI digest from approved-artifacts.json
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: local-runner-e2e-controller
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    environment: scrum54-validation
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
+        with:
+          version: 1.3.4
+      - name: Verify approved digest
+        run: |
+          set -euo pipefail
+          APPROVED=$(jq -r '.runner_image.digest // ""' scripts/ops/local-release-runner/approved-artifacts.json)
+          test -n "$APPROVED"
+          test "$APPROVED" = "${{ inputs.image_digest }}"
+      - name: Install VM tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            cloud-image-utils qemu-system-x86 qemu-utils
+      - name: Download approved image
+        run: |
+          ./scripts/ops/local-release-runner/fetch-image.sh \
+            "$RUNNER_TEMP/cgm-release-local-ubuntu-24.04-amd64.qcow2"
+      - name: Capture existing runner variable
+        env:
+          GH_TOKEN: ${{ secrets.CGM_RUNNER_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          STATE="$RUNNER_TEMP/cgm-actions-runner-before"
+          if VALUE=$(gh variable get CGM_ACTIONS_RUNNER --repo "${{ github.repository }}" 2>/dev/null); then
+            printf 'present\n%s' "$VALUE" > "$STATE"
+          else
+            printf 'absent\n' > "$STATE"
+          fi
+      - name: Recover queued production deployment
+        env:
+          GH_TOKEN: ${{ secrets.CGM_RUNNER_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMAGE="$RUNNER_TEMP/cgm-release-local-ubuntu-24.04-amd64.qcow2"
+          STATE="$RUNNER_TEMP/cgm-release-e2e-state.json"
+          IMAGE_SHA256=$(jq -r '.runner_image.sha256' scripts/ops/local-release-runner/approved-artifacts.json)
+          cleanup() {
+            if [[ -f "$STATE" ]]; then
+              ./scripts/ops/local-release-runner/start.sh down --state-file "$STATE"
+            fi
+          }
+          trap cleanup EXIT INT TERM
+          ./scripts/ops/local-release-runner/start.sh up \
+            --repo "${{ github.repository }}" \
+            --run-id "${{ inputs.run_id }}" \
+            --image "$IMAGE" \
+            --image-sha256 "$IMAGE_SHA256" \
+            --selection-mode explicit \
+            --state-file "$STATE" \
+            --runner-timeout 1800 \
+            --run-timeout 4800
+      - name: Verify cleanup
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.CGM_RUNNER_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          STATE="$RUNNER_TEMP/cgm-release-e2e-state.json"
+          if [[ -f "$STATE" ]]; then
+            ./scripts/ops/local-release-runner/start.sh down --state-file "$STATE"
+          fi
+          test "$(gh api "repos/${{ github.repository }}/actions/runners?per_page=100" \
+            --jq '[.runners[] | select(.name | startswith("cgm-release-local"))] | length')" = 0
+          BEFORE="$RUNNER_TEMP/cgm-actions-runner-before"
+          read -r PRESENCE < "$BEFORE"
+          if CURRENT=$(gh variable get CGM_ACTIONS_RUNNER --repo "${{ github.repository }}" 2>/dev/null); then
+            test "$PRESENCE" = present
+            EXPECTED=$(tail -n +2 "$BEFORE")
+            test "$CURRENT" = "$EXPECTED"
+          else
+            test "$PRESENCE" = absent
+          fi

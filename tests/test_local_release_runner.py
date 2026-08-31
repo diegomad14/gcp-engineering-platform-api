@@ -1,5 +1,6 @@
 import base64
 import importlib.util
+from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
@@ -88,11 +89,18 @@ def test_validate_approved_runner_rejects_unknown_version():
         local_runner.validate_approved_runner("2.000.0", "a" * 64)
 
 
-def test_verify_runner_labels_accepts_expected_labels():
-    with mock.patch.object(
-        local_runner,
-        "runner_by_name",
-        return_value={
+def test_wait_for_runner_ready_tolerates_registration_transitions(tmp_path):
+    runner_id = 123
+    responses = [
+        None,
+        {"id": runner_id, "status": "offline", "labels": []},
+        {
+            "id": runner_id,
+            "status": "online",
+            "labels": [{"name": "self-hosted"}, {"name": "linux"}],
+        },
+        {
+            "id": runner_id,
             "status": "online",
             "labels": [
                 {"name": "self-hosted"},
@@ -101,25 +109,174 @@ def test_verify_runner_labels_accepts_expected_labels():
                 {"name": "cgm-release-local"},
             ],
         },
+    ]
+    state = {"runner_id": None}
+    state_path = tmp_path / "state.json"
+    with (
+        mock.patch.object(local_runner, "runner_by_name", side_effect=responses),
+        mock.patch.object(local_runner, "write_state") as write_state,
+        mock.patch.object(local_runner.time, "sleep"),
+        mock.patch.object(
+            local_runner.time,
+            "monotonic",
+            side_effect=[0, 0, 1, 2, 3],
+        ),
     ):
-        local_runner.verify_runner_labels("owner/repo", "cgm-release-local-1-1")
+        local_runner.wait_for_runner_ready(
+            "owner/repo", "cgm-release-local-1-1", 10, state, state_path
+        )
+
+    assert state["runner_id"] == runner_id
+    write_state.assert_called_once_with(state_path, state)
 
 
-def test_verify_runner_labels_rejects_missing_label():
-    with mock.patch.object(
-        local_runner,
-        "runner_by_name",
-        return_value={
-            "status": "online",
-            "labels": [
-                {"name": "self-hosted"},
-                {"name": "linux"},
-                {"name": "x64"},
-            ],
-        },
+def test_wait_for_runner_ready_reports_last_status_without_real_sleep(tmp_path):
+    state = {"runner_id": None}
+    with (
+        mock.patch.object(
+            local_runner,
+            "runner_by_name",
+            return_value={"id": 123, "status": "offline", "labels": []},
+        ),
+        mock.patch.object(local_runner, "write_state"),
+        mock.patch.object(local_runner.time, "sleep"),
+        mock.patch.object(local_runner.time, "monotonic", side_effect=[0, 0, 6]),
     ):
-        with pytest.raises(local_runner.ControllerError, match="missing labels"):
-            local_runner.verify_runner_labels("owner/repo", "cgm-release-local-1-1")
+        with pytest.raises(
+            local_runner.ControllerError, match="status=offline.*missing_labels"
+        ):
+            local_runner.wait_for_runner_ready(
+                "owner/repo",
+                "cgm-release-local-1-1",
+                5,
+                state,
+                tmp_path / "state.json",
+            )
+
+
+def test_validate_profile_defaults_to_release():
+    arguments = local_runner.parser().parse_args(
+        [
+            "validate",
+            "--repo",
+            "owner/repo",
+            "--image",
+            "image.qcow2",
+            "--image-sha256",
+            "a" * 64,
+        ]
+    )
+
+    assert arguments.profile == "release"
+
+
+def test_explicit_selection_preserves_same_queued_run(tmp_path):
+    state = {"variable_change_started": False, "variable_changed": False}
+    with (
+        mock.patch.object(local_runner, "set_variable") as set_variable,
+        mock.patch.object(local_runner, "rerun_same_run") as rerun,
+        mock.patch.object(local_runner, "write_state") as write_state,
+    ):
+        local_runner.activate_runner_selection(
+            repo="owner/repo",
+            run_id=10,
+            run={"status": "queued"},
+            timeout=30,
+            selection_mode="explicit",
+            state=state,
+            path=tmp_path / "state.json",
+        )
+
+    set_variable.assert_not_called()
+    rerun.assert_not_called()
+    write_state.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("status", "conclusion", "expected"),
+    [
+        ("completed", "success", True),
+        ("completed", "failure", False),
+        ("in_progress", None, False),
+    ],
+)
+def test_controller_success_requires_successful_target_run(
+    status, conclusion, expected
+):
+    assert (
+        local_runner.run_succeeded({"status": status, "conclusion": conclusion})
+        is expected
+    )
+
+
+def test_up_never_disables_docker():
+    source = SCRIPT.read_text(encoding="utf-8")
+    run_up = source[source.index("def run_up") : source.index("def run_validate")]
+
+    assert "start_docker=False" not in run_up
+
+
+def test_guest_bootstrap_runs_runner_as_ubuntu_and_checks_docker():
+    bootstrap = (SCRIPT.parent / "guest-bootstrap.sh").read_text(encoding="utf-8")
+
+    assert "runuser -u ubuntu -- docker info" in bootstrap
+    assert "runuser -u ubuntu -- ./config.sh" in bootstrap
+    assert "exec runuser -u ubuntu -- ./run.sh" in bootstrap
+    assert '--labels "cgm-release-local"' in bootstrap
+    assert "set -x" not in bootstrap
+
+
+def test_validate_ctrl_c_cleans_up_and_returns_130(tmp_path):
+    args = Namespace(
+        repo="owner/repo",
+        image=str(tmp_path / "image.qcow2"),
+        image_sha256="a" * 64,
+        runner_version="2.337.0",
+        runner_sha256="70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613",
+        runner_timeout=10,
+        profile="registration",
+        state_file=str(tmp_path / "state.json"),
+    )
+    process = mock.Mock(pid=123)
+    with (
+        mock.patch.object(local_runner, "validate_repo"),
+        mock.patch.object(local_runner, "validate_approved_runner"),
+        mock.patch.object(local_runner, "require_prerequisites"),
+        mock.patch.object(
+            local_runner, "gh_json", return_value={"token": "short-lived"}
+        ),
+        mock.patch.object(local_runner, "make_user_data", return_value="cloud-init"),
+        mock.patch.object(
+            local_runner,
+            "create_vm_files",
+            return_value=(tmp_path / "vm.qcow2", tmp_path / "seed.iso"),
+        ),
+        mock.patch.object(local_runner, "launch_vm", return_value=process),
+        mock.patch.object(
+            local_runner, "wait_for_runner_ready", side_effect=KeyboardInterrupt
+        ),
+        mock.patch.object(local_runner, "write_state"),
+        mock.patch.object(local_runner, "cleanup", return_value=[]) as cleanup,
+    ):
+        result = local_runner.run_validate(args)
+
+    assert result == 130
+    cleanup.assert_called_once()
+    persisted_state = cleanup.call_args.args[1]
+    assert "short-lived" not in repr(persisted_state)
+
+
+def test_down_recovers_persisted_state(tmp_path):
+    path = tmp_path / "state.json"
+    state = {"repo": "owner/repo", "runner_name": "temporary"}
+    with (
+        mock.patch.object(local_runner, "read_state", return_value=state),
+        mock.patch.object(local_runner, "cleanup", return_value=[]) as cleanup,
+    ):
+        result = local_runner.run_down(Namespace(state_file=str(path)))
+
+    assert result == 0
+    cleanup.assert_called_once_with(path.resolve(), state)
 
 
 def test_powershell_wrapper_never_registers_runner_on_host():

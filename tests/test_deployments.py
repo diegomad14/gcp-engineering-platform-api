@@ -126,6 +126,38 @@ def test_create_deployment_and_idempotent_replay(client):
     assert second.status_code == 202
     assert first.json()["id"] == second.json()["id"]
     assert start.call_count == 1
+    assert start.call_args.kwargs["runner_label"] == ""
+
+
+def test_create_deployment_dispatches_and_audits_contingency_runner(client):
+    contingency = _deployment().model_copy(update={"runner_label": "cgm-release-local"})
+    with (
+        mock.patch(
+            "eng_platform_api.routers.deployments.github_deployments.get_tag",
+            return_value=_tag(),
+        ),
+        mock.patch(
+            "eng_platform_api.routers.deployments.github_deployments.start_deployment",
+            return_value=contingency,
+        ) as start,
+    ):
+        response = client.post(
+            "/api/services/eng-platform-api/deployments",
+            json={"tag": "v0.5.0", "runner_label": "cgm-release-local"},
+        )
+
+    assert response.status_code == 202
+    assert response.json()["runner_label"] == "cgm-release-local"
+    assert start.call_args.kwargs["runner_label"] == "cgm-release-local"
+
+
+def test_create_deployment_rejects_unknown_runner_label(client):
+    response = client.post(
+        "/api/services/eng-platform-api/deployments",
+        json={"tag": "v0.5.0", "runner_label": "untrusted-runner"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_ineligible_tag_is_rejected(client):
@@ -150,6 +182,20 @@ def test_idempotency_key_cannot_be_reused_for_another_tag(client):
         json={"tag": "v0.5.1"},
         headers={"Idempotency-Key": "one-request"},
     )
+    assert response.status_code == 409
+    assert "another deployment" in response.json()["detail"]
+
+
+def test_idempotency_key_cannot_change_runner_label(client):
+    from eng_platform_api.services import deployment_store
+
+    deployment_store.save(_deployment(), "one-request")
+    response = client.post(
+        "/api/services/eng-platform-api/deployments",
+        json={"tag": "v0.5.0", "runner_label": "cgm-release-local"},
+        headers={"Idempotency-Key": "one-request"},
+    )
+
     assert response.status_code == 409
     assert "another deployment" in response.json()["detail"]
 

@@ -69,12 +69,17 @@ def _active_deployment(service_name: str) -> DeploymentItem | None:
 
 
 def _require_matching_idempotency(
-    existing: DeploymentItem, service_name: str, tag: str, kind: str
+    existing: DeploymentItem,
+    service_name: str,
+    tag: str,
+    kind: str,
+    runner_label: str = "",
 ) -> None:
     if (
         existing.service_name != service_name
         or existing.tag != tag
         or existing.kind != kind
+        or existing.runner_label != runner_label
     ):
         raise HTTPException(
             status_code=409,
@@ -163,7 +168,13 @@ def create_deployment(
     key = idempotency_key or str(uuid.uuid4())
     existing = deployment_store.find_by_idempotency_key(key)
     if existing is not None:
-        _require_matching_idempotency(existing, service_name, payload.tag, "deploy")
+        _require_matching_idempotency(
+            existing,
+            service_name,
+            payload.tag,
+            "deploy",
+            payload.runner_label,
+        )
         if existing.status == "FAILED" and existing.current_stage == "dispatch":
             return _retry_failed_dispatch(
                 service,
@@ -191,6 +202,7 @@ def create_deployment(
             service=service,
             tag=tag,
             requested_by=requested_by,
+            runner_label=payload.runner_label,
         )
         saved = deployment_store.save(item, key)
         _invalidate_overview_cache()
