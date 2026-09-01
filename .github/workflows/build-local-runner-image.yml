@@ -47,14 +47,16 @@ jobs:
           TAG="ubuntu-20260814-runner-2.337.0"
           MEDIA_TYPE="application/vnd.cgm.release-runner.qcow2"
           echo "$GHCR_TOKEN" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
-          # The runner temp directory is outside the workspace; the absolute
-          # path is intentional and validated by the digest pin in
-          # approved-artifacts.json.
-          oras push --disable-path-validation "$REFERENCE:$TAG" \
-            "$IMAGE_PATH:$MEDIA_TYPE" \
+          # Push from the image directory so the layer is stored under its
+          # basename (the filename pinned in approved-artifacts.json and
+          # expected by fetch-image.sh), not the absolute runner temp path.
+          pushd "$(dirname "$IMAGE_PATH")" >/dev/null
+          oras push "$REFERENCE:$TAG" \
+            "$(basename "$IMAGE_PATH"):$MEDIA_TYPE" \
             --annotation "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             --annotation "org.opencontainers.image.revision=${{ github.sha }}" \
             --annotation "org.opencontainers.image.version=$TAG"
+          popd >/dev/null
           DIGEST=$(oras resolve "$REFERENCE:$TAG")
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
       - name: Publish approval evidence
