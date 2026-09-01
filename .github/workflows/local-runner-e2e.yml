@@ -23,6 +23,13 @@ on:
           - ci
           - release
           - deploy
+      cause:
+        description: Real Billing incident or supervised simulation
+        required: true
+        type: choice
+        options:
+          - billing
+          - drill
       image_digest:
         description: Approved OCI digest from approved-artifacts.json
         required: true
@@ -87,6 +94,7 @@ jobs:
           TARGET_RUN_ID: ${{ inputs.run_id }}
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           RECOVERY_PROFILE: ${{ inputs.profile }}
+          RECOVERY_CAUSE: ${{ inputs.cause }}
         run: |
           set -euo pipefail
           IMAGE="$RUNNER_TEMP/cgm-release-local-ubuntu-24.04-amd64.qcow2"
@@ -102,11 +110,17 @@ jobs:
           if [[ "$RECOVERY_PROFILE" == deploy ]]; then
             SELECTION_MODE=explicit
           fi
+          DRILL_ARGS=()
+          if [[ "$RECOVERY_CAUSE" == drill ]]; then
+            DRILL_ARGS=(--confirm-drill SCRUM-54-DRILL)
+          fi
           ./scripts/ops/local-release-runner/start.sh up \
             --repo "$TARGET_REPO" \
             --run-id "$TARGET_RUN_ID" \
             --expected-sha "$EXPECTED_SHA" \
             --profile "$RECOVERY_PROFILE" \
+            --cause "$RECOVERY_CAUSE" \
+            "${DRILL_ARGS[@]}" \
             --image "$IMAGE" \
             --image-sha256 "$IMAGE_SHA256" \
             --selection-mode "$SELECTION_MODE" \

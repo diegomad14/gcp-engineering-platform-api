@@ -74,12 +74,14 @@ def _require_matching_idempotency(
     tag: str,
     kind: str,
     runner_label: str = "",
+    contingency_cause: str = "",
 ) -> None:
     if (
         existing.service_name != service_name
         or existing.tag != tag
         or existing.kind != kind
         or existing.runner_label != runner_label
+        or existing.contingency_cause != contingency_cause
     ):
         raise HTTPException(
             status_code=409,
@@ -174,6 +176,7 @@ def create_deployment(
             payload.tag,
             "deploy",
             payload.runner_label,
+            payload.contingency_cause,
         )
         if existing.status == "FAILED" and existing.current_stage == "dispatch":
             return _retry_failed_dispatch(
@@ -203,6 +206,7 @@ def create_deployment(
             tag=tag,
             requested_by=requested_by,
             runner_label=payload.runner_label,
+            contingency_cause=payload.contingency_cause,
         )
         saved = deployment_store.save(item, key)
         _invalidate_overview_cache()

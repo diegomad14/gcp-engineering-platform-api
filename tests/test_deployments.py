@@ -130,7 +130,12 @@ def test_create_deployment_and_idempotent_replay(client):
 
 
 def test_create_deployment_dispatches_and_audits_contingency_runner(client):
-    contingency = _deployment().model_copy(update={"runner_label": "cgm-release-local"})
+    contingency = _deployment().model_copy(
+        update={
+            "runner_label": "cgm-release-local",
+            "contingency_cause": "billing",
+        }
+    )
     with (
         mock.patch(
             "eng_platform_api.routers.deployments.github_deployments.get_tag",
@@ -148,7 +153,46 @@ def test_create_deployment_dispatches_and_audits_contingency_runner(client):
 
     assert response.status_code == 202
     assert response.json()["runner_label"] == "cgm-release-local"
+    assert response.json()["contingency_cause"] == "billing"
     assert start.call_args.kwargs["runner_label"] == "cgm-release-local"
+    assert start.call_args.kwargs["contingency_cause"] == "billing"
+
+
+def test_create_deployment_records_drill_cause(client):
+    contingency = _deployment().model_copy(
+        update={"runner_label": "cgm-release-local", "contingency_cause": "drill"}
+    )
+    with (
+        mock.patch(
+            "eng_platform_api.routers.deployments.github_deployments.get_tag",
+            return_value=_tag(),
+        ),
+        mock.patch(
+            "eng_platform_api.routers.deployments.github_deployments.start_deployment",
+            return_value=contingency,
+        ) as start,
+    ):
+        response = client.post(
+            "/api/services/eng-platform-api/deployments",
+            json={
+                "tag": "v0.5.0",
+                "runner_label": "cgm-release-local",
+                "contingency_cause": "drill",
+            },
+        )
+
+    assert response.status_code == 202
+    assert response.json()["contingency_cause"] == "drill"
+    assert start.call_args.kwargs["contingency_cause"] == "drill"
+
+
+def test_hosted_deployment_rejects_contingency_cause(client):
+    response = client.post(
+        "/api/services/eng-platform-api/deployments",
+        json={"tag": "v0.5.0", "contingency_cause": "drill"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_create_deployment_rejects_unknown_runner_label(client):

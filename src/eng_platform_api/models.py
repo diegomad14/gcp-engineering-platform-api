@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 RunnerLabel = Literal["", "cgm-release-local"]
+ContingencyCause = Literal["", "billing", "drill"]
 
 
 # ── Catalog ──────────────────────────────────────────────────────────
@@ -171,6 +172,15 @@ class DeploymentCreateRequest(BaseModel):
 
     tag: str = Field(min_length=1, max_length=128)
     runner_label: RunnerLabel = ""
+    contingency_cause: ContingencyCause = ""
+
+    @model_validator(mode="after")
+    def validate_contingency(self) -> DeploymentCreateRequest:
+        if self.runner_label == "" and self.contingency_cause != "":
+            raise ValueError("contingency_cause requires the contingency runner")
+        if self.runner_label == "cgm-release-local" and self.contingency_cause == "":
+            self.contingency_cause = "billing"
+        return self
 
 
 class DeploymentItem(BaseModel):
@@ -181,6 +191,7 @@ class DeploymentItem(BaseModel):
     sha: str = ""
     runner_label: RunnerLabel = ""
     effective_runner_label: str = ""
+    contingency_cause: ContingencyCause = ""
     kind: Literal["deploy", "rollback"] = "deploy"
     status: DeploymentStatus = "QUEUED"
     current_stage: str = "queued"
