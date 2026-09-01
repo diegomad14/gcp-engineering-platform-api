@@ -858,6 +858,10 @@ def run_up(args: argparse.Namespace) -> int:
         )
     sha = str(run["headSha"]).lower()
     runner_label = runner_label_for_sha(sha)
+    current_variable = variable_value(args.repo)
+    prearmed = (
+        args.cause == "drill" and args.prearmed and current_variable == runner_label
+    )
     runs = related_runs(args.repo, run, args.profile, args.expected_sha)
     if args.cause == "billing" and args.profile in {"ci", "release"}:
         for candidate in runs:
@@ -884,9 +888,12 @@ def run_up(args: argparse.Namespace) -> int:
     )
     if path.exists():
         raise ControllerError(f"A local runner incident is already active: {path}")
-    previous = variable_value(args.repo)
-    if previous not in {None, NORMAL_LABEL}:
+    previous = current_variable
+    if previous not in {None, NORMAL_LABEL} and not prearmed:
         raise ControllerError("CGM_ACTIONS_RUNNER is already in contingency mode")
+    restore_variable = (
+        NORMAL_LABEL if prearmed and args.prearmed_previous == "normal" else None
+    )
     runner_name = f"cgm-release-local-{args.run_id}-{int(time.time())}"
     work_dir = Path(tempfile.mkdtemp(prefix="cgm-release-runner-"))
     state = {
@@ -904,8 +911,8 @@ def run_up(args: argparse.Namespace) -> int:
         "runner_name": runner_name,
         "runner_label": runner_label,
         "runner_id": None,
-        "previous_runner_variable": previous,
-        "variable_change_started": False,
+        "previous_runner_variable": restore_variable if prearmed else previous,
+        "variable_change_started": prearmed,
         "variable_changed": False,
         "vm_pid": None,
         "vm_dir": str(work_dir),
@@ -1093,6 +1100,17 @@ def parser() -> argparse.ArgumentParser:
     up.add_argument("--run-timeout", type=int, default=7200)
     up.add_argument("--profile", choices=("ci", "release", "deploy"), default="deploy")
     up.add_argument("--cause", choices=("billing", "drill"), default="billing")
+    up.add_argument(
+        "--prearmed",
+        action="store_true",
+        help="accept a drill variable already set before the run was queued",
+    )
+    up.add_argument(
+        "--prearmed-previous",
+        choices=("absent", "normal"),
+        default="absent",
+        help="value to restore after a prearmed drill",
+    )
     up.add_argument(
         "--confirm-drill",
         default="",
