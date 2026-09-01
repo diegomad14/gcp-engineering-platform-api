@@ -9,5 +9,12 @@
   "github_runner": {
     "version": "2.337.0",
     "sha256": "70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613"
+  },
+  "runner_image": {
+    "reference": "ghcr.io/diegomad14/cgm-release-runner-image",
+    "digest": "sha256:4178032eb30239c9c519d4771bb60d25b97c3b449aca00148f02e8256344df64",
+    "filename": "cgm-release-local-ubuntu-24.04-amd64.qcow2",
+    "sha256": "9bd19423244b60d900d0bcfaa01d88e8b55b63a5f2db27a62232d82eefc763bd",
+    "media_type": "application/vnd.cgm.release-runner.qcow2"
   }
 }
