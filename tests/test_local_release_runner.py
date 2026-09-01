@@ -119,6 +119,74 @@ def test_non_billing_failure_is_not_recoverable_as_billing():
         assert not local_runner.run_has_billing_failure("owner/repo", 10)
 
 
+def test_trusted_run_actor_requires_write_access():
+    with mock.patch.object(
+        local_runner,
+        "gh_json",
+        side_effect=[{"actor": {"login": "reader"}}, {"permission": "read"}],
+    ):
+        with pytest.raises(local_runner.ControllerError, match="write access"):
+            local_runner.trusted_run_actor("owner/repo", 10)
+
+
+def test_trusted_run_actor_accepts_maintainer():
+    with mock.patch.object(
+        local_runner,
+        "gh_json",
+        side_effect=[{"actor": {"login": "maintainer"}}, {"permission": "maintain"}],
+    ):
+        assert local_runner.trusted_run_actor("owner/repo", 10) == "maintainer"
+
+
+def test_drill_audit_requires_every_job_to_use_expected_runner():
+    jobs = {
+        "jobs": [
+            {
+                "name": "quality",
+                "conclusion": "success",
+                "runner_name": "hosted-runner",
+                "labels": ["ubuntu-latest"],
+            }
+        ]
+    }
+    with mock.patch.object(local_runner, "gh_json", return_value=jobs):
+        with pytest.raises(local_runner.ControllerError, match="did not use"):
+            local_runner.verify_runs_used_runner(
+                "owner/repo",
+                [{"databaseId": 10}],
+                "cgm-release-local-10-1",
+                RUNNER_LABEL,
+            )
+
+
+def test_drill_audit_accepts_sha_bound_runner():
+    jobs = {
+        "jobs": [
+            {
+                "name": "quality",
+                "conclusion": "success",
+                "runner_name": "cgm-release-local-10-1",
+                "labels": ["self-hosted", "linux", "x64", RUNNER_LABEL],
+            }
+        ]
+    }
+    with mock.patch.object(local_runner, "gh_json", return_value=jobs):
+        local_runner.verify_runs_used_runner(
+            "owner/repo",
+            [{"databaseId": 10}],
+            "cgm-release-local-10-1",
+            RUNNER_LABEL,
+        )
+
+
+def test_drill_requires_explicit_supervision_acknowledgement():
+    with pytest.raises(local_runner.ControllerError, match="confirm-drill"):
+        local_runner.validate_drill_confirmation("drill", "")
+
+    local_runner.validate_drill_confirmation("drill", "SCRUM-54-DRILL")
+    local_runner.validate_drill_confirmation("billing", "")
+
+
 def test_approved_runner_manifest_has_valid_pins():
     version, sha256 = local_runner.approved_runner_artifact()
 

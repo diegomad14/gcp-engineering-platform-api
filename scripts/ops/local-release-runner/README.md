@@ -76,6 +76,7 @@ argument identifies the repository containing the blocked workflow:
   --run-id 32447686865 \
   --expected-sha '<40_CHARACTER_COMMIT_SHA>' \
   --profile ci \
+  --cause billing \
   --image /approved/images/cgm-release-local-ubuntu-24.04-amd64.qcow2 \
   --image-sha256 '<IMAGE_SHA256>'
 ```
@@ -86,6 +87,13 @@ CI rejects forks and PRs whose base is not `main`. The controller derives the
 only accepted custom label as `cgm-release-local-<SHA>` and recovers all
 allowlisted failing runs for that same SHA. Completed CI/release runs are
 eligible only when their job annotations prove a GitHub Billing failure.
+
+When Billing is healthy, use a supervised simulation with `--cause drill
+--confirm-drill SCRUM-54-DRILL`. Drill mode keeps the same repository, actor,
+event, allowlist, SHA and cleanup guards, but does not require a Billing
+annotation. Before cleanup it audits every executed job through the GitHub API
+and fails unless the job used the temporary runner and SHA-bound label. Drill
+evidence must be recorded as a simulation, never as a real Billing incident.
 
 Engineering Platform dispatches contingency deploys with the SHA-bound label.
 For those already-queued runs, add `--selection-mode explicit`; the controller

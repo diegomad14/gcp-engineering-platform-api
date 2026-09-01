@@ -285,6 +285,46 @@ def run_has_billing_failure(repo: str, run_id: int) -> bool:
     return False
 
 
+def trusted_run_actor(repo: str, run_id: int) -> str:
+    payload = gh_json(["api", f"repos/{repo}/actions/runs/{run_id}"])
+    actor = str(payload.get("actor", {}).get("login") or "")
+    if not actor:
+        raise ControllerError("Target run does not expose a GitHub actor")
+    permission = gh_json(["api", f"repos/{repo}/collaborators/{actor}/permission"])
+    if permission.get("permission") not in {"admin", "maintain", "write"}:
+        raise ControllerError(
+            "Target run actor does not have write access to the repository"
+        )
+    return actor
+
+
+def verify_runs_used_runner(
+    repo: str, runs: list[dict[str, Any]], runner_name: str, runner_label: str
+) -> None:
+    for run in runs:
+        run_id = int(run["databaseId"])
+        jobs = gh_json(
+            [
+                "api",
+                f"repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=100",
+            ]
+        ).get("jobs", [])
+        executed = [job for job in jobs if job.get("conclusion") != "skipped"]
+        if not executed:
+            raise ControllerError(f"Run {run_id} has no executed jobs to audit")
+        for job in executed:
+            labels = set(job.get("labels") or [])
+            if job.get("runner_name") != runner_name or runner_label not in labels:
+                raise ControllerError(
+                    f"Run {run_id} job {job.get('name')} did not use the drill runner"
+                )
+
+
+def validate_drill_confirmation(cause: str, confirmation: str) -> None:
+    if cause == "drill" and confirmation != "SCRUM-54-DRILL":
+        raise ControllerError("Drill mode requires --confirm-drill SCRUM-54-DRILL")
+
+
 def get_run(repo: str, run_id: int) -> dict[str, Any]:
     run = gh_json(
         [
@@ -806,10 +846,12 @@ def run_up(args: argparse.Namespace) -> int:
         raise ControllerError("--expected-sha is required")
     if args.selection_mode == "explicit" and args.profile != "deploy":
         raise ControllerError("Explicit runner selection is allowed only for deploy")
+    validate_drill_confirmation(args.cause, args.confirm_drill)
     validate_approved_runner(args.runner_version, args.runner_sha256)
     image = Path(args.image).expanduser().resolve()
     require_prerequisites(image, args.image_sha256)
     run = target_run(args.repo, args.run_id, args.profile, args.expected_sha)
+    actor = trusted_run_actor(args.repo, args.run_id)
     if run.get("status") == "completed" and run.get("conclusion") == "success":
         raise ControllerError(
             "The requested run already succeeded; no recovery is needed"
@@ -817,7 +859,7 @@ def run_up(args: argparse.Namespace) -> int:
     sha = str(run["headSha"]).lower()
     runner_label = runner_label_for_sha(sha)
     runs = related_runs(args.repo, run, args.profile, args.expected_sha)
-    if args.profile in {"ci", "release"}:
+    if args.cause == "billing" and args.profile in {"ci", "release"}:
         for candidate in runs:
             if (
                 candidate.get("status") == "completed"
@@ -855,6 +897,8 @@ def run_up(args: argparse.Namespace) -> int:
         "sha": run.get("headSha"),
         "workflow": run.get("workflowName"),
         "profile": args.profile,
+        "cause": args.cause,
+        "actor": actor,
         "run_ids": sorted(run_ids),
         "selection_mode": args.selection_mode,
         "runner_name": runner_name,
@@ -920,6 +964,8 @@ def run_up(args: argparse.Namespace) -> int:
                 f"Run {final.get('databaseId')} finished: {final.get('conclusion')} "
                 f"SHA={final.get('headSha')} URL={final.get('url')}"
             )
+        if args.cause == "drill":
+            verify_runs_used_runner(args.repo, final_runs, runner_name, runner_label)
         errors = cleanup(path, state)
         if errors:
             for error in errors:
@@ -1046,6 +1092,12 @@ def parser() -> argparse.ArgumentParser:
     up.add_argument("--runner-timeout", type=int, default=300)
     up.add_argument("--run-timeout", type=int, default=7200)
     up.add_argument("--profile", choices=("ci", "release", "deploy"), default="deploy")
+    up.add_argument("--cause", choices=("billing", "drill"), default="billing")
+    up.add_argument(
+        "--confirm-drill",
+        default="",
+        help="required acknowledgement for a supervised drill",
+    )
     up.add_argument(
         "--selection-mode",
         choices=("variable", "explicit"),
