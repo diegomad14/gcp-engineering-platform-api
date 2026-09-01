@@ -47,7 +47,10 @@ jobs:
           TAG="ubuntu-20260814-runner-2.337.0"
           MEDIA_TYPE="application/vnd.cgm.release-runner.qcow2"
           echo "$GHCR_TOKEN" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
-          oras push "$REFERENCE:$TAG" \
+          # The runner temp directory is outside the workspace; the absolute
+          # path is intentional and validated by the digest pin in
+          # approved-artifacts.json.
+          oras push --disable-path-validation "$REFERENCE:$TAG" \
             "$IMAGE_PATH:$MEDIA_TYPE" \
             --annotation "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             --annotation "org.opencontainers.image.revision=${{ github.sha }}" \
