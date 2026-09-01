@@ -19,13 +19,14 @@ done
 cd /opt/actions-runner
 test "$(cat .cgm-runner-version)" = "$CGM_RUNNER_VERSION"
 test "$(jq -r '.github_runner.sha256' /opt/cgm-release-approved-artifacts.json)" = "$CGM_RUNNER_SHA256"
+[[ "$CGM_RUNNER_LABEL" =~ ^cgm-release-local-[0-9a-f]{40}$ ]]
 
 runuser -u ubuntu -- ./config.sh \
   --unattended \
   --url "https://github.com/${CGM_REPOSITORY}" \
   --token "$CGM_RUNNER_TOKEN" \
   --name "$CGM_RUNNER_NAME" \
-  --labels "cgm-release-local" \
+  --labels "$CGM_RUNNER_LABEL" \
   --work "_work" \
   --replace
 

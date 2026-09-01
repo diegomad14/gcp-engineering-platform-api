@@ -47,6 +47,10 @@ on:
         required: false
         type: string
         default: ""
+      runner-label:
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -54,7 +58,7 @@ permissions:
 jobs:
   backend:
     if: ${{ inputs.backend-enabled }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner-label != '' && inputs.runner-label || 'ubuntu-latest' }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
@@ -71,7 +75,7 @@ jobs:
 
   frontend:
     if: ${{ inputs.frontend-enabled }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner-label != '' && inputs.runner-label || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -88,7 +92,7 @@ jobs:
 
   openapi:
     if: ${{ inputs.openapi-enabled && inputs.openapi-command != '' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner-label != '' && inputs.runner-label || 'ubuntu-latest' }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}

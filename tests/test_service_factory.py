@@ -63,8 +63,14 @@ def test_generate_service_plan():
     assert "target_revision" in data["platform_rollback_workflow"]
     assert "semantic-release" in data["semantic_release_workflow"]
     assert "CGM_ACTIONS_RUNNER" in data["semantic_release_workflow"]
-    assert "CGM_ACTIONS_RUNNER" in data["platform_deploy_workflow"]
-    assert "CGM_ACTIONS_RUNNER" in data["platform_rollback_workflow"]
+    assert (
+        "format('cgm-release-local-{0}', github.sha)"
+        in data["platform_deploy_workflow"]
+    )
+    assert (
+        "format('cgm-release-local-{0}', github.sha)"
+        in data["platform_rollback_workflow"]
+    )
     assert "cgm-release-local" in " ".join(data["checklist"])
     assert "CGM_ACTIONS_RUNNER" in data["agent_prompt"]
     assert "disposable-VM" in data["agent_prompt"]

@@ -52,6 +52,16 @@ _tag_metadata_cache: dict[tuple[str, int, int], tuple[float, ReleaseTagPage]] = 
 _tag_metadata_cache_lock = Lock()
 GITHUB_WORKFLOW_DISPATCH_FAILED = "GitHub workflow dispatch failed"
 GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED = "GitHub rollback workflow dispatch failed"
+_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+def effective_runner_label(runner_label: RunnerLabel, sha: str) -> str:
+    if runner_label == "":
+        return ""
+    normalized = sha.lower()
+    if not _COMMIT_SHA.fullmatch(normalized):
+        raise ValueError("Contingency deployments require a full commit SHA")
+    return f"cgm-release-local-{normalized}"
 
 
 class GitHubDispatchError(RuntimeError):
@@ -206,6 +216,7 @@ def start_deployment(
 ) -> DeploymentItem:
     repository = service.repository
     service_name = service.service_name
+    selected_runner_label = effective_runner_label(runner_label, tag.sha)
     now = datetime.now(timezone.utc).isoformat()
     if config.mock_mode:
         deployment_id = str(int(datetime.now(timezone.utc).timestamp() * 1000))
@@ -216,6 +227,7 @@ def start_deployment(
             tag=tag.name,
             sha=tag.sha,
             runner_label=runner_label,
+            effective_runner_label=selected_runner_label,
             status="QUEUED",
             current_stage="queued",
             stages=default_stages(),
@@ -240,6 +252,7 @@ def start_deployment(
         tag=tag.name,
         sha=tag.sha,
         runner_label=runner_label,
+        effective_runner_label=selected_runner_label,
         status="QUEUED",
         current_stage="queued",
         stages=default_stages(),
@@ -268,7 +281,7 @@ def start_deployment(
                 "artifact_repository": service.deployment.artifact_repository,
                 "build_context": service.deployment.build_context,
                 "health_path": service.deployment.health_path,
-                "runner_label": runner_label,
+                "runner_label": selected_runner_label,
             },
         )
     except Exception as exc:
@@ -405,7 +418,7 @@ def _retry_workflow_and_inputs(
         "artifact_repository": service.deployment.artifact_repository,
         "build_context": service.deployment.build_context,
         "health_path": service.deployment.health_path,
-        "runner_label": item.runner_label,
+        "runner_label": item.effective_runner_label,
     }
     return workflow, inputs
 

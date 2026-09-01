@@ -27,7 +27,8 @@ from pathlib import Path
 from typing import Any
 
 
-LABEL = "cgm-release-local"
+LABEL_PREFIX = "cgm-release-local-"
+LEGACY_LABEL = "cgm-release-local"
 NORMAL_LABEL = "ubuntu-latest"
 STATE_VERSION = 1
 STATE_ROOT = Path(
@@ -38,16 +39,23 @@ STATE_ROOT = Path(
 )
 ACTIVE_STATUSES = {"queued", "in_progress", "requested", "waiting"}
 TERMINAL_CONCLUSIONS = {"success", "failure", "cancelled", "timed_out", "skipped"}
-CRITICAL_WORKFLOW_MARKERS = (
+CI_WORKFLOWS = {
+    "api ci",
+    "web ci",
+    "ci",
+    "pr check",
+    "quality gate",
+    "conventional pr title",
+}
+RELEASE_WORKFLOWS = CI_WORKFLOWS | {
     "semantic release",
-    "platform deploy",
-    "platform rollback",
-    "release candidate",
-    "promote",
-    "rollback",
-)
+    "sonarqube main baseline",
+}
+DEPLOY_WORKFLOWS = {"platform deploy", "platform rollback"}
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+RUNNER_LABEL_RE = re.compile(r"^cgm-release-local-[0-9a-f]{40}$")
 RUNNER_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 RUNNER_NAME_RE = re.compile(r"^cgm-release-local-\d+-\d+$")
 APPROVED_ARTIFACTS_PATH = Path(__file__).with_name("approved-artifacts.json")
@@ -124,11 +132,24 @@ def validate_approved_runner(version: str, sha256: str) -> None:
         )
 
 
+def runner_label_for_sha(sha: str) -> str:
+    normalized = sha.lower()
+    if not GIT_SHA_RE.fullmatch(normalized):
+        raise ControllerError("GitHub run SHA must be a 40-character commit SHA")
+    return f"{LABEL_PREFIX}{normalized}"
+
+
+def is_supported_variable(value: str) -> bool:
+    return value in {NORMAL_LABEL, LEGACY_LABEL} or bool(
+        RUNNER_LABEL_RE.fullmatch(value)
+    )
+
+
 def variable_value(repo: str) -> str | None:
     result = gh(["variable", "get", "CGM_ACTIONS_RUNNER", "--repo", repo], check=False)
     if result.returncode == 0:
         value = result.stdout.strip()
-        if value in {NORMAL_LABEL, LABEL}:
+        if is_supported_variable(value):
             return value
         raise ControllerError(
             "CGM_ACTIONS_RUNNER has an unsupported value; refusing to overwrite it"
@@ -139,18 +160,18 @@ def variable_value(repo: str) -> str | None:
 
 
 def set_variable(repo: str, value: str) -> None:
-    if value not in {NORMAL_LABEL, LABEL}:
+    if value != NORMAL_LABEL and not RUNNER_LABEL_RE.fullmatch(value):
         raise ControllerError("Unsupported CGM_ACTIONS_RUNNER value")
     gh(["variable", "set", "CGM_ACTIONS_RUNNER", "--repo", repo, "--body", value])
 
 
-def restore_variable(repo: str, previous: str | None) -> None:
+def restore_variable(repo: str, previous: str | None, active_label: str) -> None:
     current = variable_value(repo)
     if current == previous:
         return
-    if current != LABEL:
+    if current != active_label:
         raise ControllerError(
-            "CGM_ACTIONS_RUNNER is no longer cgm-release-local; refusing to overwrite another operator's value"
+            "CGM_ACTIONS_RUNNER no longer matches this incident; refusing to overwrite another operator's value"
         )
     if previous is None:
         gh(
@@ -181,7 +202,9 @@ def runner_by_name(repo: str, name: str) -> dict[str, Any] | None:
     )
 
 
-def active_critical_runs(repo: str, target_id: int) -> list[dict[str, Any]]:
+def active_critical_runs(
+    repo: str, target_ids: set[int], target_sha: str
+) -> list[dict[str, Any]]:
     runs = gh_json(
         [
             "run",
@@ -196,17 +219,73 @@ def active_critical_runs(repo: str, target_id: int) -> list[dict[str, Any]]:
     )
     conflicts = []
     for run in runs:
-        if run.get("databaseId") == target_id:
+        if run.get("databaseId") in target_ids:
             continue
         workflow = str(run.get("workflowName") or "").lower()
-        if run.get("status") in ACTIVE_STATUSES and any(
-            marker in workflow for marker in CRITICAL_WORKFLOW_MARKERS
+        known_workflow = workflow in (
+            CI_WORKFLOWS | RELEASE_WORKFLOWS | DEPLOY_WORKFLOWS
+        )
+        if (
+            run.get("status") in ACTIVE_STATUSES
+            and known_workflow
+            and run.get("headSha") != target_sha
         ):
             conflicts.append(run)
     return conflicts
 
 
-def target_run(repo: str, run_id: int) -> dict[str, Any]:
+def related_runs(
+    repo: str, target: dict[str, Any], profile: str, expected_sha: str | None
+) -> list[dict[str, Any]]:
+    if profile == "deploy":
+        return [target]
+    sha = str(target.get("headSha") or "")
+    runs = gh_json(
+        [
+            "run",
+            "list",
+            "--repo",
+            repo,
+            "--commit",
+            sha,
+            "--limit",
+            "100",
+            "--json",
+            "databaseId,status,conclusion,headSha,headBranch,event,workflowName,url",
+        ]
+    )
+    selected = []
+    for run in runs:
+        try:
+            validate_target_run(repo, run, profile, expected_sha)
+        except ControllerError:
+            continue
+        if not run_succeeded(run):
+            selected.append(run)
+    if not any(run.get("databaseId") == target.get("databaseId") for run in selected):
+        selected.append(target)
+    return selected
+
+
+def run_has_billing_failure(repo: str, run_id: int) -> bool:
+    payload = gh_json(["run", "view", str(run_id), "--repo", repo, "--json", "jobs"])
+    for job in payload.get("jobs", []):
+        job_id = job.get("databaseId")
+        if not job_id:
+            continue
+        annotations = gh_json(["api", f"repos/{repo}/check-runs/{job_id}/annotations"])
+        for annotation in annotations:
+            message = str(annotation.get("message") or "").lower()
+            if (
+                "billing" in message
+                or "payments have failed" in message
+                or "spending limit" in message
+            ):
+                return True
+    return False
+
+
+def get_run(repo: str, run_id: int) -> dict[str, Any]:
     run = gh_json(
         [
             "run",
@@ -220,18 +299,80 @@ def target_run(repo: str, run_id: int) -> dict[str, Any]:
     )
     if run.get("databaseId") != run_id:
         raise ControllerError("The requested run ID was not returned by GitHub")
-    if run.get("event") == "pull_request":
-        raise ControllerError("Pull request workflows cannot use the local runner")
-    if run.get("event") not in {"push", "workflow_dispatch"}:
-        raise ControllerError("Only trusted push/workflow_dispatch runs are allowed")
-    workflow = str(run.get("workflowName") or "").lower()
-    if not any(marker in workflow for marker in CRITICAL_WORKFLOW_MARKERS):
+    return run
+
+
+def pull_request_for_sha(repo: str, sha: str) -> dict[str, Any]:
+    pulls = gh_json(
+        [
+            "api",
+            f"repos/{repo}/commits/{sha}/pulls",
+            "-H",
+            "Accept: application/vnd.github+json",
+        ]
+    )
+    matching = [
+        pull
+        for pull in pulls
+        if pull.get("state") == "open" and pull.get("head", {}).get("sha") == sha
+    ]
+    if len(matching) != 1:
         raise ControllerError(
-            "Only release/deploy/rollback workflows can use the local runner"
+            "CI fallback requires exactly one open pull request for the SHA"
         )
+    return matching[0]
+
+
+def validate_target_run(
+    repo: str, run: dict[str, Any], profile: str, expected_sha: str | None
+) -> None:
+    sha = str(run.get("headSha") or "").lower()
+    runner_label_for_sha(sha)
+    if expected_sha and sha != expected_sha.lower():
+        raise ControllerError("Target run SHA does not match --expected-sha")
+    event = str(run.get("event") or "")
+    workflow = str(run.get("workflowName") or "").lower()
     ref = str(run.get("headBranch") or "")
-    if ref != "main" and not ref.startswith("v"):
-        raise ControllerError("The local runner requires main or a version tag")
+    if profile == "ci":
+        if event != "pull_request" or workflow not in CI_WORKFLOWS:
+            raise ControllerError(
+                "CI fallback accepts only allowlisted pull request workflows"
+            )
+        pull = pull_request_for_sha(repo, sha)
+        head_repo = str(pull.get("head", {}).get("repo", {}).get("full_name") or "")
+        base_ref = str(pull.get("base", {}).get("ref") or "")
+        if head_repo.lower() != repo.lower() or base_ref != "main":
+            raise ControllerError(
+                "CI fallback rejects forks and pull requests not targeting main"
+            )
+        return
+    if profile == "release":
+        if event != "push" or ref != "main" or workflow not in RELEASE_WORKFLOWS:
+            raise ControllerError(
+                "Release fallback accepts only allowlisted main push workflows"
+            )
+        return
+    if profile == "deploy":
+        if (
+            event != "workflow_dispatch"
+            or not ref.startswith("v")
+            or workflow not in DEPLOY_WORKFLOWS
+        ):
+            raise ControllerError(
+                "Deploy fallback requires an allowlisted version-tag workflow"
+            )
+        return
+    raise ControllerError("Unsupported fallback profile")
+
+
+def target_run(
+    repo: str,
+    run_id: int,
+    profile: str = "deploy",
+    expected_sha: str | None = None,
+) -> dict[str, Any]:
+    run = get_run(repo, run_id)
+    validate_target_run(repo, run, profile, expected_sha)
     return run
 
 
@@ -275,6 +416,8 @@ def read_state(path: Path) -> dict[str, Any]:
     runner_name = str(state.get("runner_name", ""))
     if not RUNNER_NAME_RE.fullmatch(runner_name):
         raise ControllerError("Invalid temporary runner name in state file")
+    if not RUNNER_LABEL_RE.fullmatch(str(state.get("runner_label", ""))):
+        raise ControllerError("Invalid temporary runner label in state file")
     return state
 
 
@@ -295,21 +438,36 @@ def make_user_data(
     repository: str,
     runner_token: str,
     runner_name: str,
+    runner_label: str,
     runner_version: str,
     runner_sha256: str,
     start_docker: bool = True,
 ) -> str:
+    provision_path = Path(__file__).with_name("image-provision.sh")
+    provision = provision_path.read_text()
+    manifest = Path(__file__).with_name("approved-artifacts.json").read_text()
     template_path = Path(__file__).with_name("guest-bootstrap.sh")
     bootstrap = template_path.read_text()
+    encoded_provision = encode(provision)
+    encoded_manifest = encode(manifest)
     encoded_bootstrap = encode(bootstrap)
     return f"""#cloud-config
 write_files:
+  - path: /usr/local/sbin/cgm-release-runner-provision.sh
+    permissions: '0700'
+    encoding: b64
+    content: {encoded_provision}
   - path: /usr/local/sbin/cgm-release-runner-bootstrap.sh
     permissions: '0700'
     encoding: b64
     content: {encoded_bootstrap}
+  - path: /tmp/approved-artifacts.json
+    permissions: '0444'
+    encoding: b64
+    content: {encoded_manifest}
 runcmd:
-  - [ bash, -c, "CGM_REPOSITORY=$(echo {encode(repository)} | base64 -d) CGM_RUNNER_TOKEN=$(echo {encode(runner_token)} | base64 -d) CGM_RUNNER_NAME=$(echo {encode(runner_name)} | base64 -d) CGM_RUNNER_VERSION=$(echo {encode(runner_version)} | base64 -d) CGM_RUNNER_SHA256=$(echo {encode(runner_sha256)} | base64 -d) CGM_SKIP_DOCKER=$(echo {encode("1" if not start_docker else "0")} | base64 -d) /usr/local/sbin/cgm-release-runner-bootstrap.sh" ]
+  - [ /usr/local/sbin/cgm-release-runner-provision.sh ]
+  - [ bash, -c, "CGM_REPOSITORY=$(echo {encode(repository)} | base64 -d) CGM_RUNNER_TOKEN=$(echo {encode(runner_token)} | base64 -d) CGM_RUNNER_NAME=$(echo {encode(runner_name)} | base64 -d) CGM_RUNNER_LABEL=$(echo {encode(runner_label)} | base64 -d) CGM_RUNNER_VERSION=$(echo {encode(runner_version)} | base64 -d) CGM_RUNNER_SHA256=$(echo {encode(runner_sha256)} | base64 -d) CGM_SKIP_DOCKER=$(echo {encode("1" if not start_docker else "0")} | base64 -d) /usr/local/sbin/cgm-release-runner-bootstrap.sh" ]
 """
 
 
@@ -485,11 +643,16 @@ def delete_runner(repo: str, runner_id: int | None, runner_name: str) -> None:
 
 
 def wait_for_runner_ready(
-    repo: str, name: str, timeout: int, state: dict[str, Any], path: Path
+    repo: str,
+    name: str,
+    runner_label: str,
+    timeout: int,
+    state: dict[str, Any],
+    path: Path,
 ) -> None:
     deadline = time.monotonic() + timeout
     last_status = "absent"
-    last_missing = {"self-hosted", "linux", "x64", LABEL}
+    last_missing = {"self-hosted", "linux", "x64", runner_label}
     while time.monotonic() < deadline:
         found = runner_by_name(repo, name)
         if found:
@@ -503,7 +666,7 @@ def wait_for_runner_ready(
                 for label in found.get("labels", [])
                 if isinstance(label, dict)
             }
-            last_missing = {"self-hosted", "linux", "x64", LABEL} - labels
+            last_missing = {"self-hosted", "linux", "x64", runner_label} - labels
             if last_status == "online" and not last_missing:
                 return
         time.sleep(5)
@@ -516,7 +679,7 @@ def wait_for_runner_ready(
 def wait_for_run(repo: str, run_id: int, timeout: int) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        run = target_run(repo, run_id)
+        run = get_run(repo, run_id)
         if (
             run.get("status") == "completed"
             and run.get("conclusion") in TERMINAL_CONCLUSIONS
@@ -552,27 +715,49 @@ def rerun_same_run(repo: str, run_id: int, run: dict[str, Any], timeout: int) ->
     gh(["run", "rerun", str(run_id), "--repo", repo])
 
 
-def activate_runner_selection(
+def activate_runs(
     *,
     repo: str,
-    run_id: int,
-    run: dict[str, Any],
+    runs: list[dict[str, Any]],
     timeout: int,
     selection_mode: str,
+    runner_label: str,
     state: dict[str, Any],
     path: Path,
 ) -> None:
     if selection_mode == "explicit":
-        # The workflow was dispatched with runner_label=cgm-release-local. As
-        # soon as this runner becomes online, GitHub resumes the existing run;
-        # canceling it here would race an already-started production release.
         return
     state["variable_change_started"] = True
     write_state(path, state)
-    set_variable(repo, LABEL)
+    set_variable(repo, runner_label)
     state["variable_changed"] = True
     write_state(path, state)
-    rerun_same_run(repo, run_id, run, timeout)
+    for run in runs:
+        rerun_same_run(repo, int(run["databaseId"]), run, timeout)
+
+
+def wait_for_runs(
+    repo: str, runs: list[dict[str, Any]], timeout: int
+) -> list[dict[str, Any]]:
+    deadline = time.monotonic() + timeout
+    pending = {int(run["databaseId"]) for run in runs}
+    final: dict[int, dict[str, Any]] = {}
+    while pending and time.monotonic() < deadline:
+        for run_id in list(pending):
+            current = get_run(repo, run_id)
+            if (
+                current.get("status") == "completed"
+                and current.get("conclusion") in TERMINAL_CONCLUSIONS
+            ):
+                final[run_id] = current
+                pending.remove(run_id)
+        if pending:
+            time.sleep(10)
+    if pending:
+        raise ControllerError(
+            f"GitHub runs did not reach a terminal state before timeout: {sorted(pending)}"
+        )
+    return [final[int(run["databaseId"])] for run in runs]
 
 
 def run_succeeded(run: dict[str, Any]) -> bool:
@@ -583,7 +768,11 @@ def cleanup(state_path_value: Path, state: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     if state.get("variable_change_started") or state.get("variable_changed"):
         try:
-            restore_variable(state["repo"], state.get("previous_runner_variable"))
+            restore_variable(
+                state["repo"],
+                state.get("previous_runner_variable"),
+                state["runner_label"],
+            )
         except ControllerError as exc:
             errors.append(str(exc))
     try:
@@ -613,15 +802,33 @@ def run_up(args: argparse.Namespace) -> int:
     validate_repo(args.repo)
     if args.run_id <= 0:
         raise ControllerError("--run-id must be positive")
+    if not args.expected_sha:
+        raise ControllerError("--expected-sha is required")
+    if args.selection_mode == "explicit" and args.profile != "deploy":
+        raise ControllerError("Explicit runner selection is allowed only for deploy")
     validate_approved_runner(args.runner_version, args.runner_sha256)
     image = Path(args.image).expanduser().resolve()
     require_prerequisites(image, args.image_sha256)
-    run = target_run(args.repo, args.run_id)
+    run = target_run(args.repo, args.run_id, args.profile, args.expected_sha)
     if run.get("status") == "completed" and run.get("conclusion") == "success":
         raise ControllerError(
             "The requested run already succeeded; no recovery is needed"
         )
-    conflicts = active_critical_runs(args.repo, args.run_id)
+    sha = str(run["headSha"]).lower()
+    runner_label = runner_label_for_sha(sha)
+    runs = related_runs(args.repo, run, args.profile, args.expected_sha)
+    if args.profile in {"ci", "release"}:
+        for candidate in runs:
+            if (
+                candidate.get("status") == "completed"
+                and candidate.get("conclusion") == "failure"
+                and not run_has_billing_failure(args.repo, int(candidate["databaseId"]))
+            ):
+                raise ControllerError(
+                    f"Run {candidate['databaseId']} failed for a reason other than GitHub Billing"
+                )
+    run_ids = {int(candidate["databaseId"]) for candidate in runs}
+    conflicts = active_critical_runs(args.repo, run_ids, sha)
     if conflicts:
         names = ", ".join(str(item.get("workflowName")) for item in conflicts)
         raise ControllerError(
@@ -647,8 +854,11 @@ def run_up(args: argparse.Namespace) -> int:
         "run_url": run.get("url"),
         "sha": run.get("headSha"),
         "workflow": run.get("workflowName"),
+        "profile": args.profile,
+        "run_ids": sorted(run_ids),
         "selection_mode": args.selection_mode,
         "runner_name": runner_name,
+        "runner_label": runner_label,
         "runner_id": None,
         "previous_runner_variable": previous,
         "variable_change_started": False,
@@ -674,6 +884,7 @@ def run_up(args: argparse.Namespace) -> int:
             repository=args.repo,
             runner_token=token,
             runner_name=runner_name,
+            runner_label=runner_label,
             runner_version=args.runner_version,
             runner_sha256=args.runner_sha256,
         )
@@ -681,32 +892,40 @@ def run_up(args: argparse.Namespace) -> int:
         process = launch_vm(vm_disk, seed_iso)
         state["vm_pid"] = process.pid
         write_state(path, state)
-        wait_for_runner_ready(args.repo, runner_name, args.runner_timeout, state, path)
+        wait_for_runner_ready(
+            args.repo,
+            runner_name,
+            runner_label,
+            args.runner_timeout,
+            state,
+            path,
+        )
         # cloud-init has completed registration once the runner is online; the
         # NoCloud seed is no longer needed and contains the registration token.
         for secret_path in (work_dir / "seed.iso", work_dir / "user-data"):
             secret_path.unlink(missing_ok=True)
-        activate_runner_selection(
+        activate_runs(
             repo=args.repo,
-            run_id=args.run_id,
-            run=run,
+            runs=runs,
             timeout=args.run_timeout,
             selection_mode=args.selection_mode,
+            runner_label=runner_label,
             state=state,
             path=path,
         )
         print(f"Local runner online for {args.repo}; state: {path}")
-        final = wait_for_run(args.repo, args.run_id, args.run_timeout)
-        print(
-            f"Run {args.run_id} finished: {final.get('conclusion')} "
-            f"SHA={final.get('headSha')} URL={final.get('url')}"
-        )
+        final_runs = wait_for_runs(args.repo, runs, args.run_timeout)
+        for final in final_runs:
+            print(
+                f"Run {final.get('databaseId')} finished: {final.get('conclusion')} "
+                f"SHA={final.get('headSha')} URL={final.get('url')}"
+            )
         errors = cleanup(path, state)
         if errors:
             for error in errors:
                 print(f"CLEANUP ERROR: {error}", file=sys.stderr)
             return 2
-        return 0 if run_succeeded(final) else 2
+        return 0 if all(run_succeeded(final) for final in final_runs) else 2
     except KeyboardInterrupt:
         print("Interrupted; cleaning up the local runner", file=sys.stderr)
         errors = cleanup(path, state)
@@ -727,6 +946,7 @@ def run_validate(args: argparse.Namespace) -> int:
     require_prerequisites(image, args.image_sha256)
 
     runner_name = f"cgm-release-local-{int(time.time())}-{os.getpid()}"
+    runner_label = LABEL_PREFIX + hashlib.sha256(runner_name.encode()).hexdigest()[:40]
     work_dir = Path(tempfile.mkdtemp(prefix="cgm-release-runner-"))
     path = (
         Path(args.state_file).expanduser().resolve()
@@ -737,6 +957,7 @@ def run_validate(args: argparse.Namespace) -> int:
         "version": STATE_VERSION,
         "repo": args.repo,
         "runner_name": runner_name,
+        "runner_label": runner_label,
         "runner_id": None,
         "previous_runner_variable": None,
         "variable_change_started": False,
@@ -762,6 +983,7 @@ def run_validate(args: argparse.Namespace) -> int:
             repository=args.repo,
             runner_token=token,
             runner_name=runner_name,
+            runner_label=runner_label,
             runner_version=args.runner_version,
             runner_sha256=args.runner_sha256,
             start_docker=args.profile == "release",
@@ -770,7 +992,14 @@ def run_validate(args: argparse.Namespace) -> int:
         process = launch_vm(vm_disk, seed_iso)
         state["vm_pid"] = process.pid
         write_state(path, state)
-        wait_for_runner_ready(args.repo, runner_name, args.runner_timeout, state, path)
+        wait_for_runner_ready(
+            args.repo,
+            runner_name,
+            runner_label,
+            args.runner_timeout,
+            state,
+            path,
+        )
         for secret_path in (work_dir / "seed.iso", work_dir / "user-data"):
             secret_path.unlink(missing_ok=True)
         print(f"Local runner validated for {args.repo}; state: {path}")
@@ -809,12 +1038,14 @@ def parser() -> argparse.ArgumentParser:
     up = subparsers.add_parser("up", help="launch, rerun and clean up one blocked run")
     up.add_argument("--repo", required=True)
     up.add_argument("--run-id", required=True, type=int)
+    up.add_argument("--expected-sha", required=True)
     up.add_argument("--image", required=True)
     up.add_argument("--image-sha256", required=True)
     up.add_argument("--runner-version", default=approved_version)
     up.add_argument("--runner-sha256", default=approved_sha256)
     up.add_argument("--runner-timeout", type=int, default=300)
     up.add_argument("--run-timeout", type=int, default=7200)
+    up.add_argument("--profile", choices=("ci", "release", "deploy"), default="deploy")
     up.add_argument(
         "--selection-mode",
         choices=("variable", "explicit"),

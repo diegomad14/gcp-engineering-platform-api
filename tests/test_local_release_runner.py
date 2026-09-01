@@ -8,6 +8,8 @@ import pytest
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts/ops/local-release-runner/runner.py"
+COMMIT_SHA = "a" * 40
+RUNNER_LABEL = f"cgm-release-local-{COMMIT_SHA}"
 SPEC = importlib.util.spec_from_file_location("local_release_runner", SCRIPT)
 assert SPEC is not None
 assert SPEC.loader is not None
@@ -20,6 +22,7 @@ def test_user_data_does_not_include_registration_token_in_plaintext():
         repository="diegomad14/example",
         runner_token="registration-token-secret",
         runner_name="cgm-release-local-123",
+        runner_label=RUNNER_LABEL,
         runner_version="2.000.0",
         runner_sha256="a" * 64,
     )
@@ -28,48 +31,92 @@ def test_user_data_does_not_include_registration_token_in_plaintext():
     bootstrap = (SCRIPT.parent / "guest-bootstrap.sh").read_bytes()
     assert base64.b64encode(bootstrap).decode() in data
     assert "CGM_RUNNER_TOKEN" in data
+    provision = (SCRIPT.parent / "image-provision.sh").read_bytes()
+    assert base64.b64encode(provision).decode() in data
+    assert "cgm-release-runner-provision.sh" in data
+    manifest = (SCRIPT.parent / "approved-artifacts.json").read_bytes()
+    assert base64.b64encode(manifest).decode() in data
+    assert "/tmp/approved-artifacts.json" in data
 
 
-def test_target_run_rejects_pull_requests():
+def test_deploy_profile_rejects_pull_requests():
     run = {
         "databaseId": 10,
         "event": "pull_request",
         "headBranch": "feature/test",
-    }
-    with mock.patch.object(local_runner, "gh_json", return_value=run):
-        with pytest.raises(local_runner.ControllerError, match="Pull request"):
-            local_runner.target_run("owner/repo", 10)
-
-
-def test_target_run_rejects_untrusted_ref():
-    run = {
-        "databaseId": 10,
-        "event": "workflow_dispatch",
-        "headBranch": "feature/test",
+        "headSha": COMMIT_SHA,
         "workflowName": "Platform Deploy",
     }
     with mock.patch.object(local_runner, "gh_json", return_value=run):
-        with pytest.raises(local_runner.ControllerError, match="main or a version tag"):
-            local_runner.target_run("owner/repo", 10)
+        with pytest.raises(local_runner.ControllerError, match="version-tag"):
+            local_runner.target_run("owner/repo", 10, "deploy", COMMIT_SHA)
 
 
-def test_target_run_rejects_non_release_workflow():
+def test_ci_profile_accepts_internal_pull_request():
     run = {
         "databaseId": 10,
-        "event": "push",
-        "headBranch": "main",
-        "workflowName": "CI",
+        "event": "pull_request",
+        "headBranch": "feature/test",
+        "headSha": COMMIT_SHA,
+        "workflowName": "Web CI",
     }
-    with mock.patch.object(local_runner, "gh_json", return_value=run):
-        with pytest.raises(
-            local_runner.ControllerError, match="release/deploy/rollback"
-        ):
-            local_runner.target_run("owner/repo", 10)
+    pull = {
+        "state": "open",
+        "head": {"sha": COMMIT_SHA, "repo": {"full_name": "owner/repo"}},
+        "base": {"ref": "main"},
+    }
+    with mock.patch.object(local_runner, "gh_json", side_effect=[run, [pull]]):
+        assert local_runner.target_run("owner/repo", 10, "ci", COMMIT_SHA) == run
+
+
+def test_ci_profile_rejects_fork_pull_request():
+    run = {
+        "databaseId": 10,
+        "event": "pull_request",
+        "headBranch": "feature/test",
+        "headSha": COMMIT_SHA,
+        "workflowName": "Web CI",
+    }
+    pull = {
+        "state": "open",
+        "head": {"sha": COMMIT_SHA, "repo": {"full_name": "fork/repo"}},
+        "base": {"ref": "main"},
+    }
+    with mock.patch.object(local_runner, "gh_json", side_effect=[run, [pull]]):
+        with pytest.raises(local_runner.ControllerError, match="rejects forks"):
+            local_runner.target_run("owner/repo", 10, "ci", COMMIT_SHA)
 
 
 def test_runner_version_must_be_numeric_semver():
     with pytest.raises(local_runner.ControllerError, match="semantic version"):
         local_runner.validate_runner_version("2.0.0/../../unexpected")
+
+
+def test_runner_label_is_bound_to_exact_commit_sha():
+    assert local_runner.runner_label_for_sha(COMMIT_SHA) == RUNNER_LABEL
+    with pytest.raises(local_runner.ControllerError, match="40-character"):
+        local_runner.runner_label_for_sha("abc123")
+
+
+def test_billing_failure_is_detected_from_job_annotation():
+    jobs = {"jobs": [{"databaseId": 123}]}
+    annotations = [
+        {
+            "message": (
+                "The job was not started because recent account payments have "
+                "failed or your spending limit needs to be increased."
+            )
+        }
+    ]
+    with mock.patch.object(local_runner, "gh_json", side_effect=[jobs, annotations]):
+        assert local_runner.run_has_billing_failure("owner/repo", 10)
+
+
+def test_non_billing_failure_is_not_recoverable_as_billing():
+    jobs = {"jobs": [{"databaseId": 123}]}
+    annotations = [{"message": "Unit tests failed"}]
+    with mock.patch.object(local_runner, "gh_json", side_effect=[jobs, annotations]):
+        assert not local_runner.run_has_billing_failure("owner/repo", 10)
 
 
 def test_approved_runner_manifest_has_valid_pins():
@@ -106,7 +153,7 @@ def test_wait_for_runner_ready_tolerates_registration_transitions(tmp_path):
                 {"name": "self-hosted"},
                 {"name": "linux"},
                 {"name": "x64"},
-                {"name": "cgm-release-local"},
+                {"name": RUNNER_LABEL},
             ],
         },
     ]
@@ -123,7 +170,12 @@ def test_wait_for_runner_ready_tolerates_registration_transitions(tmp_path):
         ),
     ):
         local_runner.wait_for_runner_ready(
-            "owner/repo", "cgm-release-local-1-1", 10, state, state_path
+            "owner/repo",
+            "cgm-release-local-1-1",
+            RUNNER_LABEL,
+            10,
+            state,
+            state_path,
         )
 
     assert state["runner_id"] == runner_id
@@ -148,6 +200,7 @@ def test_wait_for_runner_ready_reports_last_status_without_real_sleep(tmp_path):
             local_runner.wait_for_runner_ready(
                 "owner/repo",
                 "cgm-release-local-1-1",
+                RUNNER_LABEL,
                 5,
                 state,
                 tmp_path / "state.json",
@@ -177,12 +230,12 @@ def test_explicit_selection_preserves_same_queued_run(tmp_path):
         mock.patch.object(local_runner, "rerun_same_run") as rerun,
         mock.patch.object(local_runner, "write_state") as write_state,
     ):
-        local_runner.activate_runner_selection(
+        local_runner.activate_runs(
             repo="owner/repo",
-            run_id=10,
-            run={"status": "queued"},
+            runs=[{"databaseId": 10, "status": "queued"}],
             timeout=30,
             selection_mode="explicit",
+            runner_label=RUNNER_LABEL,
             state=state,
             path=tmp_path / "state.json",
         )
@@ -222,8 +275,22 @@ def test_guest_bootstrap_runs_runner_as_ubuntu_and_checks_docker():
     assert "runuser -u ubuntu -- docker info" in bootstrap
     assert "runuser -u ubuntu -- ./config.sh" in bootstrap
     assert "exec runuser -u ubuntu -- ./run.sh" in bootstrap
-    assert '--labels "cgm-release-local"' in bootstrap
+    assert '--labels "$CGM_RUNNER_LABEL"' in bootstrap
     assert "set -x" not in bootstrap
+
+
+def test_release_workflows_require_sha_bound_runner_labels():
+    root = SCRIPT.parents[3]
+    for relative in (
+        ".github/workflows/platform-deploy.yml",
+        ".github/workflows/platform-rollback.yml",
+        ".github/workflows/semantic-release.yml",
+        "templates/github-actions/platform-deploy.yml",
+        "templates/github-actions/platform-rollback.yml",
+    ):
+        workflow = (root / relative).read_text(encoding="utf-8")
+        assert "format('cgm-release-local-{0}', github.sha)" in workflow
+        assert "== 'cgm-release-local'" not in workflow
 
 
 def test_validate_ctrl_c_cleans_up_and_returns_130(tmp_path):
@@ -293,7 +360,7 @@ def test_restore_does_not_overwrite_another_operator_value():
         mock.patch.object(local_runner, "set_variable") as set_variable,
     ):
         with pytest.raises(local_runner.ControllerError, match="another operator"):
-            local_runner.restore_variable("owner/repo", None)
+            local_runner.restore_variable("owner/repo", None, RUNNER_LABEL)
 
     set_variable.assert_not_called()
 
@@ -304,7 +371,7 @@ def test_restore_is_idempotent_before_remote_change(previous):
         mock.patch.object(local_runner, "variable_value", return_value=previous),
         mock.patch.object(local_runner, "set_variable") as set_variable,
     ):
-        local_runner.restore_variable("owner/repo", previous)
+        local_runner.restore_variable("owner/repo", previous, RUNNER_LABEL)
 
     set_variable.assert_not_called()
 

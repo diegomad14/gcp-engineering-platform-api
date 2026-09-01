@@ -56,6 +56,10 @@ on:
         required: false
         type: string
         default: "v0.14.1"
+      runner-label:
+        required: false
+        type: string
+        default: ""
     secrets:
       QUALITY_API_TOKEN:
         required: true
@@ -65,7 +69,7 @@ permissions:
 
 jobs:
   quality-gate:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner-label != '' && inputs.runner-label || 'ubuntu-latest' }}
     steps:
       - name: Checkout service repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5

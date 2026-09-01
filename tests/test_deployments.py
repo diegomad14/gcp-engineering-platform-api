@@ -500,6 +500,37 @@ def test_dispatch_uses_independent_service_catalog_configuration():
     assert inputs["project_id"] == "cgm-assistant-prod"
 
 
+def test_contingency_dispatch_uses_sha_bound_runner_label():
+    from eng_platform_api.services import catalog, github_deployments
+
+    service = catalog.get_service("cgm-sanplat-web")
+    assert service is not None
+    repository = mock.MagicMock()
+    github_deployment = mock.MagicMock(id=173)
+    repository.create_deployment.return_value = github_deployment
+    workflow = repository.get_workflow.return_value
+    github = mock.MagicMock()
+    github.get_repo.return_value = repository
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        item = github_deployments.start_deployment(
+            service=service,
+            tag=_tag(),
+            requested_by="diegomad14",
+            runner_label="cgm-release-local",
+        )
+
+    expected = f"cgm-release-local-{_tag().sha}"
+    assert item.runner_label == "cgm-release-local"
+    assert item.effective_runner_label == expected
+    assert (
+        workflow.create_dispatch.call_args.kwargs["inputs"]["runner_label"] == expected
+    )
+
+
 def test_dispatch_failure_marks_github_deployment_failed():
     from eng_platform_api.services import catalog, github_deployments
 
