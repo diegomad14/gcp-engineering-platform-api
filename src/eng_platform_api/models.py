@@ -183,6 +183,23 @@ class DeploymentCreateRequest(BaseModel):
         return self
 
 
+class ReleaseAuthorizationConsumeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=1, max_length=8192)
+    repository: str = Field(min_length=1, max_length=256)
+    service_name: str = Field(min_length=1, max_length=128)
+    tag: str = Field(min_length=1, max_length=128)
+    sha: str = Field(min_length=40, max_length=64)
+    github_deployment_id: str = Field(min_length=1, max_length=64)
+    kind: Literal["deploy", "rollback"]
+
+
+class ReleaseAuthorizationConsumeResponse(BaseModel):
+    accepted: bool = True
+    jti: str
+
+
 class DeploymentItem(BaseModel):
     id: str
     service_name: str

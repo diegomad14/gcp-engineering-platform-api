@@ -44,6 +44,10 @@ on:
         required: false
         default: ""
         type: string
+      platform_authorization:
+        description: Signed authorization issued by Engineering Platform
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -75,6 +79,20 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ inputs.tag }}
+      - name: Resolve immutable release SHA
+        id: resolve-release
+        run: echo "sha=$(git rev-parse \"${{ inputs.tag }}^{commit}\")" >> "$GITHUB_OUTPUT"
+      - name: Verify Engineering Platform authorization
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-release-authorization@codex/platform-github-only
+        with:
+          token: ${{ inputs.platform_authorization }}
+          repository: ${{ github.repository }}
+          service_name: ${{ inputs.service_name }}
+          tag: ${{ inputs.tag }}
+          sha: ${{ steps.resolve-release.outputs.sha }}
+          github_deployment_id: ${{ inputs.github_deployment_id }}
+          kind: deploy
+          platform_api_url: ${{ vars.ENG_PLATFORM_API_URL }}
       - name: Validate immutable release and service configuration
         id: release
         run: |

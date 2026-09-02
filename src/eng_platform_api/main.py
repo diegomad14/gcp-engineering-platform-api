@@ -21,6 +21,7 @@ from .routers import (
     health,
     metrics,
     quality,
+    release_authorizations,
     releases,
     service_factory,
 )
@@ -57,6 +58,7 @@ app.include_router(deployments.router)
 app.include_router(metrics.router)
 app.include_router(costs.router)
 app.include_router(quality.router)
+app.include_router(release_authorizations.router)
 app.include_router(service_factory.router)
 
 logger = logging.getLogger("eng_platform_api.requests")

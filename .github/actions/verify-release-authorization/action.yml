@@ -1,0 +1,53 @@
+name: Verify Engineering Platform release authorization
+description: Reject direct service workflow dispatches and consume a one-time platform ticket.
+inputs:
+  token:
+    description: Short-lived signed release authorization
+    required: true
+  repository:
+    description: Expected GitHub repository
+    required: true
+  service_name:
+    description: Expected catalog service
+    required: true
+  tag:
+    description: Expected release tag
+    required: true
+  sha:
+    description: Expected immutable commit SHA
+    required: true
+  github_deployment_id:
+    description: GitHub Deployment identifier
+    required: true
+  kind:
+    description: deploy or rollback
+    required: true
+  target_revision:
+    description: Rollback target revision
+    required: false
+    default: ""
+  platform_api_url:
+    description: Engineering Platform API origin
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Verify signed platform ticket
+      shell: bash
+      env:
+        PLATFORM_AUTHORIZATION: ${{ inputs.token }}
+        EXPECTED_REPOSITORY: ${{ inputs.repository }}
+        EXPECTED_SERVICE_NAME: ${{ inputs.service_name }}
+        EXPECTED_TAG: ${{ inputs.tag }}
+        EXPECTED_SHA: ${{ inputs.sha }}
+        EXPECTED_DEPLOYMENT_ID: ${{ inputs.github_deployment_id }}
+        EXPECTED_KIND: ${{ inputs.kind }}
+        EXPECTED_TARGET_REVISION: ${{ inputs.target_revision }}
+        PLATFORM_API_URL: ${{ inputs.platform_api_url }}
+        ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY: ${{ vars.ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY }}
+      run: |
+        set -euo pipefail
+        test -n "$PLATFORM_AUTHORIZATION"
+        test -n "$PLATFORM_API_URL"
+        echo "::add-mask::$PLATFORM_AUTHORIZATION"
+        node "$GITHUB_ACTION_PATH/verify-release-authorization.mjs"

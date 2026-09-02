@@ -1,7 +1,8 @@
 """Security utilities for the Engineering Platform API.
 
-MVP: No authentication. Document that production requires IAP/OAuth before
-exposing the platform API publicly.
+Production deploy actions require a verified GitHub OAuth session. IAP identity
+headers are accepted only when the deployment is explicitly behind a trusted
+IAP boundary.
 
 Do NOT hardcode tokens, keys, or credentials here.
 """
@@ -21,7 +22,7 @@ def get_identity(request: Request) -> str:
     Production: Extract from IAP/OAuth headers.
     """
     iap_identity = request.headers.get("X-Goog-Authenticated-User-Email", "")
-    if iap_identity:
+    if config.auth.trust_iap_identity and iap_identity:
         return iap_identity.removeprefix("accounts.google.com:")
     github_identity = str(request.session.get("github_login", ""))
     return github_identity or ("diegomad14" if config.mock_mode else "anonymous")

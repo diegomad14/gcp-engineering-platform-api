@@ -49,10 +49,19 @@ def _local_save(items: list[dict[str, Any]]) -> None:
 
 
 @lru_cache(maxsize=4)
-def _firestore_client(project_id: str):
+def firestore_client(project_id: str):
     from google.cloud import firestore
 
     return firestore.Client(project=project_id) if project_id else firestore.Client()
+
+
+_firestore_client = firestore_client
+
+
+def release_authorization_collection() -> str:
+    return os.getenv(
+        "ENG_PLATFORM_RELEASE_AUTH_FIRESTORE_COLLECTION", ""
+    ).strip()
 
 
 def _firestore_collection():

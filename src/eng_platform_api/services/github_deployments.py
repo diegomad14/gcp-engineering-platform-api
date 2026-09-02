@@ -22,7 +22,7 @@ from ..models import (
     ReleaseTagPage,
     RunnerLabel,
 )
-from . import deployment_store
+from . import deployment_store, release_authorization
 
 _SEMVER = re.compile(
     r"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
@@ -265,6 +265,15 @@ def start_deployment(
         updated_at=now,
         github_deployment_id=github_deployment.id,
     )
+    authorization, _ = release_authorization.issue(
+        repository=repository,
+        service_name=service_name,
+        tag=tag.name,
+        sha=tag.sha,
+        github_deployment_id=github_deployment.id,
+        requested_by=requested_by,
+        kind="deploy",
+    )
     try:
         github_deployment.create_status(
             state="queued",
@@ -285,6 +294,7 @@ def start_deployment(
                 "artifact_repository": service.deployment.artifact_repository,
                 "build_context": service.deployment.build_context,
                 "health_path": service.deployment.health_path,
+                "platform_authorization": authorization,
                 "runner_label": selected_runner_label,
             },
         )
@@ -361,6 +371,16 @@ def start_rollback(
         github_deployment_id=github_deployment.id,
         production_revision=target.production_revision,
     )
+    authorization, _ = release_authorization.issue(
+        repository=repository,
+        service_name=service_name,
+        tag=target.tag,
+        sha=target.sha,
+        github_deployment_id=github_deployment.id,
+        requested_by=requested_by,
+        kind="rollback",
+        target_revision=target.production_revision,
+    )
     try:
         github_deployment.create_status(
             state="queued",
@@ -377,6 +397,9 @@ def start_rollback(
                 "project_id": service.project_id,
                 "region": service.region,
                 "health_path": service.deployment.health_path,
+                "target_sha": target.sha,
+                "platform_authorization": authorization,
+                **_runner_input(),
             },
         )
     except Exception as exc:
