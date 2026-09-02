@@ -65,7 +65,7 @@ env:
 jobs:
   rollback:
     name: Rollback production
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     environment: production
     steps:
       - name: Verify Engineering Platform authorization
