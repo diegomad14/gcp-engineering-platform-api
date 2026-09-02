@@ -422,6 +422,16 @@ def start_rollback(
 def _retry_workflow_and_inputs(
     repo: Any, service: CatalogService, item: DeploymentItem, target_revision: str
 ) -> tuple[Any, dict[str, str]]:
+    authorization, _ = release_authorization.issue(
+        repository=item.repository,
+        service_name=item.service_name,
+        tag=item.tag,
+        sha=item.sha,
+        github_deployment_id=item.github_deployment_id or 0,
+        requested_by=item.requested_by,
+        kind=item.kind,
+        target_revision=item.production_revision or target_revision,
+    )
     if item.kind == "rollback":
         revision = item.production_revision or target_revision
         if not revision:
@@ -435,6 +445,9 @@ def _retry_workflow_and_inputs(
             "project_id": service.project_id,
             "region": service.region,
             "health_path": service.deployment.health_path,
+            "target_sha": item.sha,
+            "platform_authorization": authorization,
+            **_runner_input(),
         }
         item.production_revision = revision
         return workflow, inputs
@@ -451,6 +464,7 @@ def _retry_workflow_and_inputs(
         "artifact_repository": service.deployment.artifact_repository,
         "build_context": service.deployment.build_context,
         "health_path": service.deployment.health_path,
+        "platform_authorization": authorization,
         "runner_label": item.effective_runner_label,
     }
     return workflow, inputs
