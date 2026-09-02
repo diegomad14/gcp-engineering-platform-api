@@ -64,6 +64,9 @@ configured bucket. Reports are idempotent by `service_name + commit_sha`.
   `ENG_PLATFORM_GITHUB_APP_ID`, `ENG_PLATFORM_GITHUB_INSTALLATION_ID` and
   `ENG_PLATFORM_GITHUB_PRIVATE_KEY` in production.
 - `ENG_PLATFORM_GITHUB_DEPLOYMENT_WORKFLOW`, default `platform-deploy.yml`.
+- `GCP_RELEASE_WIF_PROVIDER`: dedicated WIF provider restricted to protected
+  release tags and the platform deploy/rollback workflows. Keep the older
+  `GCP_WIF_PROVIDER` only for read-only CI validation.
 - `ENG_PLATFORM_DEPLOYMENT_FIRESTORE_COLLECTION` enables durable minimal
   metadata; local development falls back to `data/deployments.json`.
 
@@ -71,6 +74,13 @@ The GitHub App installation needs **Actions: read/write**, **Contents: read** an
 **Deployments: read/write**. The API creates one GitHub Deployment per service
 and correlates the exact Actions run from the Deployment status `log_url`.
 Only one non-terminal deployment may run for a service at a time.
+
+Normal service release workflows require a short-lived authorization issued by
+this API. The API signs it with `ENG_PLATFORM_RELEASE_SIGNING_PRIVATE_KEY`; the
+service workflow verifies the public key stored in the repository variable
+`ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY` and consumes the authorization once
+through `/api/internal/release-authorizations/consume`. Direct workflow
+dispatches without a valid platform authorization fail before WIF/GCP access.
 
 Each catalog service owns its deployment coordinates, even when multiple
 services share a repository:
@@ -98,6 +108,14 @@ GitHub remains authoritative for tags, workflow state, jobs and logs.
 - `ENG_PLATFORM_FRONTEND_URL`: exact allowed Web origin and OAuth return origin.
 - `ENG_PLATFORM_ALLOWED_GITHUB_LOGINS`: comma-separated GitHub logins allowed to
   deploy; defaults to `diegomad14`.
+- `ENG_PLATFORM_TRUST_IAP_IDENTITY`: must remain `false` unless the API is
+  exclusively behind a verified IAP boundary. Public deploy authorization uses
+  GitHub OAuth sessions only.
+- `ENG_PLATFORM_RELEASE_SIGNING_PRIVATE_KEY`: Ed25519 private key stored only
+  through Secret Manager in production.
+- `ENG_PLATFORM_RELEASE_AUTH_FIRESTORE_COLLECTION`: durable one-time ticket
+  collection; configure this in production so multi-instance Cloud Run cannot
+  replay a release authorization.
 
 Register the OAuth callback as
 `https://<api-host>/api/auth/callback`. The browser session stores only the
