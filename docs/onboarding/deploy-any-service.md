@@ -19,6 +19,10 @@ The production allowlist is maintained as the runtime variable
 service contributors receive write access only to the service repositories they
 maintain, while the Engineering Platform API repository remains restricted.
 
+The service workflows accept only a short-lived authorization issued by
+Engineering Platform. Running `workflow_dispatch` directly without starting
+the release in the platform UI is rejected before GCP authentication.
+
 ## Deploy Flow
 
 1. Open Engineering Platform Web.
