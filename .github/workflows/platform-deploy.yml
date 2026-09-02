@@ -72,7 +72,7 @@ env:
 jobs:
   verify-release:
     name: Verify release
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     outputs:
       image: ${{ steps.release.outputs.image }}
     steps:
@@ -121,7 +121,7 @@ jobs:
   build:
     name: Build image
     needs: verify-release
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -143,7 +143,7 @@ jobs:
   deploy-candidate:
     name: Deploy candidate
     needs: [verify-release, build]
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     environment: candidate
     outputs:
       revision: ${{ steps.candidate.outputs.revision }}
@@ -197,7 +197,7 @@ jobs:
   validate-candidate:
     name: Validate candidate
     needs: deploy-candidate
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     steps:
       - name: Smoke candidate revision
         run: curl --fail-with-body --retry 5 --retry-all-errors "${{ needs.deploy-candidate.outputs.url }}$HEALTH_PATH"
@@ -215,7 +215,7 @@ jobs:
   promote:
     name: Promote production
     needs: [deploy-candidate, validate-candidate]
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     environment: production
     outputs:
       previous_revision: ${{ steps.snapshot.outputs.previous_revision }}
@@ -244,7 +244,7 @@ jobs:
   validate-production:
     name: Validate production
     needs: promote
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     steps:
       - name: Smoke production
         run: curl --fail-with-body --retry 5 --retry-all-errors "${{ needs.promote.outputs.production_url }}$HEALTH_PATH"
@@ -263,7 +263,7 @@ jobs:
     name: Rollback production
     if: ${{ failure() && needs.promote.result == 'success' }}
     needs: [promote, validate-production]
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     environment: production
     steps:
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
@@ -289,7 +289,7 @@ jobs:
     name: Mark deployment failed
     if: ${{ failure() && needs.promote.result != 'success' }}
     needs: [verify-release, build, deploy-candidate, validate-candidate, promote]
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     steps:
       - name: Publish pre-traffic failure
         env:

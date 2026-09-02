@@ -64,11 +64,11 @@ def test_generate_service_plan():
     assert "semantic-release" in data["semantic_release_workflow"]
     assert "CGM_ACTIONS_RUNNER" in data["semantic_release_workflow"]
     assert (
-        "format('cgm-release-local-{0}', github.sha)"
+        "== 'cgm-release-local'"
         in data["platform_deploy_workflow"]
     )
     assert (
-        "format('cgm-release-local-{0}', github.sha)"
+        "== 'cgm-release-local'"
         in data["platform_rollback_workflow"]
     )
     assert "cgm-release-local" in " ".join(data["checklist"])
