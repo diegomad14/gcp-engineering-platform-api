@@ -571,7 +571,7 @@ def test_dispatch_uses_independent_service_catalog_configuration():
     assert inputs["project_id"] == "cgm-assistant-prod"
 
 
-def test_contingency_dispatch_uses_sha_bound_runner_label():
+def test_contingency_dispatch_uses_stable_runner_label():
     from eng_platform_api.services import catalog, github_deployments
 
     service = catalog.get_service("cgm-sanplat-web")
@@ -594,7 +594,7 @@ def test_contingency_dispatch_uses_sha_bound_runner_label():
             runner_label="cgm-release-local",
         )
 
-    expected = f"cgm-release-local-{_tag().sha}"
+    expected = "cgm-release-local"
     assert item.runner_label == "cgm-release-local"
     assert item.effective_runner_label == expected
     assert (

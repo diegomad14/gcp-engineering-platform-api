@@ -53,16 +53,19 @@ _tag_metadata_cache: dict[tuple[str, int, int], tuple[float, ReleaseTagPage]] = 
 _tag_metadata_cache_lock = Lock()
 GITHUB_WORKFLOW_DISPATCH_FAILED = "GitHub workflow dispatch failed"
 GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED = "GitHub rollback workflow dispatch failed"
-_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
-
-
 def effective_runner_label(runner_label: RunnerLabel, sha: str) -> str:
-    if runner_label == "":
-        return ""
-    normalized = sha.lower()
-    if not _COMMIT_SHA.fullmatch(normalized):
-        raise ValueError("Contingency deployments require a full commit SHA")
-    return f"cgm-release-local-{normalized}"
+    del sha  # The fallback label is intentionally stable across all workflows.
+    if runner_label not in {"", "cgm-release-local"}:
+        raise ValueError("Contingency deployments require cgm-release-local")
+    return runner_label
+
+
+def _runner_input() -> dict[str, str]:
+    """Pass only the allowlisted emergency runner label to service workflows."""
+    label = config.github.runner_label
+    if label not in {"", "cgm-release-local"}:
+        raise RuntimeError("ENG_PLATFORM_RUNNER_LABEL is not an allowed value")
+    return {"runner_label": label}
 
 
 class GitHubDispatchError(RuntimeError):
