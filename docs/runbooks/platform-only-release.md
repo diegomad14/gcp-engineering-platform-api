@@ -1,5 +1,17 @@
 # Platform-only release runbook
 
+## One-time control-plane bootstrap
+
+After merging the control-plane PR, run **Bootstrap Platform Runtime** from the
+`main` branch with the new semantic-release tag. It is restricted to
+`diegomad14`, deploys a zero-traffic candidate, smokes `/health`, promotes it,
+and restores the previous revision if the bootstrap fails.
+
+Once it succeeds, verify one normal release from Engineering Platform and then
+remove the six legacy `cgm-github-pool` deployer bindings. The bootstrap
+workflow intentionally depends on those bindings, so it becomes inoperable
+after cutover. Do not use it for routine service releases.
+
 Engineering Platform is the only normal release entrypoint. An allowlisted
 GitHub user signs in to the web UI, selects an immutable release tag, and
 starts the candidate-to-production pipeline. The pipeline promotes only after
