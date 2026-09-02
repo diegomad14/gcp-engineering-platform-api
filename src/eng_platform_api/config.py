@@ -35,6 +35,7 @@ class GitHubConfig:
     private_key: str = ""
     deployment_workflow: str = "platform-deploy.yml"
     rollback_workflow: str = "platform-rollback.yml"
+    runner_label: str = ""
 
 
 @dataclass
@@ -110,6 +111,7 @@ def load_config() -> PlatformConfig:
         rollback_workflow=os.getenv(
             "ENG_PLATFORM_GITHUB_ROLLBACK_WORKFLOW", "platform-rollback.yml"
         ),
+        runner_label=os.getenv("CGM_ACTIONS_RUNNER", "").strip(),
     )
 
     auth = AuthConfig(

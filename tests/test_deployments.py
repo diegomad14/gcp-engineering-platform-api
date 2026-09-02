@@ -284,6 +284,20 @@ def test_github_token_is_trimmed(monkeypatch):
     assert load_config().github.token == "token-with-whitespace"
 
 
+def test_runner_label_is_allowlisted_and_forwarded(monkeypatch):
+    from eng_platform_api.config import load_config
+    from eng_platform_api.services import github_deployments
+
+    monkeypatch.setenv("CGM_ACTIONS_RUNNER", "cgm-release-local")
+    assert load_config().github.runner_label == "cgm-release-local"
+
+    with mock.patch.object(github_deployments.config.github, "runner_label", "cgm-release-local"):
+        assert github_deployments._runner_input() == {"runner_label": "cgm-release-local"}
+    with mock.patch.object(github_deployments.config.github, "runner_label", "arbitrary-runner"):
+        with pytest.raises(RuntimeError, match="not an allowed value"):
+            github_deployments._runner_input()
+
+
 def test_create_deployment_hides_upstream_error_details(client):
     with mock.patch(
         "eng_platform_api.routers.deployments.github_deployments.get_tag",

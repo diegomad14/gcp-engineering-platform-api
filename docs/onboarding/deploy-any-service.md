@@ -13,6 +13,12 @@ Platform catalog and is marked deployment-ready.
 You do **not** need GCP Console, a service account JSON key, local GCP
 credentials, `gcloud run deploy`, `gh workflow run`, or direct GitHub API calls.
 
+The production allowlist is maintained as the runtime variable
+`ENG_PLATFORM_ALLOWED_GITHUB_LOGINS`. The current operators are
+`diegomad14` and `angelmarin1122-coder`. Repository write access is separate:
+service contributors receive write access only to the service repositories they
+maintain, while the Engineering Platform API repository remains restricted.
+
 ## Deploy Flow
 
 1. Open Engineering Platform Web.
@@ -50,3 +56,11 @@ platform catalog.
 
 Do not bypass readiness with manual Cloud Run commands. Manual `gcloud` traffic
 operations are reserved for authorized incident response runbooks only.
+
+## Runner contingency
+
+The normal release path uses GitHub-hosted runners. During a hosted-runner
+outage, the platform owner may set the repository variable
+`CGM_ACTIONS_RUNNER=cgm-release-local` after confirming that the ephemeral
+repository-scoped runner is online. Only the exact value `cgm-release-local` is
+accepted, and release workflows still require a protected branch/tag and WIF.
