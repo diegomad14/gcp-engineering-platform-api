@@ -3,10 +3,34 @@
     {
       "service_name": "cgm-sanplat-api",
       "operational_secrets": [
-        {"key": "WM_BASE_URL", "secret_id": "wm-base-url", "description": "URL HTTPS de WM", "required": true, "editable": true},
-        {"key": "WM_USERNAME", "secret_id": "wm-username", "description": "Usuario de WM", "required": true, "editable": true},
-        {"key": "WM_PASSWORD", "secret_id": "wm-password", "description": "Contraseña de WM", "required": true, "editable": true},
-        {"key": "WM_API_KEY", "secret_id": "wm-api-key", "description": "API key opcional de WM", "required": false, "editable": true}
+        {
+          "key": "WM_BASE_URL",
+          "secret_id": "wm-base-url",
+          "description": "URL HTTPS de WM",
+          "required": true,
+          "editable": true
+        },
+        {
+          "key": "WM_USERNAME",
+          "secret_id": "wm-username",
+          "description": "Usuario de WM",
+          "required": true,
+          "editable": true
+        },
+        {
+          "key": "WM_PASSWORD",
+          "secret_id": "wm-password",
+          "description": "Contraseña de WM",
+          "required": true,
+          "editable": true
+        },
+        {
+          "key": "WM_API_KEY",
+          "secret_id": "wm-api-key",
+          "description": "API key opcional de WM",
+          "required": false,
+          "editable": true
+        }
       ],
       "repository": "diegomad14/cgm-sanplat-api",
       "owner": "cgm",
@@ -43,7 +67,20 @@
         "image_name": "cgm-sanplat-api",
         "artifact_repository": "cgm-sanplat-repo",
         "build_context": ".",
-        "health_path": "/health"
+        "health_path": "/health",
+        "auxiliary_services": [
+          "cgm-sanplat-job-dispatcher",
+          "cgm-sanplat-job-worker"
+        ],
+        "auxiliary_jobs": [
+          "cgm-sanplat-clock-sync-worker",
+          "cgm-sanplat-data-recovery-worker",
+          "cgm-sanplat-fnd-ip-sync-worker",
+          "cgm-sanplat-fnd-observation-worker",
+          "cgm-sanplat-readings-export-worker",
+          "cgm-sanplat-smarti-prevention-worker",
+          "cgm-sanplat-sync-worker"
+        ]
       },
       "finops": {
         "service": "cgm-sanplat-api",
@@ -119,7 +156,10 @@
         "image_name": "cgm-bot-api",
         "artifact_repository": "cgm-sanplat-repo",
         "build_context": "services/cgm-bot-api",
-        "health_path": "/health"
+        "health_path": "/health",
+        "auxiliary_services": [
+          "cgm-bot-bulk-worker"
+        ]
       },
       "finops": {
         "service": "cgm-bot-api",

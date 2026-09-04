@@ -596,6 +596,10 @@ def _metadata_from_statuses(repo: Any, item: DeploymentItem) -> int | None:
 
 def refresh(item: DeploymentItem) -> DeploymentItem:
     """Project GitHub workflow jobs into the platform's friendly stage model."""
+    if item.execution_repository:
+        # Only the transactional OIDC-bound callback can finalize a central release.
+        # A delayed UI refresh must not overwrite its result or applied manifest.
+        return deployment_store.get(item.id) or item
     if config.mock_mode:
         return item
     repo = github_client().get_repo(item.repository)
@@ -604,7 +608,12 @@ def refresh(item: DeploymentItem) -> DeploymentItem:
         if not item.github_run_id or not item.production_revision:
             discovered_run_id = _metadata_from_statuses(repo, item)
         run_id = item.github_run_id or discovered_run_id
-        run = repo.get_workflow_run(run_id) if run_id else None
+        executor = (
+            github_client().get_repo(item.execution_repository)
+            if item.execution_repository
+            else repo
+        )
+        run = executor.get_workflow_run(run_id) if run_id else None
     except Exception:
         item.error = "Unable to read GitHub workflow"
         return item

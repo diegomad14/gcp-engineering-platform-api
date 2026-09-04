@@ -148,6 +148,20 @@
               "health_path": {
                 "type": "string",
                 "pattern": "^/"
+              },
+              "auxiliary_services": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9-]+$"
+                }
+              },
+              "auxiliary_jobs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9-]+$"
+                }
               }
             }
           },
