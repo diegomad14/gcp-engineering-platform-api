@@ -41,7 +41,7 @@ from the daily service release process.
 ## Release federation (2026-09-04)
 
 The release WIF provider accepts only the Cloud Deploy Platform GitHub App
-(actor ID `306096861`), `workflow_dispatch` on a `refs/tags/v*` ref, the six
+(actor ID `306096861`), `workflow_dispatch` on a `refs/tags/v*` ref for deploy or `main` for rollback, the six
 catalog repositories, and each repository's exact Platform Deploy or Platform
 Rollback workflow path. Direct operator dispatch cannot authenticate through
 this provider. The action verifies the trusted signing key supplied explicitly
@@ -56,3 +56,9 @@ condition is recorded in `docs/quality/release-wif-policy.json`.
 
 Keep the `cgm-release-local` allowlist and exact-SHA contingency restrictions;
 this federation configuration does not authorize arbitrary local runners.
+
+The API validates current exact-SHA quality evidence before creating or retrying
+a deployment. Historical tags cannot invoke old deploy workflows to bypass the
+policy. Manual rollback always dispatches the current `main` rollback workflow,
+with the historical tag, SHA and promoted revision as inputs. This validates
+original evidence and image identity without requalifying historical code.
