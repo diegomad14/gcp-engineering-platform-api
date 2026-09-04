@@ -99,6 +99,7 @@ jobs:
           github_deployment_id: ${{ inputs.github_deployment_id }}
           kind: deploy
           platform_api_url: ${{ vars.ENG_PLATFORM_API_URL }}
+          signing_public_key: ${{ vars.ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY }}
       - name: Validate immutable release and service configuration
         id: release
         env:

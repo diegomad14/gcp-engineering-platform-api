@@ -89,7 +89,7 @@ jobs:
           sha="$(git rev-parse "$RELEASE_REF^{commit}")"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - name: Verify Engineering Platform authorization
-        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-release-authorization@2a18490
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-release-authorization@1bcfe1025690e603375b0c5706bd58280c2889c5
         with:
           token: ${{ inputs.platform_authorization }}
           repository: ${{ github.repository }}
@@ -99,6 +99,7 @@ jobs:
           github_deployment_id: ${{ inputs.github_deployment_id }}
           kind: deploy
           platform_api_url: ${{ vars.ENG_PLATFORM_API_URL }}
+          signing_public_key: ${{ vars.ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY }}
       - name: Validate immutable release and service configuration
         id: release
         run: |
