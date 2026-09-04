@@ -132,3 +132,31 @@ def test_result_accepts_only_sanitized_metadata():
         response = CLIENT.post(path, json={"status": "FAILED"})
     assert response.status_code == 503
     assert "private" not in response.text
+
+
+@pytest.mark.parametrize(
+    "operation,body",
+    [("progress", {"stage": "promote"}), ("checkpoint", {"services": {}, "jobs": {}})],
+)
+def test_runtime_boundaries_forward_only_oidc_authorized_metadata(operation, body):
+    path = ROOT + str(uuid4()) + "/" + operation
+    with patch.object(routes.central_releases, operation) as callback:
+        response = CLIENT.post(path, json=body, headers={"X-GitHub-OIDC": "identity"})
+    assert response.json() == {"accepted": True}
+    assert callback.call_args.args[1] == "identity"
+    with patch.object(
+        routes.central_releases, operation, side_effect=RuntimeError("private")
+    ):
+        response = CLIENT.post(path, json=body)
+    assert response.status_code == 503
+    assert "private" not in response.text
+
+
+def test_progress_rejects_arbitrary_fields():
+    assert (
+        CLIENT.post(
+            ROOT + str(uuid4()) + "/progress",
+            json={"stage": "promote", "value": "private"},
+        ).status_code
+        == 422
+    )

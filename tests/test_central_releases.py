@@ -509,3 +509,47 @@ def test_reconciliation_cannot_override_concurrent_checkpoint(db):
             db, "execution", "deployment", {"status": "FAILED"}, before_mutation=True
         )
     assert "eng_platform_release_locks/service" in db.data
+
+
+def test_progress_revalidates_quality_before_candidate_and_promotion(db):
+    item = seed(db)
+    db.data["deployments/deployment"]["stages"] = [
+        step.model_dump()
+        for step in central.github_deployments.default_stages("deploy")
+    ]
+    selected = selected_plan() | {"tag": "v1.0.0", "sha": "a" * 40}
+    record = {"plan": selected, "operator": "angel", "deployment_id": item.id}
+    client = Mock()
+    client.get_repo.return_value.get_commit.return_value.sha = selected["sha"]
+    with (
+        patch.object(central, "authorized_execution", return_value=(db, record)),
+        patch.object(central.config.auth, "allowed_logins", ("angel",)),
+        patch.object(central.catalog, "get_service", return_value=Mock()),
+        patch.object(central.github_deployments, "github_client", return_value=client),
+        patch.object(plans, "require_quality") as quality,
+    ):
+        for stage in (
+            "deploy-candidate",
+            "validate-candidate",
+            "promote",
+            "validate-production",
+        ):
+            central.progress("execution", "identity", stage)
+        assert quality.call_count == 2
+        assert db.data["deployments/deployment"]["status"] == "VALIDATING_PRODUCTION"
+        client.get_repo.return_value.get_commit.return_value.sha = "b" * 40
+        with pytest.raises(plans.ReleasePlanError, match="tag moved"):
+            central.progress("execution", "identity", "promote")
+
+
+def test_progress_rechecks_operator_revocation(db):
+    with (
+        patch.object(
+            central, "authorized_execution", return_value=(db, {"operator": "revoked"})
+        ),
+        patch.object(central.config.auth, "allowed_logins", ("angel",)),
+    ):
+        with pytest.raises(central.release_authorization.ReleaseAuthorizationError):
+            central.progress("execution", "identity", "promote")
+    with pytest.raises(plans.ReleasePlanError):
+        central.progress("execution", "identity", "invented-stage")
