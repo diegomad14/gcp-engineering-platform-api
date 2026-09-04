@@ -1,0 +1,11 @@
+{
+  "name": "projects/546821492326/locations/global/workloadIdentityPools/cgm-release-pool/providers/cgm-release-oidc",
+  "attributeCondition": "assertion.repository in ['diegomad14/gcp-engineering-platform-api','diegomad14/gcp-engineering-platform-web','diegomad14/cgm-bot-core','diegomad14/cgm-sanplat-api','diegomad14/cgm-sanplat-web','diegomad14/communications-ms'] && assertion.actor_id == '306096861' && assertion.event_name == 'workflow_dispatch' && ((assertion.ref.startsWith('refs/tags/v') && assertion.workflow == 'Platform Deploy' && assertion.workflow_ref == assertion.repository + '/.github/workflows/platform-deploy.yml@' + assertion.ref) || (assertion.ref == 'refs/heads/main' && assertion.workflow == 'Platform Rollback' && assertion.workflow_ref == assertion.repository + '/.github/workflows/platform-rollback.yml@' + assertion.ref))",
+  "attributeMapping": {
+    "attribute.ref": "assertion.ref",
+    "attribute.ref_protected": "assertion.ref_protected",
+    "attribute.repository": "assertion.repository",
+    "attribute.workflow": "assertion.workflow",
+    "google.subject": "assertion.sub"
+  }
+}

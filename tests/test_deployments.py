@@ -30,6 +30,7 @@ def isolated_store():
         .decode()
     )
     with (
+        mock.patch("eng_platform_api.routers.deployments._require_release_quality"),
         mock.patch(
             "eng_platform_api.services.deployment_store._DEFAULT_STORE_PATH",
             tmp_store,
@@ -947,6 +948,7 @@ def test_start_rollback_dispatches_with_independent_service_configuration():
     repository.get_workflow.assert_called_once_with("platform-rollback.yml")
     inputs = workflow.create_dispatch.call_args.kwargs["inputs"]
     assert inputs["service_name"] == "cgm-sanplat-web"
+    assert workflow.create_dispatch.call_args.kwargs["ref"] == "main"
     assert inputs["target_tag"] == target.tag
     assert inputs["target_revision"] == target.production_revision
     assert inputs["project_id"] == "cgm-assistant-prod"
@@ -1402,6 +1404,7 @@ def test_retry_dispatch_rollback_branch_reuses_target_revision():
     assert retried.production_revision == "eng-platform-api-00010-abc"
     repository.get_workflow.assert_called_once_with("platform-rollback.yml")
     inputs = workflow.create_dispatch.call_args.kwargs["inputs"]
+    assert workflow.create_dispatch.call_args.kwargs["ref"] == "main"
     assert inputs["target_revision"] == "eng-platform-api-00010-abc"
 
 

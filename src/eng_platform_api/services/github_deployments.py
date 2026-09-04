@@ -400,7 +400,7 @@ def start_rollback(
         )
         workflow = repo.get_workflow(config.github.rollback_workflow)
         workflow.create_dispatch(
-            ref=target.tag,
+            ref="main",
             inputs={
                 "service_name": service_name,
                 "target_tag": target.tag,
@@ -514,7 +514,9 @@ def retry_dispatch(
         workflow, inputs = _retry_workflow_and_inputs(
             repo, service, item, target_revision
         )
-        workflow.create_dispatch(ref=item.tag, inputs=inputs)
+        workflow.create_dispatch(
+            ref="main" if item.kind == "rollback" else item.tag, inputs=inputs
+        )
     except Exception as exc:
         item.status = "FAILED"
         item.current_stage = "dispatch"

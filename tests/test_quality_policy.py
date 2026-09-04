@@ -441,3 +441,95 @@ def test_composite_release_authorization_uses_explicit_public_key_input():
             "signing_public_key: ${{ vars.ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY }}"
             in workflow
         )
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["missing", "failed", "stale", "legacy", "wrong_repo", "unavailable", "valid"],
+)
+def test_release_dispatch_requires_server_evidence_before_github(monkeypatch, kind):
+    from unittest.mock import Mock
+    from fastapi.testclient import TestClient
+    from eng_platform_api.main import app
+    from eng_platform_api.models import QualityReport, ReleaseTag, DeploymentItem
+    from eng_platform_api.routers import deployments, quality
+
+    catalog_service = service().model_copy(update={"deployment_ready": True})
+    report = QualityReport(
+        **payload().model_dump(),
+        quality_gate_status="PASSED",
+        received_at=datetime.now(timezone.utc).isoformat(),
+    )
+    if kind == "failed":
+        report.quality_gate_status = "FAILED"
+    if kind == "stale":
+        report.generated_at = (
+            datetime.now(timezone.utc) - timedelta(hours=169)
+        ).isoformat()
+    if kind == "legacy":
+        report.policy_version = "oss-v1"
+    if kind == "wrong_repo":
+        report.repository = "other/repo"
+    getter = Mock(return_value=None if kind == "missing" else report)
+    if kind == "unavailable":
+        getter.side_effect = RuntimeError("store unavailable")
+    monkeypatch.setattr(quality.catalog, "get_service", lambda _: catalog_service)
+    monkeypatch.setattr(quality.quality_store, "get_report", getter)
+    monkeypatch.setattr(deployments, "require_deployer", lambda _: "operator")
+    monkeypatch.setattr(
+        deployments.deployment_store, "find_by_idempotency_key", lambda _: None
+    )
+    monkeypatch.setattr(deployments, "_active_deployment", lambda _: None)
+    monkeypatch.setattr(
+        deployments.github_deployments,
+        "get_tag",
+        lambda *_: ReleaseTag(name="v1.0.0", sha="a" * 40),
+    )
+    item = DeploymentItem(
+        id="id",
+        service_name="test-api",
+        repository="test/api",
+        tag="v1.0.0",
+        sha="a" * 40,
+    )
+    dispatch = Mock(return_value=item)
+    monkeypatch.setattr(deployments.github_deployments, "start_deployment", dispatch)
+    monkeypatch.setattr(deployments.deployment_store, "save", lambda item, _: item)
+    response = TestClient(app).post(
+        "/api/services/test-api/deployments", json={"tag": "v1.0.0"}
+    )
+    if kind == "valid":
+        assert response.status_code == 202
+        dispatch.assert_called_once()
+    else:
+        assert response.status_code in (404, 409, 502)
+        dispatch.assert_not_called()
+
+
+def test_dispatch_retry_rechecks_quality_without_requalifying_rollback(monkeypatch):
+    from unittest.mock import Mock
+    from fastapi import HTTPException
+    from eng_platform_api.models import DeploymentItem
+    from eng_platform_api.routers import deployments
+
+    item = DeploymentItem(
+        id="id",
+        service_name="test-api",
+        repository="test/api",
+        tag="v1.0.0",
+        sha="a" * 40,
+    )
+    check = Mock(side_effect=HTTPException(status_code=409, detail="stale"))
+    retry = Mock(return_value=item)
+    monkeypatch.setattr(deployments, "_require_release_quality", check)
+    monkeypatch.setattr(deployments.github_deployments, "retry_dispatch", retry)
+    monkeypatch.setattr(deployments.deployment_store, "save", lambda item, _: item)
+    with pytest.raises(HTTPException):
+        deployments._retry_failed_dispatch(service(), item, "key", "failed")
+    retry.assert_not_called()
+    item.kind = "rollback"
+    deployments._retry_failed_dispatch(
+        service(), item, "key", "failed", "previous-revision"
+    )
+    retry.assert_called_once()
+    assert check.call_count == 1

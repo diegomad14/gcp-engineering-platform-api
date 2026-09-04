@@ -22,6 +22,7 @@ from ..models import (
 )
 from ..security import require_deployer
 from ..services import catalog, deployment_store, github_deployments
+from .quality import get_quality_report
 
 router = APIRouter(prefix="/api", tags=["deployments"])
 _GITHUB_UNAVAILABLE = "GitHub unavailable"
@@ -55,6 +56,14 @@ def _require_deployment_ready(service) -> None:
         status_code=409,
         detail=f"Service '{service.service_name}' is not ready for platform deploy: {blockers}",
     )
+
+
+def _require_release_quality(service, sha: str) -> None:
+    report = get_quality_report(service.service_name, sha, for_release=True)
+    if report.quality_gate_status != "PASSED":
+        raise HTTPException(
+            status_code=409, detail="Release quality evidence is not PASSED"
+        )
 
 
 def _active_deployment(service_name: str) -> DeploymentItem | None:
@@ -103,6 +112,8 @@ def _save_dispatch_error(
 def _retry_failed_dispatch(
     service, existing: DeploymentItem, key: str, detail: str, target_revision: str = ""
 ) -> DeploymentItem:
+    if existing.kind == "deploy":
+        _require_release_quality(service, existing.sha)
     try:
         retried = github_deployments.retry_dispatch(
             service=service, item=existing, target_revision=target_revision
@@ -201,6 +212,7 @@ def create_deployment(
             raise HTTPException(status_code=404, detail=f"Unknown tag '{payload.tag}'")
         if not tag.eligible:
             raise HTTPException(status_code=409, detail=tag.reason)
+        _require_release_quality(service, tag.sha)
         item = github_deployments.start_deployment(
             service=service,
             tag=tag,
