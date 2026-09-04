@@ -347,3 +347,63 @@ def test_factory_emits_complete_oss_gate_and_sources():
         == "oss-v2"
     )
     assert plan.sonar_properties == ""
+
+
+def test_runner_emits_complete_differential_check_for_ci_summary(tmp_path, monkeypatch):
+    import json
+    import sys
+
+    scripts = Path(__file__).parents[1] / "scripts/quality"
+    monkeypatch.syspath_prepend(str(scripts))
+    spec = importlib.util.spec_from_file_location("runner", scripts / "quality_gate.py")
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "quality_gate.py",
+            "--service-name",
+            "test-api",
+            "--repository",
+            "test/api",
+            "--commit-sha",
+            "a" * 40,
+            "--profile",
+            "python",
+            "--working-directory",
+            str(tmp_path),
+            "--output",
+            str(tmp_path / "report.json"),
+        ],
+    )
+    monkeypatch.setattr(
+        runner,
+        "_run",
+        lambda *a: {
+            "returncode": 0,
+            "duration": 0,
+            "output": "passed",
+            "skipped": False,
+        },
+    )
+    monkeypatch.setattr(runner, "_version", lambda *a: "test-version")
+    monkeypatch.setattr(runner, "_coverage", lambda *a: 100)
+    monkeypatch.setattr(runner, "resolve_base", lambda *a: "b" * 40)
+    monkeypatch.setattr(
+        runner,
+        "differential",
+        lambda *a: {
+            "policy_version": "oss-v2",
+            "base_sha": "b" * 40,
+            "changed_lines": 5,
+            "covered_changed_lines": 4,
+            "differential_coverage": 80,
+            "differential_threshold": 80,
+        },
+    )
+    assert runner.main() == 0
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert all(isinstance(check["findings"], int) for check in report["checks"])
+    assert report["checks"][-1]["category"] == "differential_coverage"
+    assert not policy_errors(QualityReportCreate(**report), service())
