@@ -1,0 +1,21 @@
+name: Verify rollback provenance
+description: Verify previous promotion, historical evidence and the actual revision image.
+inputs:
+  platform-api-url:
+    required: true
+    description: Engineering Platform API URL
+  service-name:
+    required: true
+    description: Catalog service
+  revision:
+    required: true
+    description: Previously promoted revision
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        QUALITY_URL: ${{ inputs.platform-api-url }}
+        QUALITY_SERVICE: ${{ inputs.service-name }}
+        QUALITY_REVISION: ${{ inputs.revision }}
+      run: python3 "${{ github.action_path }}/verify.py"

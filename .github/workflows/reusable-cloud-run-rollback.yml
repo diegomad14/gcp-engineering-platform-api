@@ -83,37 +83,27 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
-      - name: Verify quality evidence for rollback target
-        env:
-          QUALITY_GATE_ENABLED: ${{ inputs.quality-gate-enabled }}
-          QUALITY_COMMIT_SHA: ${{ inputs.quality-commit-sha }}
-          PLATFORM_API_URL: ${{ inputs.platform-api-url }}
-          QUALITY_API_TOKEN: ${{ secrets.QUALITY_API_TOKEN }}
-          API_SERVICE_NAME: ${{ inputs.api-service-name }}
-          WEB_SERVICE_NAME: ${{ inputs.web-service-name }}
-          ROLLBACK_API: ${{ inputs.rollback-api }}
-          ROLLBACK_WEB: ${{ inputs.rollback-web }}
-        run: |
-          set -euo pipefail
-          [ "$QUALITY_GATE_ENABLED" = "true" ] || exit 0
-          test -n "$PLATFORM_API_URL" || (echo "platform-api-url is required when quality gate is enabled" && exit 1)
-          test -n "$QUALITY_COMMIT_SHA" || (echo "quality-commit-sha is required for rollback" && exit 1)
-          verify_service() {
-            local service="$1"
-            curl --fail-with-body --retry 3 \
-              -H "Authorization: Bearer $QUALITY_API_TOKEN" \
-              "$PLATFORM_API_URL/api/quality/services/$service/commits/$QUALITY_COMMIT_SHA" \
-              | python3 -c 'import json,sys; d=json.load(sys.stdin); status=d.get("quality_gate_status"); print("{}: {}".format(d.get("service_name"), status)); sys.exit(0 if status=="PASSED" else 1)'
-          }
-          [ "$ROLLBACK_API" != "true" ] || verify_service "$API_SERVICE_NAME"
-          [ "$ROLLBACK_WEB" != "true" ] || verify_service "$WEB_SERVICE_NAME"
-
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
         with:
           workload_identity_provider: ${{ inputs.workload-identity-provider }}
           service_account: ${{ inputs.deployer-service-account }}
 
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f
+
+      - name: Verify recorded api rollback provenance
+        if: ${{ inputs.rollback-api }}
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-rollback@fix/oss-release-quality
+        with:
+          platform-api-url: ${{ inputs.platform-api-url }}
+          service-name: ${{ inputs.api-service-name }}
+          revision: ${{ inputs.api-rollback-revision }}
+      - name: Verify recorded web rollback provenance
+        if: ${{ inputs.rollback-web }}
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-rollback@fix/oss-release-quality
+        with:
+          platform-api-url: ${{ inputs.platform-api-url }}
+          service-name: ${{ inputs.web-service-name }}
+          revision: ${{ inputs.web-rollback-revision }}
 
       - name: Snapshot current state
         run: |

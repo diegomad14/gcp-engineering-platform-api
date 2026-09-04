@@ -1,71 +1,53 @@
-# Open Source Quality Gate
+# OSS release quality policy
 
-The platform replaces SonarQube with a composable, blocking workflow based on
-open source tools. It runs once for each service and commit, publishes a JSON
-report, and lets deploy workflows reuse that evidence.
+Policy `oss-v2` replaces SonarCloud for the six active CGM services. The normalized
+report and its exact repository/service/commit identity authorize new releases.
+Historical `oss-v1` reports remain readable but cannot authorize a new candidate.
 
-## Required repository configuration
+## Required controls
 
-Variables:
+Preserve native CI checks, tests, lint, formatting, types/build, Semgrep ERROR
+findings and Trivy HIGH/CRITICAL dependency, secret and configuration findings.
+Global minimums: Engineering Platform API, SanPlat API/Web and communications-ms
+70%; Engineering Platform Web and cgm-bot-api 80%. Preserve stricter native
+branch/function/statement thresholds. The server checks catalog policy itself.
 
-- `ENG_PLATFORM_API_URL`
+Changed executable lines require 80% coverage. PRs use the merge base with the
+PR target; main pushes use the event's previous SHA, including multi-commit
+pushes. Manual reruns must preserve the original base SHA. No executable changes
+produce N/A, never a fabricated 100%. Missing or incomplete coverage fails.
+`.quality-sources.json` lists source roots and justified exclusions relative to
+the service working directory. Instrument the entire source set, including
+unimported files. Detailed Python JSON or LCOV is required.
 
-Secrets:
+## Evidence and release
 
-- `QUALITY_API_TOKEN`
+`POST /api/quality/reports` accepts additive policy/base/count/coverage fields.
+`GET /api/quality/services/{service}/commits/{sha}?for_release=true` validates
+current catalog requirements. Historical reads omit `for_release`.
+Semantic release waits for evidence for its exact main SHA. Candidate creation
+and promotion both require PASSED oss-v2 evidence younger than 168 hours.
+Provider failures, missing evidence and mismatched commits fail closed.
+Only the workflow that tested the checked-out commit may publish its report;
+PR merge evidence cannot authorize a different main commit.
 
-Example:
+Rollback uses `/api/quality/services/{service}/rollback-targets/{revision}`:
+require an originally successful production deployment, original PASSED evidence,
+and compare the actual Cloud Run revision digest against the recorded release
+image. Evidence age and new policy requirements do not requalify an old release.
+Automatic rollback to the just-recorded previous revision remains available.
 
-```yaml
-jobs:
-  quality:
-    uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-quality-gate.yml@v0.15.0
-    with:
-      service-name: example-api
-      profile: python
-      working-directory: .
-      coverage-threshold: 70
-      platform-api-url: ${{ vars.ENG_PLATFORM_API_URL }}
-    secrets:
-      QUALITY_API_TOKEN: ${{ secrets.QUALITY_API_TOKEN }}
-```
+## Rollout
 
-## Profiles and blocking policy
+First deploy additive report support with current checks and the new policy
+checks both passing. Preserve original evidence and new report artifacts for
+that bootstrap release. Then pin callers and the implementation to the released
+immutable platform revision, run each service gate and activate its new path.
+Remove Sonar checks and scans as part of the replacement, then remove exclusive
+credentials once no active consumer remains. Do not delete analysis history.
+No subscription/billing changes are part of this migration.
 
-| Profile | Required checks |
-|---|---|
-| `python` | pytest coverage, Ruff lint/format, compile check, Semgrep, Trivy |
-| `node` | tests and coverage, build, ESLint, TypeScript, Semgrep, Trivy |
-| `static` | build, ESLint, Semgrep and Trivy; coverage is not required |
-
-Python and Node fail below 70% coverage. Semgrep runs blocking ERROR rules.
-Trivy blocks HIGH/CRITICAL dependency findings, secrets and misconfigurations.
-Commands can be overridden through reusable-workflow inputs when a repository
-uses a different test runner or directory layout.
-
-The workflow always uploads its report and attempts to register it before
-returning a failed status.
-
-## Deployment evidence
-
-Set these inputs on release workflows:
-
-```yaml
-platform-api-url: ${{ vars.ENG_PLATFORM_API_URL }}
-quality-gate-enabled: true
-quality-commit-sha: ${{ github.sha }}
-```
-
-Promotion and rollback callers must explicitly provide the commit SHA belonging
-to the candidate or known-good revision. Only `PASSED` evidence is accepted;
-missing, failed or stale evidence blocks the workflow.
-
-## Platform runtime
-
-Configure `ENG_PLATFORM_QUALITY_INGEST_TOKEN` and a private
-`ENG_PLATFORM_QUALITY_BUCKET`. The API writes:
-
-- `quality/reports/<service>/<sha>.json`
-- `quality/latest/<service>.json`
-
-Without a bucket, local development writes the same layout below `data/`.
+Runner restrictions and the existing candidate/promote model remain unchanged.
+GitHub branch protection, where available, must require OSS checks instead of
+Sonar. Release workflow verification remains mandatory independently of billing
+or branch-protection availability. See the canonical wiki `release_process`.

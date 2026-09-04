@@ -44,7 +44,7 @@ on:
       quality-gate-enabled:
         required: false
         type: boolean
-        default: false
+        default: true
       quality-commit-sha:
         required: false
         type: string
@@ -99,15 +99,16 @@ jobs:
           PROMOTE_WEB: ${{ inputs.promote-web }}
         run: |
           set -euo pipefail
-          [ "$QUALITY_GATE_ENABLED" = "true" ] || exit 0
+          [ "$QUALITY_GATE_ENABLED" = "true" ] || (echo "Release quality is mandatory"; exit 1)
           test -n "$PLATFORM_API_URL" || (echo "platform-api-url is required when quality gate is enabled" && exit 1)
           test -n "$QUALITY_COMMIT_SHA" || (echo "quality-commit-sha is required for promotion" && exit 1)
+          export VERIFIED_SHA="$QUALITY_COMMIT_SHA"
           verify_service() {
             local service="$1"
             curl --fail-with-body --retry 3 \
               -H "Authorization: Bearer $QUALITY_API_TOKEN" \
-              "$PLATFORM_API_URL/api/quality/services/$service/commits/$QUALITY_COMMIT_SHA" \
-              | python3 -c 'import json,sys; d=json.load(sys.stdin); status=d.get("quality_gate_status"); print("{}: {}".format(d.get("service_name"), status)); sys.exit(0 if status=="PASSED" else 1)'
+              "$PLATFORM_API_URL/api/quality/services/$service/commits/$QUALITY_COMMIT_SHA?for_release=true" \
+              | python3 -c 'import json,sys; d=json.load(sys.stdin); status=d.get("quality_gate_status"); print("{}: {}".format(d.get("service_name"), status)); sys.exit(0 if status=="PASSED" and d.get("policy_version")=="oss-v2" and d.get("commit_sha")==__import__("os").environ.get("VERIFIED_SHA") and d.get("repository")==__import__("os").environ.get("GITHUB_REPOSITORY") else 1)'
           }
           [ "$PROMOTE_API" != "true" ] || verify_service "$API_SERVICE_NAME"
           [ "$PROMOTE_WEB" != "true" ] || verify_service "$WEB_SERVICE_NAME"

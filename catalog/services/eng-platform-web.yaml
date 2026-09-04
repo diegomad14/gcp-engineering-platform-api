@@ -17,3 +17,9 @@ finops:
   env: prod
   owner: platform
   cost_center: platform
+quality:
+  enabled: true
+  profile: node
+  coverage_threshold: 80
+  policy_version: oss-v2
+  differential_threshold: 80

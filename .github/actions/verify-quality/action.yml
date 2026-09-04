@@ -1,0 +1,25 @@
+name: Verify release quality
+description: Fail closed unless the exact service and commit have current OSS evidence.
+inputs:
+  platform-api-url:
+    required: true
+    description: Engineering Platform API URL
+  service-name:
+    required: true
+    description: Catalog service name
+  commit-sha:
+    required: true
+    description: Full commit SHA of the artifact
+  wait-seconds:
+    default: '0'
+    description: Maximum wait for main CI to publish evidence
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        QUALITY_URL: ${{ inputs.platform-api-url }}
+        QUALITY_SERVICE: ${{ inputs.service-name }}
+        QUALITY_SHA: ${{ inputs.commit-sha }}
+        QUALITY_WAIT: ${{ inputs.wait-seconds }}
+      run: python3 "${{ github.action_path }}/verify.py"
