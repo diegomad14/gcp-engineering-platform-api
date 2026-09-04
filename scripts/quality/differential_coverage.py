@@ -37,17 +37,44 @@ def resolve_base(cwd: Path, head: str, event: dict, explicit: str = "") -> str:
 
 def changed_lines(cwd: Path, base: str, head: str) -> dict[str, set[int]]:
     # Query one file at a time to handle spaces, unicode, renames and quoted paths.
-    names = (
+    entries = (
         subprocess.check_output(
-            ["git", "diff", "--name-only", "-z", "--diff-filter=ACMR", base, head],
+            [
+                "git",
+                "diff",
+                "--name-status",
+                "--find-renames",
+                "-z",
+                "--diff-filter=ACMR",
+                base,
+                head,
+            ],
             cwd=cwd,
         )
         .decode()
         .split("\0")
     )
     result = {}
-    for name in filter(None, names):
-        diff = git(cwd, "diff", "--no-ext-diff", "--unified=0", base, head, "--", name)
+    cursor = 0
+    while cursor < len(entries) and entries[cursor]:
+        status, name = entries[cursor : cursor + 2]
+        cursor += 2
+        paths = [name]
+        if status.startswith(("R", "C")):
+            name = entries[cursor]
+            cursor += 1
+            paths.append(name)
+        diff = git(
+            cwd,
+            "diff",
+            "--no-ext-diff",
+            "--find-renames",
+            "--unified=0",
+            base,
+            head,
+            "--",
+            *paths,
+        )
         lines: set[int] = set()
         for start, count in re.findall(r"^@@ .*? \+(\d+)(?:,(\d+))? @@", diff, re.M):
             first = int(start)
@@ -79,12 +106,14 @@ def line_coverage(report: Path, cwd: Path, root: Path) -> dict[str, dict[int, bo
 def lcov_coverage(report: Path, cwd: Path, root: Path) -> dict[str, dict[int, bool]]:
     result: dict[str, dict[int, bool]] = {}
     current = None
+    expected_lines = expected_hits = None
     for line in report.read_text().splitlines():
         if line.startswith("SF:"):
             if current is not None:
                 raise ValueError("Incomplete LCOV record")
             current = (cwd / line[3:]).resolve().relative_to(root).as_posix()
             result.setdefault(current, {})
+            expected_lines = expected_hits = None
         elif line.startswith("DA:"):
             if current is None:
                 raise ValueError("LCOV line without source file")
@@ -94,7 +123,17 @@ def lcov_coverage(report: Path, cwd: Path, root: Path) -> dict[str, dict[int, bo
             result[current][int(number)] = (
                 result[current].get(int(number), False) or int(hits) > 0
             )
+        elif line.startswith("LF:"):
+            expected_lines = int(line[3:])
+        elif line.startswith("LH:"):
+            expected_hits = int(line[3:])
         elif line == "end_of_record":
+            if (
+                current is None
+                or expected_lines != len(result[current])
+                or expected_hits != sum(result[current].values())
+            ):
+                raise ValueError("Incomplete LCOV executable-line evidence")
             current = None
     if current is not None or not result:
         raise ValueError("Empty or incomplete LCOV report")

@@ -206,7 +206,7 @@ def test_lcov_and_documentation_only(repository):
     reports = root / "reports"
     reports.mkdir()
     p = reports / "lcov.info"
-    p.write_text("SF:src/a.ts\nDA:1,0\nDA:2,1\nend_of_record\n")
+    p.write_text("SF:src/a.ts\nDA:1,0\nDA:2,1\nLF:2\nLH:1\nend_of_record\n")
     assert diff.lcov_coverage(p, root, root) == {"src/a.ts": {1: False, 2: True}}
     result = diff.differential(root, reports, "node", base, head)
     assert result["changed_lines"] == 0 and result["differential_coverage"] is None
@@ -222,7 +222,7 @@ def test_renames_and_deletions(repository):
     diff.git(root, "mv", "old.py", "new.py")
     (root / "README.md").unlink()
     head = commit(root, "rename")
-    assert "README.md" not in diff.changed_lines(root, base, head)
+    assert diff.changed_lines(root, base, head) == {"new.py": set()}
 
 
 def test_exact_release_query_rejects_legacy_and_wrong_repository(monkeypatch):

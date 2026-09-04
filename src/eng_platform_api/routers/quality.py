@@ -28,11 +28,10 @@ def _invalidate_summary_cache() -> None:
 def _is_stale(report: QualityReport) -> bool:
     try:
         generated = datetime.fromisoformat(report.generated_at.replace("Z", "+00:00"))
-    except ValueError:
+        age = (datetime.now(timezone.utc) - generated).total_seconds()
+    except (ValueError, TypeError):
         return True
-    return (
-        datetime.now(timezone.utc) - generated
-    ).total_seconds() > config.quality.stale_after_hours * 3600
+    return age < -300 or age > config.quality.stale_after_hours * 3600
 
 
 def _project(report: QualityReport) -> QualityProject:

@@ -332,7 +332,7 @@ def main() -> int:
                 f"Coverage {coverage}% is below {args.coverage_threshold}%."
             )
 
-    differential_fields = {}
+    differential_fields = {"policy_version": "oss-v2"}
     if args.profile != "static":
         try:
             event_path = os.environ.get("GITHUB_EVENT_PATH")
@@ -371,6 +371,29 @@ def main() -> int:
                 "blocking_findings": int(status == "FAILED"),
             }
         )
+
+    if args.profile == "static":
+        try:
+            event_path = os.environ.get("GITHUB_EVENT_PATH")
+            event = json.loads(Path(event_path).read_text()) if event_path else {}
+            differential_fields["base_sha"] = resolve_base(
+                cwd, args.commit_sha, event, args.base_sha
+            )
+        except (
+            ValueError,
+            OSError,
+            KeyError,
+            TypeError,
+            subprocess.CalledProcessError,
+        ) as exc:
+            checks.append(
+                {
+                    "name": "Commit identity",
+                    "category": "identity",
+                    "status": "FAILED",
+                    "details": str(exc),
+                }
+            )
 
     report = {
         **differential_fields,
