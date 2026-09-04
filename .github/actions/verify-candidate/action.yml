@@ -1,0 +1,29 @@
+name: Verify candidate image
+description: Bind the revision being promoted to the approved release commit and image.
+inputs:
+  platform-api-url:
+    required: true
+    description: Engineering Platform API URL
+  service-name:
+    required: true
+    description: Catalog service
+  revision:
+    required: true
+    description: Candidate revision
+  tag:
+    required: true
+    description: Immutable release tag
+  commit-sha:
+    required: true
+    description: Approved source commit
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        QUALITY_URL: ${{ inputs.platform-api-url }}
+        QUALITY_SERVICE: ${{ inputs.service-name }}
+        QUALITY_REVISION: ${{ inputs.revision }}
+        QUALITY_TAG: ${{ inputs.tag }}
+        QUALITY_SHA: ${{ inputs.commit-sha }}
+      run: python3 "${{ github.action_path }}/verify.py"

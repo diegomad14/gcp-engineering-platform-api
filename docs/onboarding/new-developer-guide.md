@@ -123,8 +123,8 @@ pip-audit
 pytest -q --cov=eng_platform_api --cov-report=term-missing --cov-report=xml:coverage.xml --cov-fail-under=70
 ```
 
-Minimum coverage: **70%**. After this, CI runs a SonarCloud scan that is
-also blocking (see section 7).
+Minimum global coverage: **70%** for this API, plus **80%** of changed executable
+lines under `oss-v2`. CI publishes exact-commit evidence after the native checks.
 
 ### Web
 
@@ -198,7 +198,7 @@ Structure of this repo (`gcp-engineering-platform-api`):
 | `examples/caller-workflows/` | Examples of how a client repo consumes this repo's reusable workflows. |
 | `docs/` | This kind of documentation: adrs, architecture, checklists, deployment, finops, governance, observability, quality, research, runbooks, standards. |
 | `schemas/` | Formal JSON Schemas for the catalog and requests. |
-| `scripts/` | Operational utilities (`quality_gate.py`, `sonar_agent_check.py`, Cloud Run scripts). |
+| `scripts/` | Operational utilities (`quality_gate.py`, `differential_coverage.py`, Cloud Run scripts). |
 
 **Important rule**: reusable workflows (`reusable-quality-gate.yml`,
 `reusable-cloud-run-promote.yml`, etc.) are consumed by pinning a **stable
@@ -219,14 +219,11 @@ detail of this convention and what lives in each repo vs. the wiki.
 4. Push and open the PR — **the PR title must also be Conventional Commits**
    (`pr-title.yml` validates it with `amannn/action-semantic-pull-request`
    and fails the `validate` check otherwise).
-5. Wait for the required checks: `quality`, `workflows`, `validate`,
-   `SonarCloud Code Analysis` (blocking).
-6. Before considering the PR done, run:
-   ```bash
-   python scripts/quality/sonar_agent_check.py --pull-request <PR_NUMBER>
-   ```
-   (rule from `AGENTS.md` — confirms the exact Sonar result, don't rely on
-   the GitHub UI alone).
+5. Wait for native `quality`, `workflows` (API), `validate` and the normalized
+   OSS quality gate. Every required check must pass.
+6. Inspect the exact repository/service/SHA report and its comparison base.
+   Release verification uses `?for_release=true`; latest-summary status alone
+   does not authorize a deployment. Follow `AGENTS.md` and the OSS quality policy.
 7. Request a **human review** (not an automated step).
 8. On merge to `main`, `semantic-release.yml` computes the version and
    creates the `vX.Y.Z` tag **automatically** from your commits — you
@@ -264,7 +261,7 @@ manual `gcloud` commands.
 | `gh` rejects push / not authenticated | Expired or unconfigured `gh` session | `gh auth login`, verify with `gh auth status` |
 | `gcloud builds submit` fails on IAM permissions over the Cloud Build bucket | Real documented case — missing permissions on the build SA | Use `gcloud auth configure-docker "<region>-docker.pkg.dev" --quiet` + `docker build && docker push` instead of Cloud Build |
 | A deploy doesn't show up in `/deployments` or can't be used as a rollback target | It was triggered with `gh workflow run` / `gh api` directly instead of the platform | **Always** trigger deploys via `POST /api/services/{service}/deployments` or the UI button — never `gh` directly (the `deployment_store` won't track it) |
-| SonarCloud shows `0.0% New Code` on a PR that only touches `tests/` | The gate measures **new** code, not total coverage — expected, not a bug | Don't block the PR on this alone; check Overall Coverage if relevant |
+| No changed executable lines | The differential check is N/A; global and native checks still apply | Missing or malformed coverage is a failure, not N/A |
 | `404 Quality report not found` | No evidence registered for that `service_name` + SHA | Run the quality gate with the correct SHA |
 | `STALE` status in `/quality` | Evidence expired (>168h) | Re-run the quality gate |
 | `401/403` when publishing a quality report | Token missing or different from the configured one | Check the secret without printing it |
@@ -288,7 +285,7 @@ manual `gcloud` commands.
 - **Never** use a service account JSON key (`GCP_SA_KEY`) — it's forbidden, WIF/OIDC only.
 - **Never** run `gcloud run deploy` / `gcloud run services update-traffic` manually for a normal release — only as an explicit, documented incident response.
 - **Never** trigger deploys with `gh workflow run` / `gh api` directly — it breaks `deployment_store` tracking.
-- **Never** suppress or mark a SonarCloud finding as a false positive without a documented technical reason (`AGENTS.md`).
+- **Never** suppress or mark a security finding as a false positive without a documented technical reason (`AGENTS.md`).
 - **Never** hardcode a Cloud Run revision in a living runbook — use dynamic commands (`gcloud run services describe --format=...`).
 
 ## 10. More context (without duplicating it)

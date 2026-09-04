@@ -23,6 +23,8 @@ class ServiceQualityConfig(BaseModel):
     enabled: bool = False
     profile: Literal["python", "node", "static"] | None = None
     coverage_threshold: float = 70.0
+    policy_version: str = "oss-v2"
+    differential_threshold: float = 80.0
 
 
 class ServiceDeploymentConfig(BaseModel):
@@ -309,6 +311,12 @@ class QualityReportCreate(BaseModel):
     generated_at: str
     coverage: float | None = Field(default=None, ge=0, le=100)
     coverage_threshold: float | None = Field(default=None, ge=0, le=100)
+    policy_version: str = "oss-v1"
+    base_sha: str = ""
+    differential_coverage: float | None = Field(default=None, ge=0, le=100)
+    differential_threshold: float | None = Field(default=None, ge=0, le=100)
+    changed_lines: int | None = Field(default=None, ge=0)
+    covered_changed_lines: int | None = Field(default=None, ge=0)
     tool_versions: dict[str, str] = Field(default_factory=dict)
     checks: list[QualityCheck] = Field(min_length=1)
 
@@ -319,6 +327,13 @@ class QualityReport(QualityReportCreate):
 
 
 class QualityProject(BaseModel):
+    policy_version: str = "oss-v1"
+    base_sha: str = ""
+    differential_coverage: float | None = Field(default=None, ge=0, le=100)
+    differential_threshold: float | None = Field(default=None, ge=0, le=100)
+    changed_lines: int | None = Field(default=None, ge=0)
+    covered_changed_lines: int | None = Field(default=None, ge=0)
+
     project_key: str
     organization: str = ""
     service_name: str = ""
@@ -448,6 +463,7 @@ class ServiceFactoryPlan(BaseModel):
     catalog_entry: str = ""
     agent_prompt: str = ""
     labels_manifest: str = ""
+    quality_sources: str = ""
     quality_config: str = ""
     sonar_properties: str = ""  # Deprecated compatibility output; always empty.
 

@@ -32,10 +32,6 @@ jobs:
           bandit -q -lll -r src
           pip-audit
           pytest -q --cov=eng_platform_api --cov-report=term-missing --cov-report=xml:coverage.xml --cov-fail-under=70
-      - name: SonarQube Cloud scan and blocking quality gate
-        uses: SonarSource/sonarqube-scan-action@c7ee0f9df90b7aa20e8dcf9695dcfe2e7da5b4f2 # v7
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   workflows:
     runs-on: ubuntu-latest
@@ -50,3 +46,20 @@ jobs:
           trap 'docker stop eng-platform-api-ci' EXIT
           for _ in {1..20}; do curl --fail --silent http://localhost:8000/health && break; sleep 1; done
           curl --fail-with-body --silent --request POST http://localhost:8000/api/service-factory/plan --header 'Content-Type: application/json' --data '{"repository":"test-org/test-repo","service_name":"test-api","service_type":"api","runtime":"python","gcp_project":"test-project","owner":"platform"}' | grep --quiet 'platform_deploy_workflow'
+
+  normalized:
+    needs: [quality, workflows]
+    uses: ./.github/workflows/reusable-quality-gate.yml
+    with:
+      service-name: eng-platform-api
+      python-version: "3.12"
+      lint-command: ruff check src tests
+      format-command: ruff format --check src tests
+      test-command: python -m pytest -q --cov=eng_platform_api --cov-report=json:quality-reports/coverage.json
+      profile: python
+      working-directory: .
+      coverage-threshold: 70
+      platform-ref: ${{ github.sha }}
+      platform-api-url: ${{ vars.ENG_PLATFORM_API_URL }}
+    secrets:
+      QUALITY_API_TOKEN: ${{ secrets.QUALITY_API_TOKEN }}

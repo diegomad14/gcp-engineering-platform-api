@@ -1,17 +1,8 @@
-# Engineering Platform API agent checks
+# Release quality checks
 
-Before declaring a change complete:
-
-1. Run the repository quality gate from `.github/workflows/ci.yml` locally where practical.
-2. Push the PR branch and wait for `quality`, `workflows`, `validate`, and `SonarCloud Code Analysis`.
-3. Query the exact SonarCloud PR result:
-
-   ```bash
-   python scripts/quality/sonar_agent_check.py --pull-request <PR_NUMBER>
-   ```
-
-4. Fix every new vulnerability and every issue that leaves the Quality Gate red. Do not suppress or mark an issue false-positive without an explicit, documented technical reason.
-
-The checker reads `SONAR_TOKEN` when provided; otherwise it retrieves
-`sonarcloud-api-maintenance` from Secret Manager in `cgm-assistant-prod`. Never
-print, copy into Git, or document the token value.
+Run the repository CI checks and the normalized OSS gate before declaring work complete.
+Require the exact commit report with policy `oss-v2`: global coverage at the catalog threshold,
+80% changed-line coverage, tests, lint, types/build and security checks.
+Inspect every failure; do not lower thresholds or suppress findings without a documented technical reason.
+Release and promotion must verify the same repository, service and artifact SHA.
+Use the canonical release process; preserve existing runner restrictions.

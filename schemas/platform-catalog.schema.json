@@ -3,7 +3,9 @@
   "$id": "https://github.com/diegomad14/gcp-engineering-platform-api/schemas/platform-catalog.schema.json",
   "title": "Platform Service Catalog",
   "type": "object",
-  "required": ["services"],
+  "required": [
+    "services"
+  ],
   "additionalProperties": false,
   "properties": {
     "services": {
@@ -11,28 +13,73 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["service_name", "repository", "owner", "project_id", "region"],
+        "required": [
+          "service_name",
+          "repository",
+          "owner",
+          "project_id",
+          "region"
+        ],
         "additionalProperties": false,
         "properties": {
-          "service_name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*[a-z0-9]$" },
-          "repository": { "type": "string", "minLength": 1 },
-          "owner": { "type": "string", "minLength": 1 },
-          "cost_center": { "type": "string" },
-          "project_id": { "type": "string", "minLength": 1 },
-          "region": { "type": "string", "minLength": 1 },
-          "environment": { "type": "string" },
-          "validation_targets": { "type": "array" },
+          "service_name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*[a-z0-9]$"
+          },
+          "repository": {
+            "type": "string",
+            "minLength": 1
+          },
+          "owner": {
+            "type": "string",
+            "minLength": 1
+          },
+          "cost_center": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "region": {
+            "type": "string",
+            "minLength": 1
+          },
+          "environment": {
+            "type": "string"
+          },
+          "validation_targets": {
+            "type": "array"
+          },
           "operational_secrets": {
             "type": "array",
             "items": {
-              "type": "object", "additionalProperties": false,
-              "required": ["key", "secret_id"],
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "key",
+                "secret_id"
+              ],
               "properties": {
-                "key": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,127}$"},
-                "secret_id": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,255}$"},
-                "description": {"type": "string"},
-                "required": {"type": "boolean", "default": true},
-                "editable": {"type": "boolean", "default": false}
+                "key": {
+                  "type": "string",
+                  "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+                },
+                "secret_id": {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z0-9_-]{1,255}$"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "required": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "editable": {
+                  "type": "boolean",
+                  "default": false
+                }
               }
             }
           },
@@ -40,33 +87,100 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "enabled": { "type": "boolean" },
-              "profile": { "type": ["string", "null"], "enum": ["python", "node", "static", null] },
-              "coverage_threshold": { "type": "number", "minimum": 0, "maximum": 100 }
+              "enabled": {
+                "type": "boolean"
+              },
+              "profile": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "python",
+                  "node",
+                  "static",
+                  null
+                ]
+              },
+              "coverage_threshold": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "policy_version": {
+                "type": "string",
+                "enum": [
+                  "oss-v1",
+                  "oss-v2"
+                ],
+                "default": "oss-v2"
+              },
+              "differential_threshold": {
+                "type": "number",
+                "minimum": 80,
+                "maximum": 100,
+                "default": 80
+              }
             }
           },
           "deployment": {
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "enabled": { "type": "boolean" },
-              "workflow_file": { "type": "string", "minLength": 1 },
-              "image_name": { "type": "string" },
-              "artifact_repository": { "type": "string", "minLength": 1 },
-              "build_context": { "type": "string", "minLength": 1 },
-              "health_path": { "type": "string", "pattern": "^/" },
-              "auxiliary_services": {"type": "array", "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]+$"}},
-              "auxiliary_jobs": {"type": "array", "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]+$"}}
+              "enabled": {
+                "type": "boolean"
+              },
+              "workflow_file": {
+                "type": "string",
+                "minLength": 1
+              },
+              "image_name": {
+                "type": "string"
+              },
+              "artifact_repository": {
+                "type": "string",
+                "minLength": 1
+              },
+              "build_context": {
+                "type": "string",
+                "minLength": 1
+              },
+              "health_path": {
+                "type": "string",
+                "pattern": "^/"
+              },
+              "auxiliary_services": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9-]+$"
+                }
+              },
+              "auxiliary_jobs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9-]+$"
+                }
+              }
             }
           },
           "finops": {
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "service": { "type": "string" },
-              "env": { "type": "string" },
-              "owner": { "type": "string" },
-              "cost_center": { "type": "string" }
+              "service": {
+                "type": "string"
+              },
+              "env": {
+                "type": "string"
+              },
+              "owner": {
+                "type": "string"
+              },
+              "cost_center": {
+                "type": "string"
+              }
             }
           }
         }

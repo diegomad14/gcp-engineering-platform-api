@@ -11,10 +11,6 @@ project_id: cgm-assistant-prod
 region: us-central1
 environment: prod
 release_model: candidate-promote-rollback
-quality:
-  enabled: true
-  profile: python
-  coverage_threshold: 70
 deployment:
   workflow_file: platform-deploy.yml
   image_name: cgm-sanplat-api
@@ -28,3 +24,9 @@ finops:
   env: prod
   owner: cgm
   cost_center: cgm
+quality:
+  enabled: true
+  profile: python
+  coverage_threshold: 70
+  policy_version: oss-v2
+  differential_threshold: 80

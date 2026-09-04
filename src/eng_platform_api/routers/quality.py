@@ -11,6 +11,7 @@ from ..config import config
 from ..models import QualityProject, QualityReport, QualityReportCreate, QualitySummary
 from ..security import require_quality_ingest_token
 from ..services import catalog, github_actions, quality_store
+from ..services.quality_policy import policy_errors
 
 router = APIRouter(prefix="/api/quality", tags=["quality"])
 _SUMMARY_CACHE_TTL_SECONDS = 60
@@ -27,11 +28,10 @@ def _invalidate_summary_cache() -> None:
 def _is_stale(report: QualityReport) -> bool:
     try:
         generated = datetime.fromisoformat(report.generated_at.replace("Z", "+00:00"))
-    except ValueError:
+        age = (datetime.now(timezone.utc) - generated).total_seconds()
+    except (ValueError, TypeError):
         return True
-    return (
-        datetime.now(timezone.utc) - generated
-    ).total_seconds() > config.quality.stale_after_hours * 3600
+    return age < -300 or age > config.quality.stale_after_hours * 3600
 
 
 def _project(report: QualityReport) -> QualityProject:
@@ -55,6 +55,12 @@ def _project(report: QualityReport) -> QualityProject:
         profile=report.profile,
         quality_gate_status=status,
         coverage=report.coverage,
+        policy_version=report.policy_version,
+        base_sha=report.base_sha,
+        differential_coverage=report.differential_coverage,
+        differential_threshold=report.differential_threshold,
+        changed_lines=report.changed_lines,
+        covered_changed_lines=report.covered_changed_lines,
         bugs=defects,
         vulnerabilities=vulnerabilities,
         code_smells=sum(
@@ -85,11 +91,15 @@ def register_quality_report(payload: QualityReportCreate):
 @router.get(
     "/services/{service_name}/commits/{commit_sha}", response_model=QualityReport
 )
-def get_quality_report(service_name: str, commit_sha: str):
+def get_quality_report(service_name: str, commit_sha: str, for_release: bool = False):
     """Return the exact evidence used to authorize a deployment."""
     report = quality_store.get_report(service_name, commit_sha)
     if report is None:
         raise HTTPException(status_code=404, detail="Quality report not found")
+    if for_release:
+        errors = policy_errors(report, catalog.get_service(service_name))
+        if errors:
+            raise HTTPException(status_code=409, detail={"quality_errors": errors})
     if _is_stale(report):
         return report.model_copy(update={"quality_gate_status": "STALE"})
     return report
@@ -144,3 +154,49 @@ def get_quality_summary():
         if not config.mock_mode:
             _summary_cache = (monotonic(), catalog_key, summary)
         return summary
+
+
+@router.get("/services/{service_name}/rollback-targets/{revision}")
+def get_rollback_evidence(service_name: str, revision: str):
+    """Authorize only a recorded successful production revision, under its original policy."""
+    from ..services import deployment_store
+
+    service = catalog.get_service(service_name)
+    if service is None:
+        raise HTTPException(status_code=404, detail="Unknown service")
+    target = next(
+        (
+            item
+            for item in deployment_store.list_for_service(service_name, limit=1000)
+            if item.repository == service.repository
+            and item.kind == "deploy"
+            and item.status == "SUCCEEDED"
+            and item.production_revision == revision
+        ),
+        None,
+    )
+    if target is None:
+        raise HTTPException(
+            status_code=409, detail="Revision was not successfully promoted"
+        )
+    report = quality_store.get_report(service_name, target.sha)
+    if (
+        report is None
+        or report.repository != service.repository
+        or report.quality_gate_status != "PASSED"
+    ):
+        raise HTTPException(
+            status_code=409, detail="Original release evidence is missing or failed"
+        )
+    deployment = service.deployment
+    return {
+        "service_name": service_name,
+        "repository": service.repository,
+        "commit_sha": target.sha,
+        "tag": target.tag,
+        "revision": revision,
+        "project_id": service.project_id,
+        "region": service.region,
+        "image": f"{service.region}-docker.pkg.dev/{service.project_id}/{deployment.artifact_repository}/{deployment.image_name}:{target.tag}",
+        "policy_version": report.policy_version,
+    }

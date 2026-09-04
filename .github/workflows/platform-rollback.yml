@@ -65,9 +65,10 @@ env:
 jobs:
   rollback:
     name: Rollback production
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && 'cgm-release-local' || 'ubuntu-latest' }}
     environment: production
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Verify Engineering Platform authorization
         uses: ./.github/actions/verify-release-authorization
         with:
@@ -87,12 +88,15 @@ jobs:
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
       - name: Mark GitHub deployment in progress
         env:
+          RUN_GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_GITHUB_SERVER_URL: ${{ github.server_url }}
+          RUN_GITHUB_RUN_ID: ${{ github.run_id }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh api --method POST \
-            "repos/${{ github.repository }}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
+            "repos/${RUN_GITHUB_REPOSITORY}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
             -f state=in_progress \
-            -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f log_url="${RUN_GITHUB_SERVER_URL}/${RUN_GITHUB_REPOSITORY}/actions/runs/${RUN_GITHUB_RUN_ID}" \
             -f description='Rollback started' >/dev/null
       - name: Verify target revision is Ready
         run: |
@@ -102,6 +106,12 @@ jobs:
             --format='json(status.conditions)' \
             | python3 -c 'import json,sys; d=json.load(sys.stdin); ready=any(c.get("type")=="Ready" and c.get("status")=="True" for c in d.get("status",{}).get("conditions",[])); print("ready" if ready else "not-ready")')
           test "$READY" = "ready"
+      - name: Verify recorded rollback provenance
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-rollback@ac9d68554c8b6332013785a5bcf451eabfee93ec
+        with:
+          platform-api-url: ${{ vars.ENG_PLATFORM_API_URL }}
+          service-name: ${{ inputs.service_name }}
+          revision: ${{ inputs.target_revision }}
       - name: Restore target revision to 100 percent traffic
         run: gcloud run services update-traffic "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --to-revisions="$TARGET_REVISION=100" --quiet
       - name: Smoke production
@@ -111,11 +121,15 @@ jobs:
       - name: Mark GitHub deployment result
         if: always()
         env:
+          RUN_JOB_STATUS: ${{ job.status }}
+          RUN_GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_GITHUB_SERVER_URL: ${{ github.server_url }}
+          RUN_GITHUB_RUN_ID: ${{ github.run_id }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          STATE=$([ "${{ job.status }}" = success ] && echo success || echo failure)
+          STATE=$([ "${RUN_JOB_STATUS}" = success ] && echo success || echo failure)
           gh api --method POST \
-            "repos/${{ github.repository }}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
+            "repos/${RUN_GITHUB_REPOSITORY}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
             -f state="$STATE" \
-            -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f log_url="${RUN_GITHUB_SERVER_URL}/${RUN_GITHUB_REPOSITORY}/actions/runs/${RUN_GITHUB_RUN_ID}" \
             -f description="production_revision=$TARGET_REVISION" >/dev/null

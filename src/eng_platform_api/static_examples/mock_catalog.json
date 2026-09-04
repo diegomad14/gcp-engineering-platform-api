@@ -58,7 +58,9 @@
       "quality": {
         "enabled": true,
         "profile": "python",
-        "coverage_threshold": 70
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
       },
       "deployment": {
         "workflow_file": "platform-deploy.yml",
@@ -115,7 +117,9 @@
       "quality": {
         "enabled": true,
         "profile": "node",
-        "coverage_threshold": 70
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
       },
       "deployment": {
         "workflow_file": "platform-deploy.yml",
@@ -143,7 +147,9 @@
       "quality": {
         "enabled": true,
         "profile": "python",
-        "coverage_threshold": 70
+        "coverage_threshold": 80,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
       },
       "deployment": {
         "workflow_file": "platform-deploy.yml",
@@ -174,7 +180,9 @@
       "quality": {
         "enabled": true,
         "profile": "python",
-        "coverage_threshold": 70
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
       },
       "deployment": {
         "workflow_file": "platform-deploy.yml",
@@ -202,7 +210,9 @@
       "quality": {
         "enabled": true,
         "profile": "python",
-        "coverage_threshold": 70
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
       },
       "deployment": {
         "workflow_file": "platform-deploy.yml",
@@ -230,7 +240,9 @@
       "quality": {
         "enabled": true,
         "profile": "node",
-        "coverage_threshold": 70
+        "coverage_threshold": 80,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
       },
       "deployment": {
         "workflow_file": "platform-deploy.yml",

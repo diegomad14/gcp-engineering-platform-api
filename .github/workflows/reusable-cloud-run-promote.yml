@@ -44,7 +44,7 @@ on:
       quality-gate-enabled:
         required: false
         type: boolean
-        default: false
+        default: true
       quality-commit-sha:
         required: false
         type: string
@@ -86,6 +86,9 @@ jobs:
     runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 0
 
       - name: Verify quality evidence for selected services
         env:
@@ -99,15 +102,19 @@ jobs:
           PROMOTE_WEB: ${{ inputs.promote-web }}
         run: |
           set -euo pipefail
-          [ "$QUALITY_GATE_ENABLED" = "true" ] || exit 0
+          [ "$QUALITY_GATE_ENABLED" = "true" ] || (echo "Release quality is mandatory"; exit 1)
           test -n "$PLATFORM_API_URL" || (echo "platform-api-url is required when quality gate is enabled" && exit 1)
           test -n "$QUALITY_COMMIT_SHA" || (echo "quality-commit-sha is required for promotion" && exit 1)
+          test "$(git rev-parse HEAD)" = "$QUALITY_COMMIT_SHA" || (echo "Quality commit does not match the release tag"; exit 1)
+          export VERIFIED_SHA="$QUALITY_COMMIT_SHA"
           verify_service() {
             local service="$1"
-            curl --fail-with-body --retry 3 \
+            local response_file
+            response_file="$(mktemp)"
+            curl --fail-with-body --retry 3 -o "$response_file" \
               -H "Authorization: Bearer $QUALITY_API_TOKEN" \
-              "$PLATFORM_API_URL/api/quality/services/$service/commits/$QUALITY_COMMIT_SHA" \
-              | python3 -c 'import json,sys; d=json.load(sys.stdin); status=d.get("quality_gate_status"); print("{}: {}".format(d.get("service_name"), status)); sys.exit(0 if status=="PASSED" else 1)'
+              "$PLATFORM_API_URL/api/quality/services/$service/commits/$QUALITY_COMMIT_SHA?for_release=true"
+            python3 -c 'import json,sys; d=json.load(sys.stdin); status=d.get("quality_gate_status"); print("{}: {}".format(d.get("service_name"), status)); sys.exit(0 if status=="PASSED" and d.get("policy_version")=="oss-v2" and d.get("commit_sha")==__import__("os").environ.get("VERIFIED_SHA") and d.get("repository")==__import__("os").environ.get("GITHUB_REPOSITORY") else 1)' < "$response_file"
           }
           [ "$PROMOTE_API" != "true" ] || verify_service "$API_SERVICE_NAME"
           [ "$PROMOTE_WEB" != "true" ] || verify_service "$WEB_SERVICE_NAME"
@@ -119,57 +126,97 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f
 
+      - name: Verify api candidate artifact
+        if: ${{ inputs.promote-api }}
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-candidate@6cfcaabc15db69ba7df3638087468433a0ad5fdf
+        with:
+          platform-api-url: ${{ inputs.platform-api-url }}
+          service-name: ${{ inputs.api-service-name }}
+          revision: ${{ inputs.api-target-revision }}
+          tag: ${{ inputs.version }}
+          commit-sha: ${{ inputs.quality-commit-sha }}
+      - name: Verify web candidate artifact
+        if: ${{ inputs.promote-web }}
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-candidate@6cfcaabc15db69ba7df3638087468433a0ad5fdf
+        with:
+          platform-api-url: ${{ inputs.platform-api-url }}
+          service-name: ${{ inputs.web-service-name }}
+          revision: ${{ inputs.web-target-revision }}
+          tag: ${{ inputs.version }}
+          commit-sha: ${{ inputs.quality-commit-sha }}
       - name: Snapshot current state
+        env:
+          RUN_INPUTS_API_SERVICE_NAME: ${{ inputs.api-service-name }}
+          RUN_INPUTS_PROJECT_ID: ${{ inputs.project-id }}
+          RUN_INPUTS_REGION: ${{ inputs.region }}
+          RUN_INPUTS_WEB_SERVICE_NAME: ${{ inputs.web-service-name }}
         run: |
           mkdir -p /tmp/promotion-snapshot
-          gcloud run services describe "${{ inputs.api-service-name }}" \
-            --project="${{ inputs.project-id }}" --region="${{ inputs.region }}" \
+          gcloud run services describe "${RUN_INPUTS_API_SERVICE_NAME}" \
+            --project="${RUN_INPUTS_PROJECT_ID}" --region="${RUN_INPUTS_REGION}" \
             --format="yaml(status.traffic,status.latestReadyRevisionName)" \
             | tee /tmp/promotion-snapshot/api-before.yaml
-          if [ -n "${{ inputs.web-service-name }}" ]; then
-            gcloud run services describe "${{ inputs.web-service-name }}" \
-              --project="${{ inputs.project-id }}" --region="${{ inputs.region }}" \
+          if [ -n "${RUN_INPUTS_WEB_SERVICE_NAME}" ]; then
+            gcloud run services describe "${RUN_INPUTS_WEB_SERVICE_NAME}" \
+              --project="${RUN_INPUTS_PROJECT_ID}" --region="${RUN_INPUTS_REGION}" \
               --format="yaml(status.traffic,status.latestReadyRevisionName)" \
               | tee /tmp/promotion-snapshot/web-before.yaml
           fi
 
       - name: Verify target revisions are Ready
+        env:
+          RUN_INPUTS_PROJECT_ID: ${{ inputs.project-id }}
+          RUN_INPUTS_REGION: ${{ inputs.region }}
+          RUN_INPUTS_PROMOTE_API: ${{ inputs.promote-api }}
+          RUN_INPUTS_API_TARGET_REVISION: ${{ inputs.api-target-revision }}
+          RUN_INPUTS_PROMOTE_WEB: ${{ inputs.promote-web }}
+          RUN_INPUTS_WEB_TARGET_REVISION: ${{ inputs.web-target-revision }}
         run: |
           set -euo pipefail
           revision_ready() {
             local revision="$1"
             local status
             status=$(gcloud run revisions describe "$revision" \
-              --project="${{ inputs.project-id }}" \
-              --region="${{ inputs.region }}" \
+              --project="${RUN_INPUTS_PROJECT_ID}" \
+              --region="${RUN_INPUTS_REGION}" \
               --format='json(status.conditions)' | python3 -c 'import json,sys; d=json.load(sys.stdin); ready=any(c.get("type")=="Ready" and c.get("status")=="True" for c in d.get("status",{}).get("conditions",[])); sys.exit(0 if ready else 1)' && echo "ready" || echo "not-ready")
             test "$status" = "ready" || (echo "Revision $revision is not Ready" && exit 1)
           }
 
-          if [ "${{ inputs.promote-api }}" = "true" ]; then
-            revision_ready "${{ inputs.api-target-revision }}"
+          if [ "${RUN_INPUTS_PROMOTE_API}" = "true" ]; then
+            revision_ready "${RUN_INPUTS_API_TARGET_REVISION}"
           fi
 
-          if [ "${{ inputs.promote-web }}" = "true" ]; then
-            revision_ready "${{ inputs.web-target-revision }}"
+          if [ "${RUN_INPUTS_PROMOTE_WEB}" = "true" ]; then
+            revision_ready "${RUN_INPUTS_WEB_TARGET_REVISION}"
           fi
 
       - name: Promote API traffic
         if: ${{ inputs.promote-api }}
+        env:
+          RUN_INPUTS_API_SERVICE_NAME: ${{ inputs.api-service-name }}
+          RUN_INPUTS_PROJECT_ID: ${{ inputs.project-id }}
+          RUN_INPUTS_REGION: ${{ inputs.region }}
+          RUN_INPUTS_API_TARGET_REVISION: ${{ inputs.api-target-revision }}
         run: |
-          gcloud run services update-traffic "${{ inputs.api-service-name }}" \
-            --project="${{ inputs.project-id }}" \
-            --region="${{ inputs.region }}" \
-            --to-revisions="${{ inputs.api-target-revision }}=100" \
+          gcloud run services update-traffic "${RUN_INPUTS_API_SERVICE_NAME}" \
+            --project="${RUN_INPUTS_PROJECT_ID}" \
+            --region="${RUN_INPUTS_REGION}" \
+            --to-revisions="${RUN_INPUTS_API_TARGET_REVISION}=100" \
             --quiet
 
       - name: Promote Web traffic
         if: ${{ inputs.promote-web }}
+        env:
+          RUN_INPUTS_WEB_SERVICE_NAME: ${{ inputs.web-service-name }}
+          RUN_INPUTS_PROJECT_ID: ${{ inputs.project-id }}
+          RUN_INPUTS_REGION: ${{ inputs.region }}
+          RUN_INPUTS_WEB_TARGET_REVISION: ${{ inputs.web-target-revision }}
         run: |
-          gcloud run services update-traffic "${{ inputs.web-service-name }}" \
-            --project="${{ inputs.project-id }}" \
-            --region="${{ inputs.region }}" \
-            --to-revisions="${{ inputs.web-target-revision }}=100" \
+          gcloud run services update-traffic "${RUN_INPUTS_WEB_SERVICE_NAME}" \
+            --project="${RUN_INPUTS_PROJECT_ID}" \
+            --region="${RUN_INPUTS_REGION}" \
+            --to-revisions="${RUN_INPUTS_WEB_TARGET_REVISION}=100" \
             --quiet
 
       - name: Smoke post-promote
@@ -184,7 +231,9 @@ jobs:
           if [ "$EXPECTED_OPENAPI_PATHS" != "0" ]; then
             # shellcheck disable=SC2001
             API_BASE="$(echo "$API_HEALTH_URL" | sed 's|/health$||')"
-            OPENAPI_COUNT=$(curl -s "${API_BASE}/openapi.json" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('paths',{})))")
+            OPENAPI_RESPONSE="$(mktemp)"
+            curl --fail --silent --show-error "${API_BASE}/openapi.json" -o "$OPENAPI_RESPONSE"
+            OPENAPI_COUNT=$(python3 -c "import json,sys; print(len(json.load(sys.stdin).get('paths',{})))" < "$OPENAPI_RESPONSE")
             if [ "$OPENAPI_COUNT" -lt "$EXPECTED_OPENAPI_PATHS" ]; then
               echo "OpenAPI path count $OPENAPI_COUNT is below expected $EXPECTED_OPENAPI_PATHS"
               exit 1
@@ -197,18 +246,25 @@ jobs:
           echo "Post-promotion smoke passed"
 
       - name: Promotion report
+        env:
+          RUN_INPUTS_API_TARGET_REVISION: ${{ inputs.api-target-revision }}
+          RUN_INPUTS_WEB_TARGET_REVISION: ${{ inputs.web-target-revision }}
+          RUN_INPUTS_API_SERVICE_NAME: ${{ inputs.api-service-name }}
+          RUN_INPUTS_PROJECT_ID: ${{ inputs.project-id }}
+          RUN_INPUTS_REGION: ${{ inputs.region }}
+          RUN_INPUTS_WEB_SERVICE_NAME: ${{ inputs.web-service-name }}
         run: |
           {
             echo "## Promotion Result"
             echo
-            echo "- **API Revision:** ${{ inputs.api-target-revision }}"
-            echo "- **Web Revision:** ${{ inputs.web-target-revision }}"
+            echo "- **API Revision:** ${RUN_INPUTS_API_TARGET_REVISION}"
+            echo "- **Web Revision:** ${RUN_INPUTS_WEB_TARGET_REVISION}"
             echo
             echo "### Rollback Commands"
             echo '```bash'
-            echo "gcloud run services update-traffic ${{ inputs.api-service-name }} --project=${{ inputs.project-id }} --region=${{ inputs.region }} --to-revisions=<PREVIOUS_API_REVISION>=100"
-            if [ -n "${{ inputs.web-service-name }}" ]; then
-              echo "gcloud run services update-traffic ${{ inputs.web-service-name }} --project=${{ inputs.project-id }} --region=${{ inputs.region }} --to-revisions=<PREVIOUS_WEB_REVISION>=100"
+            echo "gcloud run services update-traffic ${RUN_INPUTS_API_SERVICE_NAME} --project=${RUN_INPUTS_PROJECT_ID} --region=${RUN_INPUTS_REGION} --to-revisions=<PREVIOUS_API_REVISION>=100"
+            if [ -n "${RUN_INPUTS_WEB_SERVICE_NAME}" ]; then
+              echo "gcloud run services update-traffic ${RUN_INPUTS_WEB_SERVICE_NAME} --project=${RUN_INPUTS_PROJECT_ID} --region=${RUN_INPUTS_REGION} --to-revisions=<PREVIOUS_WEB_REVISION>=100"
             fi
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
@@ -216,6 +272,10 @@ jobs:
       - name: Register promotion in Platform API
         if: ${{ inputs.platform-api-url != '' }}
         env:
+          RUN_INPUTS_PROMOTE_API: ${{ inputs.promote-api }}
+          RUN_INPUTS_API_SERVICE_NAME: ${{ inputs.api-service-name }}
+          RUN_INPUTS_PROMOTE_WEB: ${{ inputs.promote-web }}
+          RUN_INPUTS_WEB_SERVICE_NAME: ${{ inputs.web-service-name }}
           REPOSITORY: ${{ github.repository }}
           VERSION: ${{ inputs.version }}
           API_REVISION: ${{ inputs.api-target-revision }}
@@ -224,12 +284,12 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           SERVICES=""
-          if [ "${{ inputs.promote-api }}" = "true" ]; then
-            SERVICES="{\"service_name\":\"${{ inputs.api-service-name }}\",\"revision\":\"$API_REVISION\",\"action\":\"promoted\"}"
+          if [ "${RUN_INPUTS_PROMOTE_API}" = "true" ]; then
+            SERVICES="{\"service_name\":\"${RUN_INPUTS_API_SERVICE_NAME}\",\"revision\":\"$API_REVISION\",\"action\":\"promoted\"}"
           fi
-          if [ "${{ inputs.promote-web }}" = "true" ]; then
+          if [ "${RUN_INPUTS_PROMOTE_WEB}" = "true" ]; then
             [ -z "$SERVICES" ] || SERVICES="$SERVICES,"
-            SERVICES="$SERVICES{\"service_name\":\"${{ inputs.web-service-name }}\",\"revision\":\"$WEB_REVISION\",\"action\":\"promoted\"}"
+            SERVICES="$SERVICES{\"service_name\":\"${RUN_INPUTS_WEB_SERVICE_NAME}\",\"revision\":\"$WEB_REVISION\",\"action\":\"promoted\"}"
           fi
           SERVICES_JSON="[$SERVICES]"
           curl -fsS -X POST "$PLATFORM_API_URL/api/releases/" \

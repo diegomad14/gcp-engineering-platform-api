@@ -4,30 +4,130 @@
   "title": "Service Factory Request",
   "description": "Schema for service factory onboarding requests.",
   "type": "object",
-  "required": ["repository", "service_name", "service_type", "runtime", "gcp_project", "owner"],
+  "required": [
+    "repository",
+    "service_name",
+    "service_type",
+    "runtime",
+    "gcp_project",
+    "owner"
+  ],
   "additionalProperties": false,
   "properties": {
-    "repository": { "type": "string", "minLength": 1 },
-    "service_name": { "type": "string", "minLength": 1 },
-    "service_type": { "type": "string", "enum": ["api", "web", "worker", "integration"] },
-    "runtime": { "type": "string", "enum": ["python", "node", "static"] },
-    "gcp_project": { "type": "string", "minLength": 1 },
-    "region": { "type": "string", "default": "us-central1" },
-    "owner": { "type": "string", "minLength": 1 },
-    "cost_center": { "type": "string", "default": "" },
-    "environment": { "type": "string", "enum": ["prod", "staging", "dev"], "default": "prod" },
-    "cloud_run_service_name": { "type": "string", "default": "" },
-    "health_path": { "type": "string", "default": "/health" },
-    "openapi_path": { "type": "string", "default": "/openapi.json" },
-    "quality_profile": { "type": ["string", "null"], "enum": ["python", "node", "static", null] },
-    "quality_working_directory": { "type": "string", "default": "." },
-    "coverage_threshold": { "type": "number", "minimum": 0, "maximum": 100, "default": 70 },
-    "sonar_project_key": { "type": "string", "default": "", "deprecated": true },
-    "sonar_organization": { "type": "string", "default": "", "deprecated": true },
+    "repository": {
+      "type": "string",
+      "minLength": 1
+    },
+    "service_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "service_type": {
+      "type": "string",
+      "enum": [
+        "api",
+        "web",
+        "worker",
+        "integration"
+      ]
+    },
+    "runtime": {
+      "type": "string",
+      "enum": [
+        "python",
+        "node",
+        "static"
+      ]
+    },
+    "gcp_project": {
+      "type": "string",
+      "minLength": 1
+    },
+    "region": {
+      "type": "string",
+      "default": "us-central1"
+    },
+    "owner": {
+      "type": "string",
+      "minLength": 1
+    },
+    "cost_center": {
+      "type": "string",
+      "default": ""
+    },
+    "environment": {
+      "type": "string",
+      "enum": [
+        "prod",
+        "staging",
+        "dev"
+      ],
+      "default": "prod"
+    },
+    "cloud_run_service_name": {
+      "type": "string",
+      "default": ""
+    },
+    "health_path": {
+      "type": "string",
+      "default": "/health"
+    },
+    "openapi_path": {
+      "type": "string",
+      "default": "/openapi.json"
+    },
+    "quality_profile": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "python",
+        "node",
+        "static",
+        null
+      ]
+    },
+    "quality_working_directory": {
+      "type": "string",
+      "default": "."
+    },
+    "coverage_threshold": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100,
+      "default": 70
+    },
+    "sonar_project_key": {
+      "type": "string",
+      "default": "",
+      "deprecated": true
+    },
+    "sonar_organization": {
+      "type": "string",
+      "default": "",
+      "deprecated": true
+    },
     "validation_targets": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "default": []
+    },
+    "policy_version": {
+      "type": "string",
+      "enum": [
+        "oss-v1",
+        "oss-v2"
+      ],
+      "default": "oss-v2"
+    },
+    "differential_threshold": {
+      "type": "number",
+      "minimum": 80,
+      "maximum": 100,
+      "default": 80
     }
   }
 }

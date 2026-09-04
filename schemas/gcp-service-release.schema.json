@@ -4,32 +4,80 @@
   "title": "GCP Service Release Contract",
   "description": "Schema for one independently managed Cloud Run service.",
   "type": "object",
-  "required": ["service", "release_target", "security"],
+  "required": [
+    "service",
+    "release_target",
+    "security"
+  ],
   "additionalProperties": false,
   "properties": {
     "service": {
       "type": "object",
-      "required": ["name", "repository", "type"],
+      "required": [
+        "name",
+        "repository",
+        "type"
+      ],
       "additionalProperties": false,
       "properties": {
-        "name": { "type": "string", "minLength": 1 },
-        "repository": { "type": "string", "minLength": 1 },
-        "type": { "type": "string", "enum": ["api", "web", "worker", "integration"] }
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "api",
+            "web",
+            "worker",
+            "integration"
+          ]
+        }
       }
     },
     "release_target": {
       "type": "object",
-      "required": ["platform", "service_name", "project_id", "region"],
+      "required": [
+        "platform",
+        "service_name",
+        "project_id",
+        "region"
+      ],
       "additionalProperties": false,
       "properties": {
-        "platform": { "type": "string", "const": "gcp-cloud-run" },
-        "service_name": { "type": "string", "minLength": 1 },
-        "project_id": { "type": "string", "minLength": 1 },
-        "region": { "type": "string", "minLength": 1 },
-        "url": { "type": "string" },
-        "health_path": { "type": "string" },
-        "openapi_path": { "type": "string" },
-        "expected_openapi_paths": { "type": "integer", "minimum": 0 }
+        "platform": {
+          "type": "string",
+          "const": "gcp-cloud-run"
+        },
+        "service_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "project_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "region": {
+          "type": "string",
+          "minLength": 1
+        },
+        "url": {
+          "type": "string"
+        },
+        "health_path": {
+          "type": "string"
+        },
+        "openapi_path": {
+          "type": "string"
+        },
+        "expected_openapi_paths": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "validation_targets": {
@@ -40,14 +88,29 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["name", "path"],
+            "required": [
+              "name",
+              "path"
+            ],
             "additionalProperties": false,
             "properties": {
-              "name": { "type": "string", "minLength": 1 },
-              "path": { "type": "string", "minLength": 1 },
-              "expected_status": { "type": "integer" },
-              "pii_safe": { "type": "boolean" },
-              "external_source": { "type": "boolean" }
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_status": {
+                "type": "integer"
+              },
+              "pii_safe": {
+                "type": "boolean"
+              },
+              "external_source": {
+                "type": "boolean"
+              }
             }
           }
         }
@@ -59,14 +122,52 @@
       "properties": {
         "quality_gate": {
           "type": "object",
-          "required": ["enabled", "profile", "working_directory", "coverage_threshold", "blocking"],
+          "required": [
+            "enabled",
+            "profile",
+            "working_directory",
+            "coverage_threshold",
+            "blocking"
+          ],
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean" },
-            "profile": { "type": "string", "enum": ["python", "node", "static"] },
-            "working_directory": { "type": "string", "minLength": 1 },
-            "coverage_threshold": { "type": "number", "minimum": 0, "maximum": 100 },
-            "blocking": { "type": "boolean" }
+            "enabled": {
+              "type": "boolean"
+            },
+            "profile": {
+              "type": "string",
+              "enum": [
+                "python",
+                "node",
+                "static"
+              ]
+            },
+            "working_directory": {
+              "type": "string",
+              "minLength": 1
+            },
+            "coverage_threshold": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "blocking": {
+              "type": "boolean"
+            },
+            "policy_version": {
+              "type": "string",
+              "enum": [
+                "oss-v1",
+                "oss-v2"
+              ],
+              "default": "oss-v2"
+            },
+            "differential_threshold": {
+              "type": "number",
+              "minimum": 80,
+              "maximum": 100,
+              "default": 80
+            }
           }
         },
         "sonarqube": {
@@ -74,21 +175,41 @@
           "deprecated": true,
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean" },
-            "project_key": { "type": "string" },
-            "blocking_quality_gate": { "type": "boolean" }
+            "enabled": {
+              "type": "boolean"
+            },
+            "project_key": {
+              "type": "string"
+            },
+            "blocking_quality_gate": {
+              "type": "boolean"
+            }
           }
         }
       }
     },
     "security": {
       "type": "object",
-      "required": ["workload_identity_provider", "deployer_service_account"],
+      "required": [
+        "workload_identity_provider",
+        "deployer_service_account"
+      ],
       "additionalProperties": false,
       "properties": {
-        "workload_identity_provider": { "type": "string", "minLength": 1 },
-        "deployer_service_account": { "type": "string", "minLength": 1 },
-        "forbidden": { "type": "array", "items": { "type": "string" } }
+        "workload_identity_provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "deployer_service_account": {
+          "type": "string",
+          "minLength": 1
+        },
+        "forbidden": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     },
     "finops": {
@@ -99,10 +220,18 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "service": { "type": "string" },
-            "env": { "type": "string" },
-            "owner": { "type": "string" },
-            "cost_center": { "type": "string" }
+            "service": {
+              "type": "string"
+            },
+            "env": {
+              "type": "string"
+            },
+            "owner": {
+              "type": "string"
+            },
+            "cost_center": {
+              "type": "string"
+            }
           }
         }
       }
