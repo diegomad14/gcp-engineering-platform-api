@@ -75,15 +75,14 @@ def test_verify_rejects_changed_release_context():
             raise AssertionError("changed release context was accepted")
 
 
-def test_consume_is_one_time_only(tmp_path):
+def test_consume_is_one_time_only():
     expected = _expected()
     with (
         mock.patch.object(
             config.github, "release_signing_private_key", _private_key_pem()
         ),
-        mock.patch.object(
-            release_authorization_store, "_DEFAULT_STORE_PATH", tmp_path / "auth.json"
-        ),
+        mock.patch.object(config, "mock_mode", True),
+        mock.patch.object(release_authorization_store, "_mock_entries", {}),
         mock.patch.dict(
             "os.environ", {"ENG_PLATFORM_RELEASE_AUTH_FIRESTORE_COLLECTION": ""}
         ),

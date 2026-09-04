@@ -108,7 +108,7 @@ def verify(token: str, expected: dict[str, str]) -> dict[str, Any]:
         header = json.loads(_b64decode(header_segment))
         claims = json.loads(_b64decode(payload_segment))
         signature = _b64decode(signature_segment)
-    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except ValueError as exc:
         raise ReleaseAuthorizationError("Malformed release authorization") from exc
     if header != {"alg": "EdDSA", "kid": "release-v1", "typ": "JWT"}:
         raise ReleaseAuthorizationError("Unsupported release authorization header")

@@ -71,8 +71,9 @@ def test_valid_oidc_only_returns_sanitized_identity(key):
     ],
 )
 def test_untrusted_or_expired_identity_is_rejected(key, field, value):
+    data = claims() | {field: value}
     with pytest.raises(ReleaseAuthorizationError):
-        verify(key, claims() | {field: value})
+        verify(key, data)
 
 
 def test_missing_required_claim_is_rejected(key):

@@ -19,7 +19,15 @@ def selected_service(service_name: str):
     return service
 
 
-@router.get("/{service_name}/secrets")
+@router.get(
+    "/{service_name}/secrets",
+    responses={
+        401: {"description": "Authentication required"},
+        403: {"description": "Operator not authorized"},
+        404: {"description": "Unknown service"},
+        503: {"description": "Secret metadata unavailable"},
+    },
+)
 def list_secrets(service_name: str, request: Request, response: Response):
     require_deployer(request)
     service = selected_service(service_name)
@@ -30,7 +38,20 @@ def list_secrets(service_name: str, request: Request, response: Response):
         raise HTTPException(503, "Secret metadata is unavailable") from None
 
 
-@router.post("/{service_name}/secrets/{secret_key}/versions", status_code=201)
+@router.post(
+    "/{service_name}/secrets/{secret_key}/versions",
+    status_code=201,
+    responses={
+        401: {"description": "Authentication required"},
+        403: {"description": "Operator, origin or secret not permitted"},
+        404: {"description": "Unknown service"},
+        409: {"description": "Stale configuration or unresolved operation"},
+        413: {"description": "Request exceeds size limit"},
+        415: {"description": "JSON required"},
+        422: {"description": "Invalid secret request"},
+        503: {"description": "Secret save could not be confirmed"},
+    },
+)
 async def save_secret(
     service_name: str, secret_key: str, request: Request, response: Response
 ):
@@ -68,7 +89,7 @@ async def save_secret(
             or generation < 0
         ):
             raise ValueError
-    except (ValueError, TypeError, KeyError, UnicodeError):
+    except (ValueError, TypeError, KeyError):
         raise HTTPException(422, "Invalid secret request") from None
     response.headers["Cache-Control"] = "no-store"
     try:

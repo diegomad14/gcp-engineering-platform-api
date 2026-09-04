@@ -86,11 +86,12 @@ def test_operation_cannot_be_reused_by_another_operator_or_key(db, selected):
     subject.finalize(db, "service", secret.key, "operation", "1")
     with pytest.raises(subject.ConfigurationConflict):
         subject.reserve(db, selected, secret, "operation", 0, "other")
+    other_secret = secret.model_copy(update={"key": "OTHER"})
     with pytest.raises(subject.ConfigurationConflict):
         subject.reserve(
             db,
             selected,
-            secret.model_copy(update={"key": "OTHER"}),
+            other_secret,
             "operation",
             0,
             "angel",
