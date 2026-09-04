@@ -19,9 +19,16 @@ from ..models import (
     DeploymentOverview,
     DeploymentOverviewItem,
     ReleaseTagPage,
+    ReleaseTag,
 )
-from ..security import require_deployer
-from ..services import catalog, deployment_store, github_deployments
+from ..security import require_deployer, require_mutation_origin
+from ..services import (
+    catalog,
+    central_releases,
+    deployment_store,
+    github_deployments,
+    release_plan,
+)
 
 router = APIRouter(prefix="/api", tags=["deployments"])
 _GITHUB_UNAVAILABLE = "GitHub unavailable"
@@ -167,6 +174,8 @@ def create_deployment(
     service = _service_or_404(service_name)
     _require_deployment_ready(service)
     requested_by = require_deployer(request)
+    if release_plan.enabled(service_name):
+        require_mutation_origin(request)
     key = idempotency_key or str(uuid.uuid4())
     existing = deployment_store.find_by_idempotency_key(key)
     if existing is not None:
@@ -201,6 +210,16 @@ def create_deployment(
             raise HTTPException(status_code=404, detail=f"Unknown tag '{payload.tag}'")
         if not tag.eligible:
             raise HTTPException(status_code=409, detail=tag.reason)
+        if release_plan.enabled(service_name):
+            item = central_releases.start(
+                service=service,
+                tag=tag,
+                operator=requested_by,
+                key=key,
+                requested_runner=payload.runner_label,
+            )
+            _invalidate_overview_cache()
+            return item
         item = github_deployments.start_deployment(
             service=service,
             tag=tag,
@@ -213,6 +232,8 @@ def create_deployment(
         return saved
     except HTTPException:
         raise
+    except release_plan.ReleasePlanError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     except github_deployments.GitHubDispatchError as exc:
         _save_dispatch_error(
             exc, key, github_deployments.GITHUB_WORKFLOW_DISPATCH_FAILED
@@ -244,6 +265,8 @@ def rollback_deployment(
     service = _service_or_404(service_name)
     _require_deployment_ready(service)
     requested_by = require_deployer(request)
+    if release_plan.enabled(service_name):
+        require_mutation_origin(request)
     target = deployment_store.get(target_deployment_id)
     if target is None or target.service_name != service_name:
         raise HTTPException(
@@ -277,6 +300,16 @@ def rollback_deployment(
             ),
         )
     try:
+        if release_plan.enabled(service_name):
+            item = central_releases.start(
+                service=service,
+                tag=ReleaseTag(name=target.tag, sha=target.sha),
+                operator=requested_by,
+                key=key,
+                target=target,
+            )
+            _invalidate_overview_cache()
+            return item
         item = github_deployments.start_rollback(
             service=service,
             target=target,
@@ -287,6 +320,8 @@ def rollback_deployment(
         return saved
     except HTTPException:
         raise
+    except release_plan.ReleasePlanError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     except github_deployments.GitHubDispatchError as exc:
         _save_dispatch_error(
             exc, key, github_deployments.GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED
@@ -309,6 +344,13 @@ def list_service_deployments(
     )
     refreshed: list[DeploymentItem] = []
     for item in items:
+        if item.execution_repository:
+            try:
+                item = central_releases.reconcile(item)
+            except Exception:
+                item.error = "Release state could not be reconciled"
+            refreshed.append(item)
+            continue
         if item.status not in github_deployments.TERMINAL_STATUSES:
             try:
                 previous = item.model_dump()
@@ -372,6 +414,12 @@ def get_deployment(deployment_id: str):
     item = deployment_store.get(deployment_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Deployment not found")
+    if item.execution_repository:
+        try:
+            return central_releases.reconcile(item)
+        except Exception:
+            item.error = "Release state could not be reconciled"
+            return item
     if item.status not in github_deployments.TERMINAL_STATUSES:
         try:
             previous = item.model_dump()

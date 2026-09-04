@@ -16,6 +16,7 @@ from .config import config
 from .routers import (
     auth,
     catalog,
+    central_releases,
     costs,
     deployments,
     health,
@@ -62,6 +63,7 @@ app.include_router(quality.router)
 app.include_router(release_authorizations.router)
 app.include_router(service_factory.router)
 app.include_router(operational_secrets_router.router)
+app.include_router(central_releases.router)
 
 logger = logging.getLogger("eng_platform_api.requests")
 
@@ -70,7 +72,9 @@ logger = logging.getLogger("eng_platform_api.requests")
 async def record_request_duration(request: Request, call_next):
     started = monotonic()
     response = await call_next(request)
-    if request.url.path.startswith("/api/services/") and "/secrets" in request.url.path:
+    if (
+        request.url.path.startswith("/api/services/") and "/secrets" in request.url.path
+    ) or request.url.path.startswith("/api/internal/"):
         # Include validation/provider failures, not only successful responses.
         response.headers["Cache-Control"] = "no-store"
     duration_ms = round((monotonic() - started) * 1000, 2)

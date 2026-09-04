@@ -21,6 +21,8 @@ deployment:
   artifact_repository: cgm-sanplat-repo
   build_context: .
   health_path: /health
+  auxiliary_services: [cgm-sanplat-job-dispatcher, cgm-sanplat-job-worker]
+  auxiliary_jobs: [cgm-sanplat-clock-sync-worker, cgm-sanplat-data-recovery-worker, cgm-sanplat-fnd-ip-sync-worker, cgm-sanplat-fnd-observation-worker, cgm-sanplat-readings-export-worker, cgm-sanplat-smarti-prevention-worker, cgm-sanplat-sync-worker]
 finops:
   service: cgm-sanplat-api
   env: prod

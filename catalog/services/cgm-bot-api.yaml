@@ -16,6 +16,7 @@ deployment:
   artifact_repository: cgm-sanplat-repo
   build_context: services/cgm-bot-api
   health_path: /health
+  auxiliary_services: [cgm-bot-bulk-worker]
 finops:
   service: cgm-bot-api
   env: prod

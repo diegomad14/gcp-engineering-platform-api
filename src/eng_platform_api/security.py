@@ -45,6 +45,15 @@ def require_deployer(request: Request) -> str:
     return identity
 
 
+def require_mutation_origin(request: Request) -> None:
+    """An allowlisted session does not authorize cross-site mutation requests."""
+    if (
+        request.headers.get("origin") != config.auth.frontend_url
+        or request.headers.get("x-requested-with") != "EngineeringPlatform"
+    ):
+        raise HTTPException(403, "Invalid request origin")
+
+
 def verify_no_secrets_in_response(data: dict) -> dict:
     """Sanitize response data to ensure no secrets leak.
 

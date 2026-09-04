@@ -32,6 +32,8 @@ class ServiceDeploymentConfig(BaseModel):
     artifact_repository: str = "cgm-sanplat-repo"
     build_context: str = "."
     health_path: str = "/"
+    auxiliary_services: list[str] = Field(default_factory=list)
+    auxiliary_jobs: list[str] = Field(default_factory=list)
 
 
 class FinOpsLabels(BaseModel):
@@ -218,6 +220,11 @@ class DeploymentItem(BaseModel):
     id: str
     service_name: str
     repository: str
+    execution_repository: str = ""
+    execution_id: str = ""
+    configuration: dict = Field(default_factory=dict)
+    image_digest: str = ""
+    runtime_snapshot: dict = Field(default_factory=dict)
     tag: str
     sha: str = ""
     runner_label: RunnerLabel = ""

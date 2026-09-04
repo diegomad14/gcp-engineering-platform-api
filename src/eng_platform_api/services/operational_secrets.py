@@ -204,7 +204,10 @@ def snapshot(service: CatalogService) -> dict:
     if current.get("active_operation"):
         raise ConfigurationConflict("A secret operation requires reconciliation")
     available = metadata(service)
-    if any(item["required"] and not item["configured"] for item in available["items"]):
+    if any(
+        (item["required"] or item["pending_version"]) and not item["configured"]
+        for item in available["items"]
+    ):
         raise ConfigurationConflict("Required operational secrets are not configured")
     if available["generation"] != current.get("generation", 0):
         raise ConfigurationConflict("Configuration changed; retry deployment")
