@@ -66,7 +66,7 @@ jobs:
           sha="$(git rev-parse HEAD)"
           gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" --paginate \
             --jq '.check_runs[] | [.name,.conclusion] | @tsv' > "$RUNNER_TEMP/checks.tsv"
-          for check in quality workflows; do
+          for check in quality workflows 'normalized / quality-gate'; do
             awk -F '\t' -v required="$check" '$1 == required && $2 == "success" {found=1} END {exit !found}' "$RUNNER_TEMP/checks.tsv"
           done
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3

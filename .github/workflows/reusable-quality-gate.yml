@@ -152,6 +152,19 @@ jobs:
           [ -z "$TYPECHECK_COMMAND" ] || ARGS+=(--typecheck-command "$TYPECHECK_COMMAND")
           python "$RUNNER_TEMP/quality_gate.py" "${ARGS[@]}"
 
+      - name: Save legacy projection for the control-plane bootstrap
+        run: |
+          python - <<'PYCODE'
+          import json
+          from pathlib import Path
+          report = json.loads(Path("quality-report.json").read_text())
+          legacy = {key: value for key, value in report.items() if key not in {
+              "policy_version", "base_sha", "differential_coverage", "differential_threshold",
+              "changed_lines", "covered_changed_lines",
+          }}
+          Path("quality-report-legacy.json").write_text(json.dumps(legacy, indent=2))
+          PYCODE
+
       - name: Publish normalized report
         env:
           PLATFORM_API_URL: ${{ inputs.platform-api-url }}
@@ -161,7 +174,7 @@ jobs:
             "$PLATFORM_API_URL/api/quality/reports" \
             -H "Authorization: Bearer $QUALITY_API_TOKEN" \
             -H "Content-Type: application/json" \
-            --data-binary @quality-report.json
+            --data-binary @quality-report-legacy.json
 
       - name: Write job summary
         if: always()
@@ -190,6 +203,7 @@ jobs:
           name: quality-${{ inputs.service-name }}-${{ github.sha }}
           path: |
             quality-report.json
+            quality-report-legacy.json
             ${{ inputs.working-directory }}/quality-reports/
           if-no-files-found: error
           retention-days: 30

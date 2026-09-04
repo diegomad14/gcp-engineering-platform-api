@@ -24,13 +24,25 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
-      - name: Require exact OSS quality evidence
-        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-quality@ac9d68554c8b6332013785a5bcf451eabfee93ec
-        with:
-          platform-api-url: ${{ vars.ENG_PLATFORM_API_URL }}
-          service-name: eng-platform-api
-          commit-sha: ${{ github.sha }}
-          wait-seconds: '1800'
+      - name: Require complete bootstrap CI on this exact source commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 1800))
+          while (( SECONDS < deadline )); do
+            result=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" --event push --limit 1 --json status,conclusion --jq '.[0] | [.status, .conclusion] | @tsv')
+            if [[ "$result" == $'completed\tsuccess' ]]; then
+              exit 0
+            fi
+            if [[ "$result" == completed* ]]; then
+              echo "Bootstrap CI did not pass" >&2
+              exit 1
+            fi
+            sleep 15
+          done
+          echo "Timed out waiting for native and oss-v2 bootstrap checks" >&2
+          exit 1
       - name: Create semantic version tag and GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
