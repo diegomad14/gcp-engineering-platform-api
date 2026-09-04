@@ -1,6 +1,9 @@
 name: Verify Engineering Platform release authorization
 description: Reject direct service workflow dispatches and consume a one-time platform ticket.
 inputs:
+  signing_public_key:
+    description: Trusted public key supplied by the calling workflow
+    required: true
   token:
     description: Short-lived signed release authorization
     required: true
@@ -44,7 +47,7 @@ runs:
         EXPECTED_KIND: ${{ inputs.kind }}
         EXPECTED_TARGET_REVISION: ${{ inputs.target_revision }}
         PLATFORM_API_URL: ${{ inputs.platform_api_url }}
-        ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY: ${{ vars.ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY }}
+        ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY: ${{ inputs.signing_public_key }}
       run: |
         set -euo pipefail
         test -n "$PLATFORM_AUTHORIZATION"

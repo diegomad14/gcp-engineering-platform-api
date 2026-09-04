@@ -429,3 +429,15 @@ def test_candidate_image_must_match_recorded_release_and_service():
     ]:
         with pytest.raises(ValueError):
             candidate.verify_digest(live, expected, service_name)
+
+
+def test_composite_release_authorization_uses_explicit_public_key_input():
+    action = Path(".github/actions/verify-release-authorization/action.yml").read_text()
+    assert "vars." not in action
+    assert "${{ inputs.signing_public_key }}" in action
+    for name in ("platform-deploy.yml", "platform-rollback.yml"):
+        workflow = (Path(".github/workflows") / name).read_text()
+        assert (
+            "signing_public_key: ${{ vars.ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY }}"
+            in workflow
+        )
