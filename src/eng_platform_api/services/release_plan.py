@@ -12,7 +12,7 @@ from typing import Any
 from google.cloud import firestore
 
 from ..models import CatalogService, DeploymentItem, ReleaseTag
-from . import operational_secrets
+from . import operational_secrets, quality_policy, quality_store
 
 
 class ReleasePlanError(ValueError):
@@ -40,27 +40,39 @@ def digest(plan: dict) -> str:
     ).hexdigest()
 
 
-def require_quality(repo, sha: str) -> None:
-    """Require fresh successful checks on the exact commit, not a tag label."""
+def require_quality(repo, sha: str, service: CatalogService) -> None:
+    """Apply the current catalog-owned OSS policy to exact-commit evidence."""
+    report = quality_store.get_report(service.service_name, sha)
+    if (
+        report is None
+        or report.commit_sha != sha
+        or report.quality_gate_status != "PASSED"
+    ):
+        raise ReleasePlanError("Exact commit has no passed oss-v2 evidence")
+    errors = quality_policy.policy_errors(report, service)
+    if errors:
+        raise ReleasePlanError("Exact commit does not meet the catalog OSS policy")
+    generated = datetime.fromisoformat(report.generated_at.replace("Z", "+00:00"))
+    if (datetime.now(timezone.utc) - generated).total_seconds() > 168 * 3600:
+        raise ReleasePlanError("Exact commit quality evidence is stale; rerun CI")
     latest: dict[str, Any] = {}
     for check in repo.get_commit(sha).get_check_runs():
         previous = latest.get(check.name)
         if previous is None or check.id > previous.id:
             latest[check.name] = check
-    quality = [
-        latest[name] for name in ("quality", "quality / quality-gate") if name in latest
-    ]
-    sonar = latest.get("SonarCloud Code Analysis")
-    if not quality or sonar is None:
+    gate_names = {"quality", "quality / quality-gate", "normalized / quality-gate"}
+    quality = [latest[name] for name in gate_names if name in latest]
+    if not quality:
         raise ReleasePlanError("Exact commit has no complete quality evidence")
     if any(
         check.status != "completed" or check.conclusion != "success"
-        for check in [*quality, sonar]
+        for check in quality
     ):
         raise ReleasePlanError("Exact commit quality gate is not successful")
     if any(
         check.conclusion in {"failure", "cancelled", "timed_out", "action_required"}
-        for check in latest.values()
+        for name, check in latest.items()
+        if name in gate_names | {"backend", "workflows", "wm-postgres", "validate"}
     ):
         raise ReleasePlanError("Exact commit has a failed active check")
 
@@ -114,11 +126,19 @@ def create(
     db,
     target: DeploymentItem | None = None,
 ) -> dict:
-    fresh_sha = repo.get_commit(tag.name).sha
-    if fresh_sha != tag.sha or not re.fullmatch(r"[0-9a-f]{40}", tag.sha):
-        raise ReleasePlanError("Release tag moved since selection")
-    require_quality(repo, tag.sha)
-    register_immutable_tag(db, service.repository, tag)
+    if target:
+        if (
+            target.status != "SUCCEEDED"
+            or target.repository != service.repository
+            or target.service_name != service.service_name
+        ):
+            raise ReleasePlanError("Rollback requires a recorded successful deployment")
+    else:
+        fresh_sha = repo.get_commit(tag.name).sha
+        if fresh_sha != tag.sha or not re.fullmatch(r"[0-9a-f]{40}", tag.sha):
+            raise ReleasePlanError("Release tag moved since selection")
+        require_quality(repo, tag.sha, service)
+        register_immutable_tag(db, service.repository, tag)
     configuration = (
         target.configuration if target else operational_secrets.snapshot(service)
     )

@@ -1,6 +1,7 @@
 """Central release controls, durable result retries and immutable runtime evidence."""
 
 from copy import deepcopy
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -95,6 +96,23 @@ def check(name, conclusion="success", identifier=1):
     )
 
 
+def require_test_quality(repo, *, missing=False, errors=None, generated=None):
+    from eng_platform_api.services.catalog import get_service
+
+    report = SimpleNamespace(
+        commit_sha="a" * 40,
+        quality_gate_status="PASSED",
+        generated_at=generated or datetime.now(timezone.utc).isoformat(),
+    )
+    with (
+        patch.object(
+            plans.quality_store, "get_report", return_value=None if missing else report
+        ),
+        patch.object(plans.quality_policy, "policy_errors", return_value=errors or []),
+    ):
+        plans.require_quality(repo, "a" * 40, get_service("cgm-sanplat-api"))
+
+
 def test_exact_sha_quality_uses_latest_check_attempt():
     repo = Mock()
     repo.get_commit.return_value.get_check_runs.return_value = [
@@ -102,7 +120,7 @@ def test_exact_sha_quality_uses_latest_check_attempt():
         check("quality", identifier=2),
         check("SonarCloud Code Analysis"),
     ]
-    plans.require_quality(repo, "a" * 40)
+    require_test_quality(repo)
     repo.get_commit.assert_called_once_with("a" * 40)
 
 
@@ -110,7 +128,7 @@ def test_exact_sha_quality_uses_latest_check_attempt():
     "checks",
     [
         [],
-        [check("quality")],
+        [check("normalized / quality-gate", "failure")],
         [check("quality", "failure"), check("SonarCloud Code Analysis")],
         [
             check("quality"),
@@ -123,7 +141,28 @@ def test_missing_or_failed_quality_blocks_release(checks):
     repo = Mock()
     repo.get_commit.return_value.get_check_runs.return_value = checks
     with pytest.raises(plans.ReleasePlanError):
-        plans.require_quality(repo, "a" * 40)
+        require_test_quality(repo)
+
+
+def test_catalog_owned_oss_policy_cannot_be_bypassed_with_green_github_check():
+    repo = Mock()
+    repo.get_commit.return_value.get_check_runs.return_value = [check("quality")]
+    for options in (
+        {"missing": True},
+        {"errors": ["Changed-line coverage must be at least 80%"]},
+        {"generated": "2020-01-01T00:00:00+00:00"},
+    ):
+        with pytest.raises(plans.ReleasePlanError):
+            require_test_quality(repo, **options)
+
+
+def test_retired_vendor_check_does_not_override_valid_oss_evidence():
+    repo = Mock()
+    repo.get_commit.return_value.get_check_runs.return_value = [
+        check("normalized / quality-gate"),
+        check("SonarCloud Code Analysis", "cancelled"),
+    ]
+    require_test_quality(repo)
 
 
 def test_runner_defaults_to_hosted_without_querying_runners(monkeypatch):

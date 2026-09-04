@@ -13,7 +13,7 @@ from google.cloud import firestore
 
 from ..config import config
 from ..models import CatalogService, DeploymentItem, ReleaseTag, RunnerLabel
-from . import deployment_store, github_deployments, operational_secrets
+from . import catalog, deployment_store, github_deployments, operational_secrets
 from . import release_authorization, release_plan, workflow_identity
 
 
@@ -231,6 +231,67 @@ def report(execution_id: str, oidc: str, result: dict) -> None:
     db, record = authorized_execution(execution_id, oidc)
     validate_result(record["plan"], result)
     finish(db, execution_id, record["deployment_id"], result)
+
+
+def progress(execution_id: str, oidc: str, stage: str) -> None:
+    """Recheck release policy at both infrastructure boundaries and record progress."""
+    states = {
+        "deploy-candidate": "DEPLOYING_CANDIDATE",
+        "validate-candidate": "VALIDATING_CANDIDATE",
+        "promote": "PROMOTING",
+        "validate-production": "VALIDATING_PRODUCTION",
+        "rollback": "ROLLING_BACK",
+    }
+    if stage not in states:
+        raise release_plan.ReleasePlanError("Invalid release stage")
+    db, record = authorized_execution(execution_id, oidc)
+    if record["operator"].lower() not in config.auth.allowed_logins:
+        raise release_authorization.ReleaseAuthorizationError("Operator revoked")
+    plan = record["plan"]
+    if plan["kind"] == "deploy" and stage in {"deploy-candidate", "promote"}:
+        service = catalog.get_service(plan["service_name"])
+        if service is None:
+            raise release_plan.ReleasePlanError(
+                "Release service is no longer configured"
+            )
+        repo = github_deployments.github_client().get_repo(plan["repository"])
+        if repo.get_commit(plan["tag"]).sha != plan["sha"]:
+            raise release_plan.ReleasePlanError("Release tag moved since authorization")
+        release_plan.require_quality(repo, plan["sha"], service)
+    ref = execution(db, execution_id)
+    deployment = _deployment(db, record["deployment_id"])
+
+    @firestore.transactional
+    def commit(transaction):
+        current = ref.get(transaction=transaction).to_dict() or {}
+        raw_item = deployment.get(transaction=transaction).to_dict() or {}
+        if current.get("result"):
+            raise release_plan.ReleasePlanError("Release is already complete")
+        item = DeploymentItem.model_validate(raw_item)
+        keys = [step.key for step in item.stages]
+        if stage not in keys:
+            raise release_plan.ReleasePlanError(
+                "Stage does not match release operation"
+            )
+        for index, step in enumerate(item.stages):
+            step.status = (
+                "succeeded"
+                if index < keys.index(stage)
+                else "running"
+                if step.key == stage
+                else "pending"
+            )
+        transaction.update(
+            deployment,
+            {
+                "status": states[stage],
+                "current_stage": stage,
+                "stages": [step.model_dump() for step in item.stages],
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+    commit(db.transaction())
 
 
 def checkpoint(execution_id: str, oidc: str, snapshot: dict) -> None:

@@ -75,6 +75,11 @@ def plan():
         return json.load(response)["plan"]
 
 
+def progress(stage):
+    with api(os.environ["EXECUTION_ID"] + "/progress", {"stage": stage}):
+        pass
+
+
 def command(args, *, structured=False, cwd=None):
     # Capture provider output, which may include configuration. Return only parsed data.
     result = subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=False)
@@ -116,6 +121,10 @@ def build(selected):
                 "build",
                 "--build-arg",
                 "APP_VERSION=" + selected["tag"],
+                "--label",
+                "org.opencontainers.image.revision=" + selected["sha"],
+                "--label",
+                "org.opencontainers.image.version=" + selected["tag"],
                 "--tag",
                 image,
                 ".",
@@ -326,6 +335,7 @@ def release(selected):
         with api(os.environ["EXECUTION_ID"] + "/checkpoint", previous):
             pass
         if selected["kind"] == "rollback":
+            progress("rollback")
             # Revalidate every target secret before modifying a runtime.
             for runtimes in selected["target_runtimes"].values():
                 for runtime in runtimes.values():
@@ -336,6 +346,7 @@ def release(selected):
             revision = restore(selected, selected["target_runtimes"])
             image = selected["target_digest"]
         else:
+            progress("deploy-candidate")
             image = os.environ["IMAGE_DIGEST"]
             prefix = f"{selected['region']}-docker.pkg.dev/{selected['project_id']}/{selected['artifact_repository']}/{selected['image_name']}"
             if not re.fullmatch(re.escape(prefix) + r"@sha256:[0-9a-f]{64}", image):
@@ -361,9 +372,17 @@ def release(selected):
                 suffix=suffix,
             )
             url = candidate_url(selected, revision)
+            candidate = describe(selected, "revisions", revision)
+            if (
+                candidate["status"]["imageDigest"].rsplit("@", 1)[-1]
+                != image.rsplit("@", 1)[-1]
+            ):
+                raise RuntimeError("Candidate digest differs from approved artifact")
+            progress("validate-candidate")
             smoke(url, selected)
             result["candidate_revision"] = revision
             # Nothing affecting production is changed until candidate smoke succeeds.
+            progress("promote")
             mutated = True
             for kind in ("jobs", "services"):
                 for name, runtime in previous[kind].items():
@@ -380,15 +399,23 @@ def release(selected):
                         if kind == "services":
                             traffic(selected, name, {name + "-" + suffix: 100})
             traffic(selected, selected["service_name"], {revision: 100})
+            progress("validate-production")
         smoke(
             describe(selected, "services", selected["service_name"])["status"]["url"],
             selected,
         )
+        current = capture(selected)
+        if any(
+            runtime["image"] != image
+            for runtimes in current.values()
+            for runtime in runtimes.values()
+        ):
+            raise RuntimeError("Production runtimes do not match approved digest")
         result.update(
             status="SUCCEEDED",
             image_digest=image,
             production_revision=revision,
-            runtime_snapshot=capture(selected),
+            runtime_snapshot=current,
         )
     except Exception:
         if mutated:

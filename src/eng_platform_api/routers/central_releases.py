@@ -81,7 +81,7 @@ def source(execution_id: str, request: Request):
         if parsed.scheme != "https" or parsed.hostname != "codeload.github.com":
             raise RuntimeError("Unexpected source archive host")
         # urllib does not log the private redirect URL or authorization headers.
-        upstream = urlopen(archive, timeout=30)  # nosec B310 -- fixed HTTPS host checked above
+        upstream = urlopen(archive, timeout=30)  # nosec B310
     except Exception as exc:
         raise _failure(exc) from None
 
@@ -146,6 +146,25 @@ async def checkpoint(execution_id: str, request: Request):
             str(UUID(execution_id)),
             request.headers.get("x-github-oidc", ""),
             data,
+        )
+    except Exception as exc:
+        raise _failure(exc) from None
+    return {"accepted": True}
+
+
+@router.post("/{execution_id}/progress")
+async def progress(execution_id: str, request: Request):
+    data = await _body(request)
+    if set(data) != {"stage"} or not isinstance(data["stage"], str):
+        raise HTTPException(422, "Invalid release stage")
+    try:
+        from starlette.concurrency import run_in_threadpool
+
+        await run_in_threadpool(
+            central_releases.progress,
+            str(UUID(execution_id)),
+            request.headers.get("x-github-oidc", ""),
+            data["stage"],
         )
     except Exception as exc:
         raise _failure(exc) from None

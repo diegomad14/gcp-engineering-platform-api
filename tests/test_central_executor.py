@@ -60,7 +60,13 @@ def snapshot():
 def setup_release(executor, monkeypatch):
     image = "region-docker.pkg.dev/project/images/service@sha256:" + "b" * 64
     monkeypatch.setenv("IMAGE_DIGEST", image)
-    monkeypatch.setattr(executor, "capture", Mock(return_value=deepcopy(snapshot())))
+    applied = deepcopy(snapshot())
+    for runtimes in applied.values():
+        for runtime in runtimes.values():
+            runtime["image"] = image
+    monkeypatch.setattr(
+        executor, "capture", Mock(side_effect=[deepcopy(snapshot()), applied])
+    )
     monkeypatch.setattr(executor, "numeric_secret", Mock(return_value="wm-password:2"))
     monkeypatch.setattr(executor, "update_runtime", Mock())
     monkeypatch.setattr(
@@ -72,7 +78,11 @@ def setup_release(executor, monkeypatch):
     monkeypatch.setattr(
         executor,
         "describe",
-        Mock(return_value={"status": {"url": "https://prod.example"}}),
+        Mock(
+            return_value={
+                "status": {"url": "https://prod.example", "imageDigest": image}
+            }
+        ),
     )
 
 
