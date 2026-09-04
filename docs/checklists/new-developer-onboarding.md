@@ -29,8 +29,8 @@ Actionable version, no explanations. For the "why" behind each step, see
 - [ ] Branch: `feat|fix|chore|docs/<slug-kebab-case>`
 - [ ] Commits in Conventional Commits
 - [ ] Push + PR with a Conventional Commits title
-- [ ] `quality` / `workflows` / `validate` / `SonarCloud Code Analysis` checks green
-- [ ] `python scripts/quality/sonar_agent_check.py --pull-request <PR_NUMBER>` run and reviewed
+- [ ] `quality` / `workflows` / `validate` / normalized OSS gate checks green
+- [ ] Exact-commit oss-v2 report, comparison base and 80% changed-line coverage reviewed
 - [ ] Human review approved
 - [ ] Merged to `main` (tag/release is generated automatically — don't create the tag by hand)
 

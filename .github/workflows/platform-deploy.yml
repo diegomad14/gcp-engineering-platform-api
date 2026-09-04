@@ -249,6 +249,10 @@ jobs:
       production_revision: ${{ steps.promote.outputs.production_revision }}
       production_url: ${{ steps.promote.outputs.production_url }}
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.verify-release.outputs.sha }}
+          fetch-depth: 0
       - name: Require exact OSS quality evidence
         uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-quality@ac9d68554c8b6332013785a5bcf451eabfee93ec
         with:
@@ -261,6 +265,14 @@ jobs:
           workload_identity_provider: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+      - name: Verify candidate artifact matches approved commit
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-candidate@6cfcaabc15db69ba7df3638087468433a0ad5fdf
+        with:
+          platform-api-url: ${{ vars.ENG_PLATFORM_API_URL }}
+          service-name: ${{ inputs.service_name }}
+          revision: ${{ needs.deploy-candidate.outputs.revision }}
+          tag: ${{ inputs.tag }}
+          commit-sha: ${{ needs.verify-release.outputs.sha }}
       - name: Snapshot current production revision
         id: snapshot
         run: |

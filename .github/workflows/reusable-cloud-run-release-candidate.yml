@@ -116,6 +116,7 @@ jobs:
           [ "$QUALITY_GATE_ENABLED" = "true" ] || (echo "Release quality is mandatory"; exit 1)
           test -n "$PLATFORM_API_URL" || (echo "platform-api-url is required when quality gate is enabled" && exit 1)
           SHA="${QUALITY_COMMIT_SHA:-$DEFAULT_SHA}"
+          test "$SHA" = "$DEFAULT_SHA" || (echo "Quality commit must match the source being built"; exit 1)
           export VERIFIED_SHA="$SHA"
           verify_service() {
             local service="$1"

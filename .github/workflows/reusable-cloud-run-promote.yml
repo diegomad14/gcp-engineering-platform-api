@@ -86,6 +86,9 @@ jobs:
     runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 0
 
       - name: Verify quality evidence for selected services
         env:
@@ -102,6 +105,7 @@ jobs:
           [ "$QUALITY_GATE_ENABLED" = "true" ] || (echo "Release quality is mandatory"; exit 1)
           test -n "$PLATFORM_API_URL" || (echo "platform-api-url is required when quality gate is enabled" && exit 1)
           test -n "$QUALITY_COMMIT_SHA" || (echo "quality-commit-sha is required for promotion" && exit 1)
+          test "$(git rev-parse HEAD)" = "$QUALITY_COMMIT_SHA" || (echo "Quality commit does not match the release tag"; exit 1)
           export VERIFIED_SHA="$QUALITY_COMMIT_SHA"
           verify_service() {
             local service="$1"
@@ -122,6 +126,24 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f
 
+      - name: Verify api candidate artifact
+        if: ${{ inputs.promote-api }}
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-candidate@6cfcaabc15db69ba7df3638087468433a0ad5fdf
+        with:
+          platform-api-url: ${{ inputs.platform-api-url }}
+          service-name: ${{ inputs.api-service-name }}
+          revision: ${{ inputs.api-target-revision }}
+          tag: ${{ inputs.version }}
+          commit-sha: ${{ inputs.quality-commit-sha }}
+      - name: Verify web candidate artifact
+        if: ${{ inputs.promote-web }}
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-candidate@6cfcaabc15db69ba7df3638087468433a0ad5fdf
+        with:
+          platform-api-url: ${{ inputs.platform-api-url }}
+          service-name: ${{ inputs.web-service-name }}
+          revision: ${{ inputs.web-target-revision }}
+          tag: ${{ inputs.version }}
+          commit-sha: ${{ inputs.quality-commit-sha }}
       - name: Snapshot current state
         env:
           RUN_INPUTS_API_SERVICE_NAME: ${{ inputs.api-service-name }}
