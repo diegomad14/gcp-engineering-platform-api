@@ -39,6 +39,10 @@ jobs:
       - name: Publish immutable OCI artifact
         id: publish
         env:
+          RUN_GITHUB_ACTOR: ${{ github.actor }}
+          RUN_GITHUB_SERVER_URL: ${{ github.server_url }}
+          RUN_GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_GITHUB_SHA: ${{ github.sha }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_PATH: ${{ steps.image.outputs.path }}
         run: |
@@ -46,15 +50,15 @@ jobs:
           REFERENCE="ghcr.io/diegomad14/cgm-release-runner-image"
           TAG="ubuntu-20260814-runner-2.337.0"
           MEDIA_TYPE="application/vnd.cgm.release-runner.qcow2"
-          echo "$GHCR_TOKEN" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
+          echo "$GHCR_TOKEN" | oras login ghcr.io --username "${RUN_GITHUB_ACTOR}" --password-stdin
           # Push from the image directory so the layer is stored under its
           # basename (the filename pinned in approved-artifacts.json and
           # expected by fetch-image.sh), not the absolute runner temp path.
           pushd "$(dirname "$IMAGE_PATH")" >/dev/null
           oras push "$REFERENCE:$TAG" \
             "$(basename "$IMAGE_PATH"):$MEDIA_TYPE" \
-            --annotation "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
-            --annotation "org.opencontainers.image.revision=${{ github.sha }}" \
+            --annotation "org.opencontainers.image.source=${RUN_GITHUB_SERVER_URL}/${RUN_GITHUB_REPOSITORY}" \
+            --annotation "org.opencontainers.image.revision=${RUN_GITHUB_SHA}" \
             --annotation "org.opencontainers.image.version=$TAG"
           popd >/dev/null
           DIGEST=$(oras resolve "$REFERENCE:$TAG")

@@ -27,10 +27,8 @@ def _run(command: str, cwd: Path, output_path: Path | None = None) -> dict[str, 
             "skipped": True,
         }
     completed = subprocess.run(
-        command,
+        ["/bin/bash", "-e", "-o", "pipefail", "-c", command],
         cwd=cwd,
-        shell=True,
-        executable="/bin/bash",
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

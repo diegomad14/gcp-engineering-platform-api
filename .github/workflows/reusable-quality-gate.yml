@@ -114,6 +114,15 @@ jobs:
         id: gate
         continue-on-error: true
         env:
+          RUN_INPUTS_SERVICE_NAME: ${{ inputs.service-name }}
+          RUN_GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_GITHUB_SHA: ${{ github.sha }}
+          RUN_GITHUB_REF_NAME: ${{ github.ref_name }}
+          RUN_INPUTS_PROFILE: ${{ inputs.profile }}
+          RUN_INPUTS_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          RUN_INPUTS_COVERAGE_THRESHOLD: ${{ inputs.coverage-threshold }}
+          RUN_GITHUB_SERVER_URL: ${{ github.server_url }}
+          RUN_GITHUB_RUN_ID: ${{ github.run_id }}
           QUALITY_BASE_SHA: ${{ inputs.base-sha }}
           INSTALL_COMMAND: ${{ inputs.install-command }}
           TEST_COMMAND: ${{ inputs.test-command }}
@@ -125,14 +134,14 @@ jobs:
           set -o pipefail
           ARGS=(
             --base-sha "$QUALITY_BASE_SHA"
-            --service-name "${{ inputs.service-name }}"
-            --repository "${{ github.repository }}"
-            --commit-sha "${{ github.sha }}"
-            --branch "${{ github.ref_name }}"
-            --profile "${{ inputs.profile }}"
-            --working-directory "${{ inputs.working-directory }}"
-            --coverage-threshold "${{ inputs.coverage-threshold }}"
-            --workflow-run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            --service-name "${RUN_INPUTS_SERVICE_NAME}"
+            --repository "${RUN_GITHUB_REPOSITORY}"
+            --commit-sha "${RUN_GITHUB_SHA}"
+            --branch "${RUN_GITHUB_REF_NAME}"
+            --profile "${RUN_INPUTS_PROFILE}"
+            --working-directory "${RUN_INPUTS_WORKING_DIRECTORY}"
+            --coverage-threshold "${RUN_INPUTS_COVERAGE_THRESHOLD}"
+            --workflow-run-url "${RUN_GITHUB_SERVER_URL}/${RUN_GITHUB_REPOSITORY}/actions/runs/${RUN_GITHUB_RUN_ID}"
             --output "$GITHUB_WORKSPACE/quality-report.json"
           )
           [ -z "$INSTALL_COMMAND" ] || ARGS+=(--install-command "$INSTALL_COMMAND")

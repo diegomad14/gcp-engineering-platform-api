@@ -101,6 +101,27 @@ def lcov_coverage(report: Path, cwd: Path, root: Path) -> dict[str, dict[int, bo
     return result
 
 
+def type_only(path: Path, cwd: Path) -> bool:
+    """V8 can report phantom lines for files erased entirely by TypeScript."""
+    if path.suffix != ".ts":
+        return False
+    script = """
+const ts = require('typescript');
+const fs = require('fs');
+const source = ts.createSourceFile(process.argv[1], fs.readFileSync(process.argv[1], 'utf8'), ts.ScriptTarget.Latest, true);
+if (source.parseDiagnostics.length) process.exit(2);
+const erased = node => ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)
+  || (ts.isImportDeclaration(node) && node.importClause?.isTypeOnly)
+  || (ts.isExportDeclaration(node) && node.isTypeOnly)
+  || ts.isEmptyStatement(node);
+process.stdout.write(String(source.statements.length > 0 && source.statements.every(erased)));
+"""
+    return (
+        subprocess.check_output(["node", "-e", script, str(path)], cwd=cwd, text=True)
+        == "true"
+    )
+
+
 def differential(
     cwd: Path, report_dir: Path, profile: str, base: str, head: str
 ) -> dict:
@@ -129,6 +150,8 @@ def differential(
         if not any(local == p or local.startswith(p.rstrip("/") + "/") for p in roots):
             continue
         if any(fnmatch.fnmatch(local, pattern) for pattern in excludes):
+            continue
+        if profile == "node" and type_only(path, cwd):
             continue
         if name not in coverage:
             # A source file omitted from instrumentation must never become N/A.

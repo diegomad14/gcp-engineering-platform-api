@@ -69,10 +69,13 @@ jobs:
           python-version: ${{ inputs.python-version }}
           cache: pip
       - name: Install backend dependencies
-        run: ${{ inputs.backend-install-command }}
+        env:
+          RUN_INPUTS_BACKEND_INSTALL_COMMAND: ${{ inputs.backend-install-command }}
+        run: bash -e -o pipefail -c "$RUN_INPUTS_BACKEND_INSTALL_COMMAND"
       - name: Run backend tests
-        run: ${{ inputs.backend-test-command }}
-
+        env:
+          RUN_INPUTS_BACKEND_TEST_COMMAND: ${{ inputs.backend-test-command }}
+        run: bash -e -o pipefail -c "$RUN_INPUTS_BACKEND_TEST_COMMAND"
   frontend:
     if: ${{ inputs.frontend-enabled }}
     runs-on: ${{ inputs.runner-label != '' && inputs.runner-label || 'ubuntu-latest' }}
@@ -88,8 +91,9 @@ jobs:
         run: npm ci
       - name: Build frontend
         working-directory: ${{ inputs.frontend-working-directory }}
-        run: ${{ inputs.frontend-build-command }}
-
+        env:
+          RUN_INPUTS_FRONTEND_BUILD_COMMAND: ${{ inputs.frontend-build-command }}
+        run: bash -e -o pipefail -c "$RUN_INPUTS_FRONTEND_BUILD_COMMAND"
   openapi:
     if: ${{ inputs.openapi-enabled && inputs.openapi-command != '' }}
     runs-on: ${{ inputs.runner-label != '' && inputs.runner-label || 'ubuntu-latest' }}
@@ -102,6 +106,10 @@ jobs:
         with:
           python-version: ${{ inputs.python-version }}
       - name: Install backend dependencies
-        run: ${{ inputs.backend-install-command }}
+        env:
+          RUN_INPUTS_BACKEND_INSTALL_COMMAND: ${{ inputs.backend-install-command }}
+        run: bash -e -o pipefail -c "$RUN_INPUTS_BACKEND_INSTALL_COMMAND"
       - name: Run OpenAPI validation
-        run: ${{ inputs.openapi-command }}
+        env:
+          RUN_INPUTS_OPENAPI_COMMAND: ${{ inputs.openapi-command }}
+        run: bash -e -o pipefail -c "$RUN_INPUTS_OPENAPI_COMMAND"
