@@ -105,7 +105,6 @@ jobs:
           RUN_VARS_GCP_RELEASE_WIF_PROVIDER: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
           RUN_VARS_GCP_WIF_SERVICE_ACCOUNT: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
           RUN_VARS_GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
-          RUN_VARS_GCP_WIF_SERVICE_ACCOUNT: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
