@@ -366,6 +366,7 @@ def main() -> int:
             {
                 "name": "Changed-line coverage",
                 "category": "differential_coverage",
+                "findings": int(status == "FAILED"),
                 "status": status,
                 "details": detail,
                 "blocking_findings": int(status == "FAILED"),
@@ -390,6 +391,7 @@ def main() -> int:
                 {
                     "name": "Commit identity",
                     "category": "identity",
+                    "findings": 1,
                     "status": "FAILED",
                     "details": str(exc),
                 }

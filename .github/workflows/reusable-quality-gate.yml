@@ -193,7 +193,7 @@ jobs:
           print("| Check | Status | Findings |")
           print("|---|---:|---:|")
           for check in report["checks"]:
-              print(f"| {check['name']} | {check['status']} | {check['findings']} |")
+              print(f"| {check['name']} | {check['status']} | {check.get('findings', 0)} |")
           PY
 
       - name: Upload quality artifacts
