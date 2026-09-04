@@ -69,7 +69,7 @@ jobs:
     environment: production
     steps:
       - name: Verify Engineering Platform authorization
-        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-release-authorization@2a18490
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-release-authorization@1bcfe1025690e603375b0c5706bd58280c2889c5
         with:
           token: ${{ inputs.platform_authorization }}
           repository: ${{ github.repository }}
@@ -80,6 +80,7 @@ jobs:
           kind: rollback
           target_revision: ${{ inputs.target_revision }}
           platform_api_url: ${{ vars.ENG_PLATFORM_API_URL }}
+          signing_public_key: ${{ vars.ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY }}
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           workload_identity_provider: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
