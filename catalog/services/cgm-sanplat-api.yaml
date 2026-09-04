@@ -1,4 +1,9 @@
 service_name: cgm-sanplat-api
+operational_secrets:
+  - {key: WM_BASE_URL, secret_id: wm-base-url, description: URL HTTPS de WM, required: true, editable: true}
+  - {key: WM_USERNAME, secret_id: wm-username, description: Usuario de WM, required: true, editable: true}
+  - {key: WM_PASSWORD, secret_id: wm-password, description: Contraseña de WM, required: true, editable: true}
+  - {key: WM_API_KEY, secret_id: wm-api-key, description: API key opcional de WM, required: false, editable: true}
 repository: diegomad14/cgm-sanplat-api
 owner: cgm
 cost_center: cgm

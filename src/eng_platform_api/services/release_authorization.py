@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import time
 import uuid
@@ -68,6 +69,8 @@ def issue(
     requested_by: str,
     kind: str,
     target_revision: str = "",
+    execution_repository: str = "",
+    configuration: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     now = int(time.time())
     claims: dict[str, Any] = {
@@ -86,6 +89,13 @@ def issue(
     }
     if target_revision:
         claims["target_revision"] = target_revision
+    if execution_repository:
+        claims["execution_repository"] = execution_repository
+        claims["configuration_hash"] = hashlib.sha256(
+            json.dumps(
+                configuration or {}, sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
     header = {"alg": "EdDSA", "typ": "JWT", "kid": "release-v1"}
     signing_input = f"{_json_segment(header)}.{_json_segment(claims)}".encode()
     token = f"{signing_input.decode()}.{_b64encode(_private_key().sign(signing_input))}"
@@ -103,11 +113,11 @@ def verify(token: str, expected: dict[str, str]) -> dict[str, Any]:
     if header != {"alg": "EdDSA", "kid": "release-v1", "typ": "JWT"}:
         raise ReleaseAuthorizationError("Unsupported release authorization header")
     try:
-        _public_key().verify(
-            signature, f"{header_segment}.{payload_segment}".encode()
-        )
+        _public_key().verify(signature, f"{header_segment}.{payload_segment}".encode())
     except Exception as exc:
-        raise ReleaseAuthorizationError("Invalid release authorization signature") from exc
+        raise ReleaseAuthorizationError(
+            "Invalid release authorization signature"
+        ) from exc
     now = int(time.time())
     if (
         claims.get("iss") != ISSUER

@@ -20,11 +20,15 @@ tmp_store = Path(tempfile.mkdtemp(prefix="deployments_test_")) / "deployments.js
 
 @pytest.fixture(autouse=True)
 def isolated_store():
-    private_key = Ed25519PrivateKey.generate().private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.PKCS8,
-        serialization.NoEncryption(),
-    ).decode()
+    private_key = (
+        Ed25519PrivateKey.generate()
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        .decode()
+    )
     with (
         mock.patch(
             "eng_platform_api.services.deployment_store._DEFAULT_STORE_PATH",
@@ -304,9 +308,15 @@ def test_runner_label_is_allowlisted_and_forwarded(monkeypatch):
     monkeypatch.setenv("CGM_ACTIONS_RUNNER", "cgm-release-local")
     assert load_config().github.runner_label == "cgm-release-local"
 
-    with mock.patch.object(github_deployments.config.github, "runner_label", "cgm-release-local"):
-        assert github_deployments._runner_input() == {"runner_label": "cgm-release-local"}
-    with mock.patch.object(github_deployments.config.github, "runner_label", "arbitrary-runner"):
+    with mock.patch.object(
+        github_deployments.config.github, "runner_label", "cgm-release-local"
+    ):
+        assert github_deployments._runner_input() == {
+            "runner_label": "cgm-release-local"
+        }
+    with mock.patch.object(
+        github_deployments.config.github, "runner_label", "arbitrary-runner"
+    ):
         with pytest.raises(RuntimeError, match="not an allowed value"):
             github_deployments._runner_input()
 

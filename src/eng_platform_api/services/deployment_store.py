@@ -59,9 +59,7 @@ _firestore_client = firestore_client
 
 
 def release_authorization_collection() -> str:
-    return os.getenv(
-        "ENG_PLATFORM_RELEASE_AUTH_FIRESTORE_COLLECTION", ""
-    ).strip()
+    return os.getenv("ENG_PLATFORM_RELEASE_AUTH_FIRESTORE_COLLECTION", "").strip()
 
 
 def _firestore_collection():

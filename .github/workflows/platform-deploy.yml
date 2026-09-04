@@ -163,12 +163,15 @@ jobs:
           project_id: ${{ env.PROJECT_ID }}
           region: ${{ env.REGION }}
           no_traffic: true
+          flags: --service-account=eng-platform-runtime@cgm-assistant-prod.iam.gserviceaccount.com
           env_vars: |
             ENG_PLATFORM_MOCK_MODE=false
             ENG_PLATFORM_GITHUB_ENABLED=true
             ENG_PLATFORM_API_URL=${{ vars.ENG_PLATFORM_API_URL }}
             ENG_PLATFORM_FRONTEND_URL=${{ vars.ENG_PLATFORM_FRONTEND_URL }}
             ENG_PLATFORM_ALLOWED_GITHUB_LOGINS=${{ vars.ENG_PLATFORM_ALLOWED_GITHUB_LOGINS }}
+            ENG_PLATFORM_GITHUB_APP_ID=${{ vars.ENG_PLATFORM_GITHUB_APP_ID }}
+            ENG_PLATFORM_GITHUB_INSTALLATION_ID=${{ vars.ENG_PLATFORM_GITHUB_INSTALLATION_ID }}
             CGM_ACTIONS_RUNNER=${{ vars.CGM_ACTIONS_RUNNER }}
             ENG_PLATFORM_TRUST_IAP_IDENTITY=false
             ENG_PLATFORM_RELEASE_AUTH_FIRESTORE_COLLECTION=release_authorizations
@@ -179,6 +182,7 @@ jobs:
             ENG_PLATFORM_GITHUB_OAUTH_CLIENT_SECRET=eng-platform-oauth-client-secret:latest
             ENG_PLATFORM_SESSION_SECRET=eng-platform-session-secret:latest
             ENG_PLATFORM_RELEASE_SIGNING_PRIVATE_KEY=eng-platform-release-signing-private-key:latest
+            ENG_PLATFORM_GITHUB_PRIVATE_KEY=eng-platform-github-private-key:1
           secrets_update_strategy: merge
       - name: Create candidate URL
         id: candidate

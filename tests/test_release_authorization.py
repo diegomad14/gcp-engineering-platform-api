@@ -13,11 +13,15 @@ from eng_platform_api.services import release_authorization_store
 
 
 def _private_key_pem() -> str:
-    return Ed25519PrivateKey.generate().private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.PKCS8,
-        serialization.NoEncryption(),
-    ).decode()
+    return (
+        Ed25519PrivateKey.generate()
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        .decode()
+    )
 
 
 def _expected():
@@ -32,7 +36,9 @@ def _expected():
 
 
 def test_issue_and_verify_round_trip():
-    with mock.patch.object(config.github, "release_signing_private_key", _private_key_pem()):
+    with mock.patch.object(
+        config.github, "release_signing_private_key", _private_key_pem()
+    ):
         token, claims = release_authorization.issue(
             repository=_expected()["repository"],
             service_name=_expected()["service_name"],
@@ -48,7 +54,9 @@ def test_issue_and_verify_round_trip():
 
 
 def test_verify_rejects_changed_release_context():
-    with mock.patch.object(config.github, "release_signing_private_key", _private_key_pem()):
+    with mock.patch.object(
+        config.github, "release_signing_private_key", _private_key_pem()
+    ):
         token, _ = release_authorization.issue(
             repository=_expected()["repository"],
             service_name=_expected()["service_name"],
@@ -70,9 +78,15 @@ def test_verify_rejects_changed_release_context():
 def test_consume_is_one_time_only(tmp_path):
     expected = _expected()
     with (
-        mock.patch.object(config.github, "release_signing_private_key", _private_key_pem()),
-        mock.patch.object(release_authorization_store, "_DEFAULT_STORE_PATH", tmp_path / "auth.json"),
-        mock.patch.dict("os.environ", {"ENG_PLATFORM_RELEASE_AUTH_FIRESTORE_COLLECTION": ""}),
+        mock.patch.object(
+            config.github, "release_signing_private_key", _private_key_pem()
+        ),
+        mock.patch.object(
+            release_authorization_store, "_DEFAULT_STORE_PATH", tmp_path / "auth.json"
+        ),
+        mock.patch.dict(
+            "os.environ", {"ENG_PLATFORM_RELEASE_AUTH_FIRESTORE_COLLECTION": ""}
+        ),
     ):
         token, _ = release_authorization.issue(
             repository=expected["repository"],

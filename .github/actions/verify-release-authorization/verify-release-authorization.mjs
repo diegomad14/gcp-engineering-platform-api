@@ -62,11 +62,27 @@ if (env.EXPECTED_TARGET_REVISION && claims.target_revision !== env.EXPECTED_TARG
   fail("Platform release authorization mismatch: target_revision");
 }
 
+let oidc = "";
+if (claims.execution_repository) {
+  if (!env.ACTIONS_ID_TOKEN_REQUEST_URL || !env.ACTIONS_ID_TOKEN_REQUEST_TOKEN) {
+    fail("GitHub OIDC permission is required");
+  }
+  const url = new URL(env.ACTIONS_ID_TOKEN_REQUEST_URL);
+  url.searchParams.set("audience", "engineering-platform-release");
+  const identityResponse = await fetch(url, {
+    headers: { authorization: `bearer ${env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+  });
+  if (!identityResponse.ok) fail("Cannot obtain workflow identity");
+  oidc = (await identityResponse.json()).value;
+  if (!oidc) fail("Missing workflow identity");
+  console.log(`::add-mask::${oidc}`);
+}
+
 const response = await fetch(
   `${env.PLATFORM_API_URL.replace(/\/$/, "")}/api/internal/release-authorizations/consume`,
   {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", "x-github-oidc": oidc },
     body: JSON.stringify({
       token,
       repository: env.EXPECTED_REPOSITORY,
@@ -75,6 +91,8 @@ const response = await fetch(
       sha: env.EXPECTED_SHA,
       github_deployment_id: env.EXPECTED_DEPLOYMENT_ID,
       kind: env.EXPECTED_KIND,
+      target_revision: env.EXPECTED_TARGET_REVISION || "",
+      configuration_hash: claims.configuration_hash || "",
     }),
   },
 );

@@ -139,14 +139,10 @@ def load_config() -> PlatformConfig:
         ).rstrip("/"),
         allowed_logins=tuple(
             login.strip().lower()
-            for login in os.getenv(
-                "ENG_PLATFORM_ALLOWED_GITHUB_LOGINS", "diegomad14"
-            ).split(",")
+            for login in os.getenv("ENG_PLATFORM_ALLOWED_GITHUB_LOGINS", "").split(",")
             if login.strip()
         ),
-        trust_iap_identity=os.getenv(
-            "ENG_PLATFORM_TRUST_IAP_IDENTITY", "false"
-        ).lower()
+        trust_iap_identity=os.getenv("ENG_PLATFORM_TRUST_IAP_IDENTITY", "false").lower()
         == "true",
     )
 

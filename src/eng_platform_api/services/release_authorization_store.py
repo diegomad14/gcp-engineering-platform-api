@@ -12,7 +12,9 @@ from . import deployment_store
 
 _lock = threading.RLock()
 _DEFAULT_STORE_PATH = Path(
-    os.getenv("ENG_PLATFORM_RELEASE_AUTH_STORE_PATH", "data/release_authorizations.json")
+    os.getenv(
+        "ENG_PLATFORM_RELEASE_AUTH_STORE_PATH", "data/release_authorizations.json"
+    )
 )
 
 
@@ -32,7 +34,12 @@ def _firestore_collection():
     return deployment_store.firestore_client(project_id).collection(collection_name)
 
 
-def consume(jti: str, record: dict[str, Any]) -> bool:
+def consume(jti: str, record: dict[str, Any], *, require_durable: bool = False) -> bool:
+    if require_durable and (
+        not deployment_store.release_authorization_collection()
+        or not os.getenv("ENG_PLATFORM_GCP_PROJECT_ID", "").strip()
+    ):
+        raise RuntimeError("Durable release authorization store is not configured")
     collection = _firestore_collection()
     if collection is not None:
         try:
@@ -45,7 +52,9 @@ def consume(jti: str, record: dict[str, Any]) -> bool:
     with _lock:
         path = _path()
         try:
-            entries = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            entries = (
+                json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            )
         except (OSError, json.JSONDecodeError):
             entries = {}
         if not isinstance(entries, dict):

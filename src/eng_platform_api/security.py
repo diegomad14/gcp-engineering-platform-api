@@ -37,7 +37,7 @@ def require_deployer(request: Request) -> str:
             detail="Sign in with GitHub to deploy a service",
         )
     allowed = config.auth.allowed_logins
-    if allowed and identity.lower() not in allowed:
+    if not allowed or identity.lower() not in allowed:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"GitHub user '{identity}' is not allowed to deploy",

@@ -41,6 +41,17 @@ class FinOpsLabels(BaseModel):
     cost_center: str = ""
 
 
+class OperationalSecret(BaseModel):
+    """Trusted metadata only. Values never belong in the catalog."""
+
+    model_config = ConfigDict(extra="forbid")
+    key: str = Field(pattern=r"^[A-Z][A-Z0-9_]{0,127}$")
+    secret_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,255}$")
+    description: str = ""
+    required: bool = True
+    editable: bool = False
+
+
 class CatalogService(BaseModel):
     service_name: str
     repository: str
@@ -55,6 +66,7 @@ class CatalogService(BaseModel):
     finops: FinOpsLabels = Field(default_factory=FinOpsLabels)
     deployment_ready: bool = False
     deployment_blockers: list[str] = Field(default_factory=list)
+    operational_secrets: list[OperationalSecret] = Field(default_factory=list)
 
 
 class ServiceTraffic(BaseModel):
@@ -193,6 +205,8 @@ class ReleaseAuthorizationConsumeRequest(BaseModel):
     sha: str = Field(min_length=40, max_length=64)
     github_deployment_id: str = Field(min_length=1, max_length=64)
     kind: Literal["deploy", "rollback"]
+    target_revision: str = Field(default="", max_length=128)
+    configuration_hash: str = Field(default="", max_length=64)
 
 
 class ReleaseAuthorizationConsumeResponse(BaseModel):

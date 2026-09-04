@@ -89,6 +89,7 @@ def _catalog_service(cfg: dict) -> CatalogService:
         quality=ServiceQualityConfig(**cfg.get("quality", {})),
         deployment=ServiceDeploymentConfig(**cfg.get("deployment", {})),
         finops=FinOpsLabels(**cfg.get("finops", {})),
+        operational_secrets=cfg.get("operational_secrets", []),
     )
     blockers = deployment_blockers(service)
     return service.model_copy(

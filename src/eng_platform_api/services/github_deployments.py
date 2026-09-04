@@ -53,6 +53,8 @@ _tag_metadata_cache: dict[tuple[str, int, int], tuple[float, ReleaseTagPage]] = 
 _tag_metadata_cache_lock = Lock()
 GITHUB_WORKFLOW_DISPATCH_FAILED = "GitHub workflow dispatch failed"
 GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED = "GitHub rollback workflow dispatch failed"
+
+
 def effective_runner_label(runner_label: RunnerLabel, sha: str) -> str:
     del sha  # The fallback label is intentionally stable across all workflows.
     if runner_label not in {"", "cgm-release-local"}:
@@ -83,8 +85,13 @@ def default_stages(kind: str = "deploy") -> list[DeploymentStage]:
 
 def github_client() -> Github:
     github_config = config.github
-    if github_config.token:
-        return Github(github_config.token)
+    app_credentials = (
+        github_config.app_id,
+        github_config.installation_id,
+        github_config.private_key,
+    )
+    if any(app_credentials) and not all(app_credentials):
+        raise RuntimeError("GitHub App authentication is incompletely configured")
     if (
         github_config.app_id
         and github_config.installation_id
@@ -96,6 +103,8 @@ def github_client() -> Github:
         return integration.get_github_for_installation(
             int(github_config.installation_id)
         )
+    if github_config.token:
+        return Github(github_config.token)
     raise RuntimeError("GitHub authentication is not configured")
 
 

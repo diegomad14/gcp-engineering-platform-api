@@ -24,6 +24,7 @@ from .routers import (
     release_authorizations,
     releases,
     service_factory,
+    secrets as operational_secrets_router,
 )
 
 app = FastAPI(
@@ -60,6 +61,7 @@ app.include_router(costs.router)
 app.include_router(quality.router)
 app.include_router(release_authorizations.router)
 app.include_router(service_factory.router)
+app.include_router(operational_secrets_router.router)
 
 logger = logging.getLogger("eng_platform_api.requests")
 
@@ -68,6 +70,9 @@ logger = logging.getLogger("eng_platform_api.requests")
 async def record_request_duration(request: Request, call_next):
     started = monotonic()
     response = await call_next(request)
+    if request.url.path.startswith("/api/services/") and "/secrets" in request.url.path:
+        # Include validation/provider failures, not only successful responses.
+        response.headers["Cache-Control"] = "no-store"
     duration_ms = round((monotonic() - started) * 1000, 2)
     response.headers["X-Process-Time-Ms"] = str(duration_ms)
     log = logger.warning if duration_ms >= 1000 else logger.info
