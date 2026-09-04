@@ -22,7 +22,7 @@ from ..models import (
     ReleaseTagPage,
     RunnerLabel,
 )
-from . import deployment_store
+from . import deployment_store, release_authorization
 
 _SEMVER = re.compile(
     r"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
@@ -53,16 +53,21 @@ _tag_metadata_cache: dict[tuple[str, int, int], tuple[float, ReleaseTagPage]] = 
 _tag_metadata_cache_lock = Lock()
 GITHUB_WORKFLOW_DISPATCH_FAILED = "GitHub workflow dispatch failed"
 GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED = "GitHub rollback workflow dispatch failed"
-_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
 def effective_runner_label(runner_label: RunnerLabel, sha: str) -> str:
-    if runner_label == "":
-        return ""
-    normalized = sha.lower()
-    if not _COMMIT_SHA.fullmatch(normalized):
-        raise ValueError("Contingency deployments require a full commit SHA")
-    return f"cgm-release-local-{normalized}"
+    del sha  # The fallback label is intentionally stable across all workflows.
+    if runner_label not in {"", "cgm-release-local"}:
+        raise ValueError("Contingency deployments require cgm-release-local")
+    return runner_label
+
+
+def _runner_input() -> dict[str, str]:
+    """Pass only the allowlisted emergency runner label to service workflows."""
+    label = config.github.runner_label
+    if label not in {"", "cgm-release-local"}:
+        raise RuntimeError("ENG_PLATFORM_RUNNER_LABEL is not an allowed value")
+    return {"runner_label": label}
 
 
 class GitHubDispatchError(RuntimeError):
@@ -80,8 +85,13 @@ def default_stages(kind: str = "deploy") -> list[DeploymentStage]:
 
 def github_client() -> Github:
     github_config = config.github
-    if github_config.token:
-        return Github(github_config.token)
+    app_credentials = (
+        github_config.app_id,
+        github_config.installation_id,
+        github_config.private_key,
+    )
+    if any(app_credentials) and not all(app_credentials):
+        raise RuntimeError("GitHub App authentication is incompletely configured")
     if (
         github_config.app_id
         and github_config.installation_id
@@ -93,6 +103,8 @@ def github_client() -> Github:
         return integration.get_github_for_installation(
             int(github_config.installation_id)
         )
+    if github_config.token:
+        return Github(github_config.token)
     raise RuntimeError("GitHub authentication is not configured")
 
 
@@ -265,6 +277,15 @@ def start_deployment(
         updated_at=now,
         github_deployment_id=github_deployment.id,
     )
+    authorization, _ = release_authorization.issue(
+        repository=repository,
+        service_name=service_name,
+        tag=tag.name,
+        sha=tag.sha,
+        github_deployment_id=github_deployment.id,
+        requested_by=requested_by,
+        kind="deploy",
+    )
     try:
         github_deployment.create_status(
             state="queued",
@@ -285,6 +306,7 @@ def start_deployment(
                 "artifact_repository": service.deployment.artifact_repository,
                 "build_context": service.deployment.build_context,
                 "health_path": service.deployment.health_path,
+                "platform_authorization": authorization,
                 "runner_label": selected_runner_label,
             },
         )
@@ -361,6 +383,16 @@ def start_rollback(
         github_deployment_id=github_deployment.id,
         production_revision=target.production_revision,
     )
+    authorization, _ = release_authorization.issue(
+        repository=repository,
+        service_name=service_name,
+        tag=target.tag,
+        sha=target.sha,
+        github_deployment_id=github_deployment.id,
+        requested_by=requested_by,
+        kind="rollback",
+        target_revision=target.production_revision,
+    )
     try:
         github_deployment.create_status(
             state="queued",
@@ -377,6 +409,9 @@ def start_rollback(
                 "project_id": service.project_id,
                 "region": service.region,
                 "health_path": service.deployment.health_path,
+                "target_sha": target.sha,
+                "platform_authorization": authorization,
+                **_runner_input(),
             },
         )
     except Exception as exc:
@@ -399,6 +434,16 @@ def start_rollback(
 def _retry_workflow_and_inputs(
     repo: Any, service: CatalogService, item: DeploymentItem, target_revision: str
 ) -> tuple[Any, dict[str, str]]:
+    authorization, _ = release_authorization.issue(
+        repository=item.repository,
+        service_name=item.service_name,
+        tag=item.tag,
+        sha=item.sha,
+        github_deployment_id=item.github_deployment_id or 0,
+        requested_by=item.requested_by,
+        kind=item.kind,
+        target_revision=item.production_revision or target_revision,
+    )
     if item.kind == "rollback":
         revision = item.production_revision or target_revision
         if not revision:
@@ -412,6 +457,9 @@ def _retry_workflow_and_inputs(
             "project_id": service.project_id,
             "region": service.region,
             "health_path": service.deployment.health_path,
+            "target_sha": item.sha,
+            "platform_authorization": authorization,
+            **_runner_input(),
         }
         item.production_revision = revision
         return workflow, inputs
@@ -428,6 +476,7 @@ def _retry_workflow_and_inputs(
         "artifact_repository": service.deployment.artifact_repository,
         "build_context": service.deployment.build_context,
         "health_path": service.deployment.health_path,
+        "platform_authorization": authorization,
         "runner_label": item.effective_runner_label,
     }
     return workflow, inputs

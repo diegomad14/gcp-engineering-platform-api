@@ -83,8 +83,8 @@ argument identifies the repository containing the blocked workflow:
 
 Use `ci` for allowlisted checks on an internal pull request, `release` for
 allowlisted `main` push workflows, and `deploy` for a tagged deploy or rollback.
-CI rejects forks and PRs whose base is not `main`. The controller derives the
-only accepted custom label as `cgm-release-local-<SHA>` and recovers all
+CI rejects forks and PRs whose base is not `main`. The controller uses the
+only accepted contingency label, `cgm-release-local`, and recovers all
 allowlisted failing runs for that same SHA. Completed CI/release runs are
 eligible only when their job annotations prove a GitHub Billing failure.
 
@@ -92,12 +92,13 @@ When Billing is healthy, use a supervised simulation with `--cause drill
 --confirm-drill SCRUM-54-DRILL`. Drill mode keeps the same repository, actor,
 event, allowlist, SHA and cleanup guards, but does not require a Billing
 annotation. Before cleanup it audits every executed job through the GitHub API
-and fails unless the job used the temporary runner and SHA-bound label. Drill
+and fails unless the job used the temporary runner and contingency label. Drill
 evidence must be recorded as a simulation, never as a real Billing incident.
 
-Engineering Platform dispatches contingency deploys with the SHA-bound label.
-For those already-queued runs, add `--selection-mode explicit`; the controller
-preserves the same run without changing `CGM_ACTIONS_RUNNER`. CI and release
+Engineering Platform dispatches contingency deploys with the stable
+`cgm-release-local` label. For those already-queued runs, add
+`--selection-mode explicit`; the controller preserves the same run without
+changing `CGM_ACTIONS_RUNNER`. CI and release
 use the default `variable` mode and re-run the existing failed run IDs.
 
 The runner version/hash are loaded from `approved-artifacts.json`. Overrides
@@ -164,7 +165,7 @@ short-lived runner registration token.
 ## Security contract
 
 - Direct host runners are prohibited.
-- The runner is repository-scoped and uses only `cgm-release-local-<SHA>`.
+- The runner is repository-scoped and uses only `cgm-release-local`.
 - Only internal PRs targeting `main` can use the label; forks are rejected.
 - Workflows continue to authenticate to GCP through WIF/OIDC.
 - No JSON service-account keys, PATs or host credentials enter the guest.

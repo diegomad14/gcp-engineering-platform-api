@@ -98,7 +98,7 @@ permissions:
 
 jobs:
   verify-quality:
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     steps:
       - name: Verify quality evidence for selected services
         env:
@@ -128,7 +128,7 @@ jobs:
 
   build-and-push:
     needs: verify-quality
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     outputs:
       api-image: ${{ steps.api-meta.outputs.image }}
       web-image: ${{ steps.web-meta.outputs.image }}
@@ -167,7 +167,7 @@ jobs:
   deploy-candidate-api:
     needs: build-and-push
     if: ${{ inputs.build-api }}
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     outputs:
       api-revision: ${{ steps.tag-revision.outputs.revision }}
       api-tagged-url: ${{ steps.tag-revision.outputs.tagged-url }}
@@ -244,7 +244,7 @@ jobs:
   deploy-candidate-web:
     needs: [build-and-push, deploy-candidate-api]
     if: ${{ inputs.build-web && inputs.web-service-name != '' }}
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     outputs:
       web-revision: ${{ steps.tag-revision.outputs.revision }}
       web-tagged-url: ${{ steps.tag-revision.outputs.tagged-url }}
@@ -308,7 +308,7 @@ jobs:
   candidate-summary:
     needs: [build-and-push, deploy-candidate-api, deploy-candidate-web]
     if: ${{ always() && needs.build-and-push.result == 'success' }}
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     steps:
       - name: Print candidate summary
         run: |

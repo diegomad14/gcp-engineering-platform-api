@@ -36,6 +36,14 @@ on:
         required: false
         default: ""
         type: string
+      target_sha:
+        description: Immutable commit SHA associated with the rollback tag
+        required: true
+        type: string
+      platform_authorization:
+        description: Signed authorization issued by Engineering Platform
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -57,12 +65,24 @@ env:
 jobs:
   rollback:
     name: Rollback production
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     environment: production
     steps:
+      - name: Verify Engineering Platform authorization
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-release-authorization@2a18490
+        with:
+          token: ${{ inputs.platform_authorization }}
+          repository: ${{ github.repository }}
+          service_name: ${{ inputs.service_name }}
+          tag: ${{ inputs.target_tag }}
+          sha: ${{ inputs.target_sha }}
+          github_deployment_id: ${{ inputs.github_deployment_id }}
+          kind: rollback
+          target_revision: ${{ inputs.target_revision }}
+          platform_api_url: ${{ vars.ENG_PLATFORM_API_URL }}
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
-          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          workload_identity_provider: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
       - name: Mark GitHub deployment in progress

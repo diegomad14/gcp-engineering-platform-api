@@ -35,6 +35,11 @@ class GitHubConfig:
     private_key: str = ""
     deployment_workflow: str = "platform-deploy.yml"
     rollback_workflow: str = "platform-rollback.yml"
+    platform_api_url: str = ""
+    release_signing_private_key: str = ""
+    release_signing_public_key: str = ""
+    release_authorization_collection: str = "release_authorizations"
+    runner_label: str = ""
 
 
 @dataclass
@@ -44,6 +49,7 @@ class AuthConfig:
     session_secret: str = ""
     frontend_url: str = "http://localhost:5173"
     allowed_logins: tuple[str, ...] = ()
+    trust_iap_identity: bool = False
 
 
 @dataclass
@@ -110,6 +116,18 @@ def load_config() -> PlatformConfig:
         rollback_workflow=os.getenv(
             "ENG_PLATFORM_GITHUB_ROLLBACK_WORKFLOW", "platform-rollback.yml"
         ),
+        platform_api_url=os.getenv("ENG_PLATFORM_API_URL", "").rstrip("/"),
+        release_signing_private_key=os.getenv(
+            "ENG_PLATFORM_RELEASE_SIGNING_PRIVATE_KEY", ""
+        ).replace("\\n", "\n"),
+        release_signing_public_key=os.getenv(
+            "ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY", ""
+        ).replace("\\n", "\n"),
+        release_authorization_collection=os.getenv(
+            "ENG_PLATFORM_RELEASE_AUTH_FIRESTORE_COLLECTION",
+            "release_authorizations",
+        ),
+        runner_label=os.getenv("CGM_ACTIONS_RUNNER", "").strip(),
     )
 
     auth = AuthConfig(
@@ -121,11 +139,11 @@ def load_config() -> PlatformConfig:
         ).rstrip("/"),
         allowed_logins=tuple(
             login.strip().lower()
-            for login in os.getenv(
-                "ENG_PLATFORM_ALLOWED_GITHUB_LOGINS", "diegomad14"
-            ).split(",")
+            for login in os.getenv("ENG_PLATFORM_ALLOWED_GITHUB_LOGINS", "").split(",")
             if login.strip()
         ),
+        trust_iap_identity=os.getenv("ENG_PLATFORM_TRUST_IAP_IDENTITY", "false").lower()
+        == "true",
     )
 
     sonarqube = SonarQubeConfig(

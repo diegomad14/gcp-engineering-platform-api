@@ -44,6 +44,10 @@ on:
         required: false
         default: ""
         type: string
+      platform_authorization:
+        description: Signed authorization issued by Engineering Platform
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -68,20 +72,39 @@ env:
 jobs:
   verify-release:
     name: Verify release
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     outputs:
       image: ${{ steps.release.outputs.image }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ inputs.tag }}
+      - name: Resolve immutable release SHA
+        id: resolve-release
+        env:
+          RELEASE_REF: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse "$RELEASE_REF^{commit}")"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Verify Engineering Platform authorization
+        uses: ./.github/actions/verify-release-authorization
+        with:
+          token: ${{ inputs.platform_authorization }}
+          repository: ${{ github.repository }}
+          service_name: ${{ inputs.service_name }}
+          tag: ${{ inputs.tag }}
+          sha: ${{ steps.resolve-release.outputs.sha }}
+          github_deployment_id: ${{ inputs.github_deployment_id }}
+          kind: deploy
+          platform_api_url: ${{ vars.ENG_PLATFORM_API_URL }}
       - name: Validate immutable release and service configuration
         id: release
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
           test -n "$PROJECT_ID"
-          test -n "${{ vars.GCP_WIF_PROVIDER }}"
+          test -n "${{ vars.GCP_RELEASE_WIF_PROVIDER }}"
           test -n "${{ vars.GCP_WIF_SERVICE_ACCOUNT }}"
           IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$ARTIFACT_REPOSITORY/$IMAGE_NAME:$RELEASE_TAG"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
@@ -98,14 +121,14 @@ jobs:
   build:
     name: Build image
     needs: verify-release
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ inputs.tag }}
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
-          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          workload_identity_provider: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
       - name: Authenticate Docker to Artifact Registry
@@ -120,7 +143,7 @@ jobs:
   deploy-candidate:
     name: Deploy candidate
     needs: [verify-release, build]
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     environment: candidate
     outputs:
       revision: ${{ steps.candidate.outputs.revision }}
@@ -128,7 +151,7 @@ jobs:
     steps:
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
-          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          workload_identity_provider: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
       - name: Deploy zero-traffic revision
@@ -140,6 +163,27 @@ jobs:
           project_id: ${{ env.PROJECT_ID }}
           region: ${{ env.REGION }}
           no_traffic: true
+          flags: --service-account=eng-platform-runtime@cgm-assistant-prod.iam.gserviceaccount.com
+          env_vars: |
+            ENG_PLATFORM_MOCK_MODE=false
+            ENG_PLATFORM_GITHUB_ENABLED=true
+            ENG_PLATFORM_API_URL=${{ vars.ENG_PLATFORM_API_URL }}
+            ENG_PLATFORM_FRONTEND_URL=${{ vars.ENG_PLATFORM_FRONTEND_URL }}
+            ENG_PLATFORM_ALLOWED_GITHUB_LOGINS=${{ vars.ENG_PLATFORM_ALLOWED_GITHUB_LOGINS }}
+            ENG_PLATFORM_GITHUB_APP_ID=${{ vars.ENG_PLATFORM_GITHUB_APP_ID }}
+            ENG_PLATFORM_GITHUB_INSTALLATION_ID=${{ vars.ENG_PLATFORM_GITHUB_INSTALLATION_ID }}
+            CGM_ACTIONS_RUNNER=${{ vars.CGM_ACTIONS_RUNNER }}
+            ENG_PLATFORM_TRUST_IAP_IDENTITY=false
+            ENG_PLATFORM_RELEASE_AUTH_FIRESTORE_COLLECTION=release_authorizations
+          env_vars_update_strategy: merge
+          secrets: |
+            ENG_PLATFORM_GITHUB_TOKEN=eng-platform-github-token:latest
+            ENG_PLATFORM_GITHUB_OAUTH_CLIENT_ID=eng-platform-oauth-client-id:latest
+            ENG_PLATFORM_GITHUB_OAUTH_CLIENT_SECRET=eng-platform-oauth-client-secret:latest
+            ENG_PLATFORM_SESSION_SECRET=eng-platform-session-secret:latest
+            ENG_PLATFORM_RELEASE_SIGNING_PRIVATE_KEY=eng-platform-release-signing-private-key:latest
+            ENG_PLATFORM_GITHUB_PRIVATE_KEY=eng-platform-github-private-key:1
+          secrets_update_strategy: merge
       - name: Create candidate URL
         id: candidate
         run: |
@@ -157,7 +201,7 @@ jobs:
   validate-candidate:
     name: Validate candidate
     needs: deploy-candidate
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     steps:
       - name: Smoke candidate revision
         run: curl --fail-with-body --retry 5 --retry-all-errors "${{ needs.deploy-candidate.outputs.url }}$HEALTH_PATH"
@@ -175,7 +219,7 @@ jobs:
   promote:
     name: Promote production
     needs: [deploy-candidate, validate-candidate]
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     environment: production
     outputs:
       previous_revision: ${{ steps.snapshot.outputs.previous_revision }}
@@ -184,7 +228,7 @@ jobs:
     steps:
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
-          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          workload_identity_provider: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
       - name: Snapshot current production revision
@@ -204,7 +248,7 @@ jobs:
   validate-production:
     name: Validate production
     needs: promote
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     steps:
       - name: Smoke production
         run: curl --fail-with-body --retry 5 --retry-all-errors "${{ needs.promote.outputs.production_url }}$HEALTH_PATH"
@@ -223,12 +267,12 @@ jobs:
     name: Rollback production
     if: ${{ failure() && needs.promote.result == 'success' }}
     needs: [promote, validate-production]
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     environment: production
     steps:
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
-          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          workload_identity_provider: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
       - name: Restore previous production revision
@@ -249,7 +293,7 @@ jobs:
     name: Mark deployment failed
     if: ${{ failure() && needs.promote.result != 'success' }}
     needs: [verify-release, build, deploy-candidate, validate-candidate, promote]
-    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.runner_label == format('cgm-release-local-{0}', github.sha)) && inputs.runner_label || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     steps:
       - name: Publish pre-traffic failure
         env:

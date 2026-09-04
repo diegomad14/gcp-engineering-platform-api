@@ -9,7 +9,7 @@ import pytest
 
 SCRIPT = Path(__file__).parents[1] / "scripts/ops/local-release-runner/runner.py"
 COMMIT_SHA = "a" * 40
-RUNNER_LABEL = f"cgm-release-local-{COMMIT_SHA}"
+RUNNER_LABEL = "cgm-release-local"
 SPEC = importlib.util.spec_from_file_location("local_release_runner", SCRIPT)
 assert SPEC is not None
 assert SPEC.loader is not None
@@ -92,8 +92,8 @@ def test_runner_version_must_be_numeric_semver():
         local_runner.validate_runner_version("2.0.0/../../unexpected")
 
 
-def test_runner_label_is_bound_to_exact_commit_sha():
-    assert local_runner.runner_label_for_sha(COMMIT_SHA) == RUNNER_LABEL
+def test_runner_label_is_stable_for_a_valid_commit_sha():
+    assert local_runner.runner_label_for_sha(COMMIT_SHA) == "cgm-release-local"
     with pytest.raises(local_runner.ControllerError, match="40-character"):
         local_runner.runner_label_for_sha("abc123")
 
@@ -347,7 +347,7 @@ def test_guest_bootstrap_runs_runner_as_ubuntu_and_checks_docker():
     assert "set -x" not in bootstrap
 
 
-def test_release_workflows_require_sha_bound_runner_labels():
+def test_release_workflows_require_stable_runner_labels():
     root = SCRIPT.parents[3]
     for relative in (
         ".github/workflows/platform-deploy.yml",
@@ -357,8 +357,8 @@ def test_release_workflows_require_sha_bound_runner_labels():
         "templates/github-actions/platform-rollback.yml",
     ):
         workflow = (root / relative).read_text(encoding="utf-8")
-        assert "format('cgm-release-local-{0}', github.sha)" in workflow
-        assert "== 'cgm-release-local'" not in workflow
+        assert "== 'cgm-release-local'" in workflow
+        assert "format('cgm-release-local-{0}', github.sha)" not in workflow
 
 
 def test_validate_ctrl_c_cleans_up_and_returns_130(tmp_path):
