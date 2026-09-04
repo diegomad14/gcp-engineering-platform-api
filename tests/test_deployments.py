@@ -8,7 +8,10 @@ from unittest import mock
 
 import pytest
 from fastapi.testclient import TestClient
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from eng_platform_api.config import config
 from eng_platform_api.main import app
 from eng_platform_api.models import DeploymentItem, ReleaseTag, ReleaseTagPage
 
@@ -17,6 +20,15 @@ tmp_store = Path(tempfile.mkdtemp(prefix="deployments_test_")) / "deployments.js
 
 @pytest.fixture(autouse=True)
 def isolated_store():
+    private_key = (
+        Ed25519PrivateKey.generate()
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        .decode()
+    )
     with (
         mock.patch(
             "eng_platform_api.services.deployment_store._DEFAULT_STORE_PATH",
@@ -26,6 +38,11 @@ def isolated_store():
         mock.patch(
             "eng_platform_api.routers.deployments.require_deployer",
             return_value="diegomad14",
+        ),
+        mock.patch.object(
+            config.github,
+            "release_signing_private_key",
+            private_key,
         ),
     ):
         tmp_store.unlink(missing_ok=True)
@@ -282,6 +299,26 @@ def test_github_token_is_trimmed(monkeypatch):
 
     monkeypatch.setenv("ENG_PLATFORM_GITHUB_TOKEN", "token-with-whitespace\n")
     assert load_config().github.token == "token-with-whitespace"
+
+
+def test_runner_label_is_allowlisted_and_forwarded(monkeypatch):
+    from eng_platform_api.config import load_config
+    from eng_platform_api.services import github_deployments
+
+    monkeypatch.setenv("CGM_ACTIONS_RUNNER", "cgm-release-local")
+    assert load_config().github.runner_label == "cgm-release-local"
+
+    with mock.patch.object(
+        github_deployments.config.github, "runner_label", "cgm-release-local"
+    ):
+        assert github_deployments._runner_input() == {
+            "runner_label": "cgm-release-local"
+        }
+    with mock.patch.object(
+        github_deployments.config.github, "runner_label", "arbitrary-runner"
+    ):
+        with pytest.raises(RuntimeError, match="not an allowed value"):
+            github_deployments._runner_input()
 
 
 def test_create_deployment_hides_upstream_error_details(client):
@@ -544,7 +581,7 @@ def test_dispatch_uses_independent_service_catalog_configuration():
     assert inputs["project_id"] == "cgm-assistant-prod"
 
 
-def test_contingency_dispatch_uses_sha_bound_runner_label():
+def test_contingency_dispatch_uses_stable_runner_label():
     from eng_platform_api.services import catalog, github_deployments
 
     service = catalog.get_service("cgm-sanplat-web")
@@ -567,7 +604,7 @@ def test_contingency_dispatch_uses_sha_bound_runner_label():
             runner_label="cgm-release-local",
         )
 
-    expected = f"cgm-release-local-{_tag().sha}"
+    expected = "cgm-release-local"
     assert item.runner_label == "cgm-release-local"
     assert item.effective_runner_label == expected
     assert (

@@ -51,6 +51,38 @@
           "validation_targets": {
             "type": "array"
           },
+          "operational_secrets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "key",
+                "secret_id"
+              ],
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+                },
+                "secret_id": {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z0-9_-]{1,255}$"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "required": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "editable": {
+                  "type": "boolean",
+                  "default": false
+                }
+              }
+            }
+          },
           "quality": {
             "type": "object",
             "additionalProperties": false,

@@ -38,7 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Lint GitHub Actions
-        run: docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint:1.7.7 .github/workflows/*.yml templates/github-actions/*.yml examples/caller-workflows/*.yml
+        run: docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint:1.7.12 .github/workflows/*.yml templates/github-actions/*.yml examples/caller-workflows/*.yml
       - name: Smoke Service Factory container image
         run: |
           docker build --tag eng-platform-api:ci .

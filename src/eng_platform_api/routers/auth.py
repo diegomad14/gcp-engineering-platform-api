@@ -63,7 +63,7 @@ async def current_session(request: Request):
     identity = get_identity(request)
     allowed = config.auth.allowed_logins
     can_deploy = identity != "anonymous" and (
-        not allowed or identity.lower() in allowed
+        bool(allowed) and identity.lower() in allowed
     )
     return AuthSession(
         authenticated=identity != "anonymous",

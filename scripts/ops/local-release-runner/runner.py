@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import Any
 
 
-LABEL_PREFIX = "cgm-release-local-"
 LEGACY_LABEL = "cgm-release-local"
 NORMAL_LABEL = "ubuntu-latest"
 STATE_VERSION = 1
@@ -55,7 +54,7 @@ DEPLOY_WORKFLOWS = {"platform deploy", "platform rollback"}
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-RUNNER_LABEL_RE = re.compile(r"^cgm-release-local-[0-9a-f]{40}$")
+RUNNER_LABEL_RE = re.compile(r"^cgm-release-local$")
 RUNNER_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 RUNNER_NAME_RE = re.compile(r"^cgm-release-local-\d+-\d+$")
 APPROVED_ARTIFACTS_PATH = Path(__file__).with_name("approved-artifacts.json")
@@ -136,13 +135,11 @@ def runner_label_for_sha(sha: str) -> str:
     normalized = sha.lower()
     if not GIT_SHA_RE.fullmatch(normalized):
         raise ControllerError("GitHub run SHA must be a 40-character commit SHA")
-    return f"{LABEL_PREFIX}{normalized}"
+    return LEGACY_LABEL
 
 
 def is_supported_variable(value: str) -> bool:
-    return value in {NORMAL_LABEL, LEGACY_LABEL} or bool(
-        RUNNER_LABEL_RE.fullmatch(value)
-    )
+    return value in {NORMAL_LABEL, LEGACY_LABEL}
 
 
 def variable_value(repo: str) -> str | None:
@@ -160,7 +157,7 @@ def variable_value(repo: str) -> str | None:
 
 
 def set_variable(repo: str, value: str) -> None:
-    if value != NORMAL_LABEL and not RUNNER_LABEL_RE.fullmatch(value):
+    if value not in {NORMAL_LABEL, LEGACY_LABEL}:
         raise ControllerError("Unsupported CGM_ACTIONS_RUNNER value")
     gh(["variable", "set", "CGM_ACTIONS_RUNNER", "--repo", repo, "--body", value])
 
@@ -992,7 +989,7 @@ def run_validate(args: argparse.Namespace) -> int:
     require_prerequisites(image, args.image_sha256)
 
     runner_name = f"cgm-release-local-{int(time.time())}-{os.getpid()}"
-    runner_label = LABEL_PREFIX + hashlib.sha256(runner_name.encode()).hexdigest()[:40]
+    runner_label = LEGACY_LABEL
     work_dir = Path(tempfile.mkdtemp(prefix="cgm-release-runner-"))
     path = (
         Path(args.state_file).expanduser().resolve()
