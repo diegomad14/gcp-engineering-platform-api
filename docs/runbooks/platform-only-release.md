@@ -1,16 +1,11 @@
 # Platform-only release runbook
 
-## One-time control-plane bootstrap
+## Completed control-plane transition
 
-After merging the control-plane PR, run **Bootstrap Platform Runtime** from the
-`main` branch with the new semantic-release tag. It is restricted to
-`diegomad14`, deploys a zero-traffic candidate, smokes `/health`, promotes it,
-and restores the previous revision if the bootstrap fails.
-
-Once it succeeds, verify one normal release from Engineering Platform and then
-remove the six legacy `cgm-github-pool` deployer bindings. The bootstrap
-workflow intentionally depends on those bindings, so it becomes inoperable
-after cutover. Do not use it for routine service releases.
+The v0.19.0 compatibility bootstrap completed on 2026-09-04, run 33923346159.
+Its temporary workflow has been removed. New releases publish oss-v2 reports and
+use the signed Platform Deploy path below. The original bootstrap evidence and
+revision remain available for the audit trail.
 
 Engineering Platform is the only normal release entrypoint. An allowlisted
 GitHub user signs in to the web UI, selects an immutable release tag, and
@@ -42,3 +37,22 @@ Operators do not use `gcloud`, GCP Console, or direct workflow dispatches for
 normal deploys and rollbacks. Platform maintainers handle allowlist changes,
 key rotation, repository policy changes, and control-plane releases separately
 from the daily service release process.
+
+## Release federation (2026-09-04)
+
+The release WIF provider accepts only the Cloud Deploy Platform GitHub App
+(actor ID `306096861`), `workflow_dispatch` on a `refs/tags/v*` ref, the six
+catalog repositories, and each repository's exact Platform Deploy or Platform
+Rollback workflow path. Direct operator dispatch cannot authenticate through
+this provider. The action verifies the trusted signing key supplied explicitly
+by the caller; composite actions cannot access GitHub's `vars` context.
+
+The previous `ref_protected` condition prevented normal releases because private
+repositories on the current GitHub plan cannot configure tag/branch rulesets.
+The application identity and exact workflow path replace that condition. Native
+quality, exact-SHA oss-v2 evidence, signed one-time authorization and historical
+rollback verification remain mandatory in the release workflows. The provider
+condition is recorded in `docs/quality/release-wif-policy.json`.
+
+Keep the `cgm-release-local` allowlist and exact-SHA contingency restrictions;
+this federation configuration does not authorize arbitrary local runners.
