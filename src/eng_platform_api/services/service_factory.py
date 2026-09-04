@@ -130,13 +130,13 @@ def _build_caller_workflow(
 
         jobs:
           quality:
-            uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-quality-gate.yml@ac9d68554c8b6332013785a5bcf451eabfee93ec
+            uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-quality-gate.yml@b6455d24611ee244414de66abe63e5507d2398a8
             with:
               service-name: {service_name}
               profile: {quality_profile}
               working-directory: {quality_working_directory}
               coverage-threshold: {coverage_threshold}
-              platform-ref: ac9d68554c8b6332013785a5bcf451eabfee93ec
+              platform-ref: b6455d24611ee244414de66abe63e5507d2398a8
               platform-api-url: ${{{{ vars.ENG_PLATFORM_API_URL }}}}
             secrets:
               QUALITY_API_TOKEN: ${{{{ secrets.QUALITY_API_TOKEN }}}}
@@ -181,7 +181,7 @@ def _build_caller_workflow(
 
     jobs:
       call:
-        uses: diegomad14/gcp-engineering-platform-api/.github/workflows/{platform_workflow}@ac9d68554c8b6332013785a5bcf451eabfee93ec
+        uses: diegomad14/gcp-engineering-platform-api/.github/workflows/{platform_workflow}@b6455d24611ee244414de66abe63e5507d2398a8
         with:
           project-id: ${{{{ vars.GCP_PROJECT_ID }}}}
           region: ${{{{ vars.GCP_REGION }}}}
