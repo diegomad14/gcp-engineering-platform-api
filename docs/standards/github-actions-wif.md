@@ -20,7 +20,7 @@ runs-on: ${{ (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label
 
 `ubuntu-latest` is the normal value. The local contingency is a repository-
 scoped runner inside a disposable Linux x64 VM launched from the developer's
-Windows, macOS or Linux machine. Pull-request, PR-title and Sonar/quality
+Windows, macOS or Linux machine. Pull-request, PR-title and OSS quality
 workflows remain on hosted runners and must not execute on the local runner.
 Restore the hosted runner after the incident. Follow the canonical Obsidian
 runbook `Runbook - GitHub Actions bloqueado` for billing, quota, runner and

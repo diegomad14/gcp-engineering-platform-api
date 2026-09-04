@@ -146,11 +146,8 @@ def load_config() -> PlatformConfig:
         == "true",
     )
 
-    sonarqube = SonarQubeConfig(
-        enabled=os.getenv("ENG_PLATFORM_SONARQUBE_ENABLED", "false").lower() == "true",
-        token=os.getenv("ENG_PLATFORM_SONARQUBE_TOKEN", ""),
-        host_url=os.getenv("SONAR_HOST_URL", "https://sonarcloud.io"),
-    )
+    # Deprecated compatibility fields are inert; no Sonar credentials are loaded.
+    sonarqube = SonarQubeConfig()
 
     quality = QualityConfig(
         ingest_token=os.getenv("ENG_PLATFORM_QUALITY_INGEST_TOKEN", ""),

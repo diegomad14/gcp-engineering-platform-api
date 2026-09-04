@@ -407,3 +407,25 @@ def test_runner_emits_complete_differential_check_for_ci_summary(tmp_path, monke
     assert all(isinstance(check["findings"], int) for check in report["checks"])
     assert report["checks"][-1]["category"] == "differential_coverage"
     assert not policy_errors(QualityReportCreate(**report), service())
+
+
+def test_candidate_image_must_match_recorded_release_and_service():
+    spec = importlib.util.spec_from_file_location(
+        "candidate",
+        Path(__file__).parents[1] / ".github/actions/verify-candidate/verify.py",
+    )
+    candidate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(candidate)
+    digest = "sha256:" + "a" * 64
+    live = {
+        "status": {"imageDigest": "registry/image@" + digest},
+        "metadata": {"labels": {"serving.knative.dev/service": "test-api"}},
+    }
+    candidate.verify_digest(live, digest, "test-api")
+    for expected, service_name in [
+        ("", "test-api"),
+        ("sha256:" + "b" * 64, "test-api"),
+        (digest, "other-api"),
+    ]:
+        with pytest.raises(ValueError):
+            candidate.verify_digest(live, expected, service_name)

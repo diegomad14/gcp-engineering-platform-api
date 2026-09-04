@@ -22,7 +22,7 @@ GitHub App Repo (source of truth for app code)
   v
 GitHub Actions (Execution Engine)
   |
-  +--> SonarQube Cloud ─────────── quality gate
+  +--> OSS quality reports ─────── release evidence
   +--> GCP Cloud Run ───────────── release targets (deploy, promote, traffic)
   +--> GCP Cloud Monitoring ────── read-only metrics
   +--> GCP BigQuery ────────────── read-only billing data

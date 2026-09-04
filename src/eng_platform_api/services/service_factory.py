@@ -130,13 +130,13 @@ def _build_caller_workflow(
 
         jobs:
           quality:
-            uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-quality-gate.yml@b6455d24611ee244414de66abe63e5507d2398a8
+            uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-quality-gate.yml@bac46b1a70c0305470ed1d4c11a18bf07c09ab76
             with:
               service-name: {service_name}
               profile: {quality_profile}
               working-directory: {quality_working_directory}
               coverage-threshold: {coverage_threshold}
-              platform-ref: b6455d24611ee244414de66abe63e5507d2398a8
+              platform-ref: bac46b1a70c0305470ed1d4c11a18bf07c09ab76
               platform-api-url: ${{{{ vars.ENG_PLATFORM_API_URL }}}}
             secrets:
               QUALITY_API_TOKEN: ${{{{ secrets.QUALITY_API_TOKEN }}}}
@@ -181,7 +181,7 @@ def _build_caller_workflow(
 
     jobs:
       call:
-        uses: diegomad14/gcp-engineering-platform-api/.github/workflows/{platform_workflow}@b6455d24611ee244414de66abe63e5507d2398a8
+        uses: diegomad14/gcp-engineering-platform-api/.github/workflows/{platform_workflow}@bac46b1a70c0305470ed1d4c11a18bf07c09ab76
         with:
           project-id: ${{{{ vars.GCP_PROJECT_ID }}}}
           region: ${{{{ vars.GCP_REGION }}}}
@@ -308,6 +308,7 @@ def _build_semantic_release_workflow(service_name: str = "") -> str:
           commit-sha: ${{{{ github.sha }}}}
           wait-seconds: '1800'
 """
+    workflow = workflow.replace("${{{{", "${{").replace("}}}}", "}}")
     return workflow.replace(
         "      - name: Create semantic version",
         gate + "      - name: Create semantic version",

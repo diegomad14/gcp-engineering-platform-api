@@ -38,7 +38,7 @@
 | App repo workflow | Platform caller example |
 |---|---|
 | PR checks | `examples/caller-workflows/pr-check-caller.yml` |
-| SonarQube | `examples/caller-workflows/sonarqube-caller.yml` |
+| OSS quality | `examples/caller-workflows/pr-check-caller.yml` |
 | Release candidate | `examples/caller-workflows/release-candidate-caller.yml` |
 | Promote PROD | `examples/caller-workflows/promote-caller.yml` |
 | Emergency promote | `examples/caller-workflows/promote-emergency-caller.yml` |
