@@ -130,13 +130,13 @@ def _build_caller_workflow(
 
         jobs:
           quality:
-            uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-quality-gate.yml@fix/oss-release-quality
+            uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-quality-gate.yml@ac9d68554c8b6332013785a5bcf451eabfee93ec
             with:
               service-name: {service_name}
               profile: {quality_profile}
               working-directory: {quality_working_directory}
               coverage-threshold: {coverage_threshold}
-              platform-ref: fix/oss-release-quality
+              platform-ref: ac9d68554c8b6332013785a5bcf451eabfee93ec
               platform-api-url: ${{{{ vars.ENG_PLATFORM_API_URL }}}}
             secrets:
               QUALITY_API_TOKEN: ${{{{ secrets.QUALITY_API_TOKEN }}}}
@@ -181,7 +181,7 @@ def _build_caller_workflow(
 
     jobs:
       call:
-        uses: diegomad14/gcp-engineering-platform-api/.github/workflows/{platform_workflow}@fix/oss-release-quality
+        uses: diegomad14/gcp-engineering-platform-api/.github/workflows/{platform_workflow}@ac9d68554c8b6332013785a5bcf451eabfee93ec
         with:
           project-id: ${{{{ vars.GCP_PROJECT_ID }}}}
           region: ${{{{ vars.GCP_REGION }}}}
@@ -301,7 +301,7 @@ def _build_semantic_release_workflow(service_name: str = "") -> str:
     """)
 
     gate = f"""      - name: Require exact OSS quality evidence
-        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-quality@fix/oss-release-quality
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-quality@ac9d68554c8b6332013785a5bcf451eabfee93ec
         with:
           platform-api-url: ${{{{ vars.ENG_PLATFORM_API_URL }}}}
           service-name: {service_name}

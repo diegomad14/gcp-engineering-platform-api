@@ -58,7 +58,8 @@ def test_generate_service_plan():
     assert "SonarQube" not in data["yaml_contract"]
     assert "reusable-quality-gate.yml" in data["caller_pr_check"]
     assert (
-        "reusable-quality-gate.yml@fix/oss-release-quality" in data["caller_pr_check"]
+        "reusable-quality-gate.yml@ac9d68554c8b6332013785a5bcf451eabfee93ec"
+        in data["caller_pr_check"]
     )
     assert "workflow_dispatch" in data["platform_deploy_workflow"]
     assert "github_deployment_id" in data["platform_deploy_workflow"]

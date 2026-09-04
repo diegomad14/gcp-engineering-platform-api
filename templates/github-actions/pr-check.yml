@@ -11,13 +11,13 @@ permissions:
 
 jobs:
   quality:
-    uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-quality-gate.yml@fix/oss-release-quality
+    uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-quality-gate.yml@ac9d68554c8b6332013785a5bcf451eabfee93ec
     with:
       service-name: SERVICE_NAME_HERE
       profile: python
       working-directory: .
       coverage-threshold: 70
-      platform-ref: fix/oss-release-quality
+      platform-ref: ac9d68554c8b6332013785a5bcf451eabfee93ec
       platform-api-url: ${{ vars.ENG_PLATFORM_API_URL }}
     secrets:
       QUALITY_API_TOKEN: ${{ secrets.QUALITY_API_TOKEN }}

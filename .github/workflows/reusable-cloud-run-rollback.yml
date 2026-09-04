@@ -92,14 +92,14 @@ jobs:
 
       - name: Verify recorded api rollback provenance
         if: ${{ inputs.rollback-api }}
-        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-rollback@fix/oss-release-quality
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-rollback@ac9d68554c8b6332013785a5bcf451eabfee93ec
         with:
           platform-api-url: ${{ inputs.platform-api-url }}
           service-name: ${{ inputs.api-service-name }}
           revision: ${{ inputs.api-rollback-revision }}
       - name: Verify recorded web rollback provenance
         if: ${{ inputs.rollback-web }}
-        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-rollback@fix/oss-release-quality
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-rollback@ac9d68554c8b6332013785a5bcf451eabfee93ec
         with:
           platform-api-url: ${{ inputs.platform-api-url }}
           service-name: ${{ inputs.web-service-name }}

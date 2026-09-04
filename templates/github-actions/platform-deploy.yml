@@ -111,7 +111,7 @@ jobs:
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Require exact OSS quality evidence
-        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-quality@fix/oss-release-quality
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-quality@ac9d68554c8b6332013785a5bcf451eabfee93ec
         with:
           platform-api-url: ${{ vars.ENG_PLATFORM_API_URL }}
           service-name: ${{ inputs.service_name }}
@@ -215,7 +215,7 @@ jobs:
       production_url: ${{ steps.promote.outputs.production_url }}
     steps:
       - name: Require exact OSS quality evidence
-        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-quality@fix/oss-release-quality
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-quality@ac9d68554c8b6332013785a5bcf451eabfee93ec
         with:
           platform-api-url: ${{ vars.ENG_PLATFORM_API_URL }}
           service-name: ${{ inputs.service_name }}

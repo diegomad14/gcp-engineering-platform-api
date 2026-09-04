@@ -25,7 +25,7 @@ jobs:
         with:
           node-version: "22"
       - name: Require exact OSS quality evidence
-        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-quality@fix/oss-release-quality
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-quality@ac9d68554c8b6332013785a5bcf451eabfee93ec
         with:
           platform-api-url: ${{ vars.ENG_PLATFORM_API_URL }}
           service-name: eng-platform-api
