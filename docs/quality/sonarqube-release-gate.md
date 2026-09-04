@@ -1,3 +1,6 @@
+> Historical: superseded by [ADR 0008](../adrs/0008-oss-only-release-quality.md).
+> New releases use the mandatory OSS gate; the instructions below are retained as history.
+
 # SonarQube Cloud Release Gate
 
 > Deprecated. New and migrated services use

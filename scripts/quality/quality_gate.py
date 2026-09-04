@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from differential_coverage import differential, resolve_base
+
 
 def _run(command: str, cwd: Path, output_path: Path | None = None) -> dict[str, Any]:
     started = time.monotonic()
@@ -25,10 +27,8 @@ def _run(command: str, cwd: Path, output_path: Path | None = None) -> dict[str, 
             "skipped": True,
         }
     completed = subprocess.run(
-        command,
+        ["/bin/bash", "-e", "-o", "pipefail", "-c", command],
         cwd=cwd,
-        shell=True,
-        executable="/bin/bash",
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -174,7 +174,7 @@ def _defaults(profile: str, report_dir: Path) -> dict[str, str]:
             **common,
             "install": "npm ci",
             "tests": (
-                "npm test -- --run --coverage --coverage.reporter=json-summary "
+                "npm test -- --run --coverage --coverage.reporter=json-summary --coverage.reporter=lcov "
                 f"--coverage.reportsDirectory={shlex.quote(str(report_dir))}"
             ),
             "build": "npm run build",
@@ -205,6 +205,7 @@ def main() -> int:
     parser.add_argument("--working-directory", default=".")
     parser.add_argument("--workflow-run-url", default="")
     parser.add_argument("--coverage-threshold", type=float, default=70.0)
+    parser.add_argument("--base-sha", default="")
     parser.add_argument("--output", default="quality-report.json")
     parser.add_argument("--report-directory", default="quality-reports")
     parser.add_argument("--install-command")
@@ -242,6 +243,10 @@ def main() -> int:
         "trivy": defaults["trivy"],
     }
 
+    # Remove previous artifacts so a failed test/scanner cannot reuse stale evidence.
+    for artifact in report_dir.glob("*.json"):
+        artifact.unlink()
+    (report_dir / "lcov.info").unlink(missing_ok=True)
     raw: dict[str, dict[str, Any]] = {}
     for name, command in commands.items():
         raw[name] = _run(command, cwd, report_dir / f"{name}.log")
@@ -327,7 +332,73 @@ def main() -> int:
                 f"Coverage {coverage}% is below {args.coverage_threshold}%."
             )
 
+    differential_fields = {"policy_version": "oss-v2"}
+    if args.profile != "static":
+        try:
+            event_path = os.environ.get("GITHUB_EVENT_PATH")
+            event = json.loads(Path(event_path).read_text()) if event_path else {}
+            base = resolve_base(cwd, args.commit_sha, event, args.base_sha)
+            differential_fields = differential(
+                cwd, report_dir, args.profile, base, args.commit_sha
+            )
+            percent = differential_fields["differential_coverage"]
+            status = (
+                "SKIPPED"
+                if percent is None
+                else "PASSED"
+                if percent >= 80
+                else "FAILED"
+            )
+            detail = (
+                "No modified executable lines"
+                if percent is None
+                else f"Changed-line coverage: {percent:.2f}% (minimum 80%)"
+            )
+        except (
+            ValueError,
+            OSError,
+            KeyError,
+            TypeError,
+            subprocess.CalledProcessError,
+        ) as exc:
+            status, detail = "FAILED", f"Differential coverage unavailable: {exc}"
+        checks.append(
+            {
+                "name": "Changed-line coverage",
+                "category": "differential_coverage",
+                "findings": int(status == "FAILED"),
+                "status": status,
+                "details": detail,
+                "blocking_findings": int(status == "FAILED"),
+            }
+        )
+
+    if args.profile == "static":
+        try:
+            event_path = os.environ.get("GITHUB_EVENT_PATH")
+            event = json.loads(Path(event_path).read_text()) if event_path else {}
+            differential_fields["base_sha"] = resolve_base(
+                cwd, args.commit_sha, event, args.base_sha
+            )
+        except (
+            ValueError,
+            OSError,
+            KeyError,
+            TypeError,
+            subprocess.CalledProcessError,
+        ) as exc:
+            checks.append(
+                {
+                    "name": "Commit identity",
+                    "category": "identity",
+                    "findings": 1,
+                    "status": "FAILED",
+                    "details": str(exc),
+                }
+            )
+
     report = {
+        **differential_fields,
         "service_name": args.service_name,
         "repository": args.repository,
         "commit_sha": args.commit_sha,

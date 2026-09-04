@@ -75,6 +75,7 @@ jobs:
     runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     outputs:
       image: ${{ steps.release.outputs.image }}
+      sha: ${{ steps.release.outputs.sha }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -100,22 +101,37 @@ jobs:
           platform_api_url: ${{ vars.ENG_PLATFORM_API_URL }}
       - name: Validate immutable release and service configuration
         id: release
+        env:
+          RUN_VARS_GCP_RELEASE_WIF_PROVIDER: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
+          RUN_VARS_GCP_WIF_SERVICE_ACCOUNT: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+          RUN_VARS_GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
           test -n "$PROJECT_ID"
-          test -n "${{ vars.GCP_RELEASE_WIF_PROVIDER }}"
-          test -n "${{ vars.GCP_WIF_SERVICE_ACCOUNT }}"
+          test -n "${RUN_VARS_GCP_RELEASE_WIF_PROVIDER}"
+          test -n "${RUN_VARS_GCP_WIF_SERVICE_ACCOUNT}"
           IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$ARTIFACT_REPOSITORY/$IMAGE_NAME:$RELEASE_TAG"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Require exact OSS quality evidence
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-quality@ac9d68554c8b6332013785a5bcf451eabfee93ec
+        with:
+          platform-api-url: ${{ vars.ENG_PLATFORM_API_URL }}
+          service-name: eng-platform-api
+          commit-sha: ${{ steps.release.outputs.sha }}
+          wait-seconds: '0'
       - name: Mark GitHub deployment in progress
         env:
+          RUN_GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_GITHUB_SERVER_URL: ${{ github.server_url }}
+          RUN_GITHUB_RUN_ID: ${{ github.run_id }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh api --method POST \
-            "repos/${{ github.repository }}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
+            "repos/${RUN_GITHUB_REPOSITORY}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
             -f state=in_progress \
-            -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f log_url="${RUN_GITHUB_SERVER_URL}/${RUN_GITHUB_REPOSITORY}/actions/runs/${RUN_GITHUB_RUN_ID}" \
             -f description='Release verification passed' >/dev/null
 
   build:
@@ -125,7 +141,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ needs.verify-release.outputs.sha }}
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           workload_identity_provider: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
@@ -204,21 +220,28 @@ jobs:
     runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     steps:
       - name: Smoke candidate revision
-        run: curl --fail-with-body --retry 5 --retry-all-errors "${{ needs.deploy-candidate.outputs.url }}$HEALTH_PATH"
+        env:
+          RUN_NEEDS_DEPLOY_CANDIDATE_OUTPUTS_URL: ${{ needs.deploy-candidate.outputs.url }}
+        run: curl --fail-with-body --retry 5 --retry-all-errors "${RUN_NEEDS_DEPLOY_CANDIDATE_OUTPUTS_URL}$HEALTH_PATH"
       - name: Publish candidate evidence
         env:
+          RUN_GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_GITHUB_SERVER_URL: ${{ github.server_url }}
+          RUN_GITHUB_RUN_ID: ${{ github.run_id }}
+          RUN_NEEDS_DEPLOY_CANDIDATE_OUTPUTS_URL: ${{ needs.deploy-candidate.outputs.url }}
+          RUN_NEEDS_DEPLOY_CANDIDATE_OUTPUTS_REVISION: ${{ needs.deploy-candidate.outputs.revision }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh api --method POST \
-            "repos/${{ github.repository }}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
+            "repos/${RUN_GITHUB_REPOSITORY}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
             -f state=in_progress \
-            -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            -f environment_url="${{ needs.deploy-candidate.outputs.url }}" \
-            -f description="candidate_revision=${{ needs.deploy-candidate.outputs.revision }}" >/dev/null
+            -f log_url="${RUN_GITHUB_SERVER_URL}/${RUN_GITHUB_REPOSITORY}/actions/runs/${RUN_GITHUB_RUN_ID}" \
+            -f environment_url="${RUN_NEEDS_DEPLOY_CANDIDATE_OUTPUTS_URL}" \
+            -f description="candidate_revision=${RUN_NEEDS_DEPLOY_CANDIDATE_OUTPUTS_REVISION}" >/dev/null
 
   promote:
     name: Promote production
-    needs: [deploy-candidate, validate-candidate]
+    needs: [verify-release, deploy-candidate, validate-candidate]
     runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     environment: production
     outputs:
@@ -226,6 +249,13 @@ jobs:
       production_revision: ${{ steps.promote.outputs.production_revision }}
       production_url: ${{ steps.promote.outputs.production_url }}
     steps:
+      - name: Require exact OSS quality evidence
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-quality@ac9d68554c8b6332013785a5bcf451eabfee93ec
+        with:
+          platform-api-url: ${{ vars.ENG_PLATFORM_API_URL }}
+          service-name: eng-platform-api
+          commit-sha: ${{ needs.verify-release.outputs.sha }}
+          wait-seconds: '0'
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           workload_identity_provider: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
@@ -239,10 +269,12 @@ jobs:
           echo "previous_revision=$PREVIOUS" >> "$GITHUB_OUTPUT"
       - name: Promote candidate to 100 percent
         id: promote
+        env:
+          RUN_NEEDS_DEPLOY_CANDIDATE_OUTPUTS_REVISION: ${{ needs.deploy-candidate.outputs.revision }}
         run: |
-          gcloud run services update-traffic "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --to-revisions="${{ needs.deploy-candidate.outputs.revision }}=100" --quiet
+          gcloud run services update-traffic "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --to-revisions="${RUN_NEEDS_DEPLOY_CANDIDATE_OUTPUTS_REVISION}=100" --quiet
           URL=$(gcloud run services describe "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')
-          echo "production_revision=${{ needs.deploy-candidate.outputs.revision }}" >> "$GITHUB_OUTPUT"
+          echo "production_revision=${RUN_NEEDS_DEPLOY_CANDIDATE_OUTPUTS_REVISION}" >> "$GITHUB_OUTPUT"
           echo "production_url=$URL" >> "$GITHUB_OUTPUT"
 
   validate-production:
@@ -251,17 +283,24 @@ jobs:
     runs-on: ${{ ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (inputs.runner_label == 'cgm-release-local' || (inputs.runner_label == '' && vars.CGM_ACTIONS_RUNNER == 'cgm-release-local'))) && inputs.runner_label || 'ubuntu-latest' }}
     steps:
       - name: Smoke production
-        run: curl --fail-with-body --retry 5 --retry-all-errors "${{ needs.promote.outputs.production_url }}$HEALTH_PATH"
+        env:
+          RUN_NEEDS_PROMOTE_OUTPUTS_PRODUCTION_URL: ${{ needs.promote.outputs.production_url }}
+        run: curl --fail-with-body --retry 5 --retry-all-errors "${RUN_NEEDS_PROMOTE_OUTPUTS_PRODUCTION_URL}$HEALTH_PATH"
       - name: Mark GitHub deployment successful
         env:
+          RUN_GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_GITHUB_SERVER_URL: ${{ github.server_url }}
+          RUN_GITHUB_RUN_ID: ${{ github.run_id }}
+          RUN_NEEDS_PROMOTE_OUTPUTS_PRODUCTION_URL: ${{ needs.promote.outputs.production_url }}
+          RUN_NEEDS_PROMOTE_OUTPUTS_PRODUCTION_REVISION: ${{ needs.promote.outputs.production_revision }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh api --method POST \
-            "repos/${{ github.repository }}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
+            "repos/${RUN_GITHUB_REPOSITORY}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
             -f state=success \
-            -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            -f environment_url="${{ needs.promote.outputs.production_url }}" \
-            -f description="production_revision=${{ needs.promote.outputs.production_revision }}" >/dev/null
+            -f log_url="${RUN_GITHUB_SERVER_URL}/${RUN_GITHUB_REPOSITORY}/actions/runs/${RUN_GITHUB_RUN_ID}" \
+            -f environment_url="${RUN_NEEDS_PROMOTE_OUTPUTS_PRODUCTION_URL}" \
+            -f description="production_revision=${RUN_NEEDS_PROMOTE_OUTPUTS_PRODUCTION_REVISION}" >/dev/null
 
   rollback:
     name: Rollback production
@@ -276,17 +315,23 @@ jobs:
           service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
       - name: Restore previous production revision
-        run: gcloud run services update-traffic "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --to-revisions="${{ needs.promote.outputs.previous_revision }}=100" --quiet
+        env:
+          RUN_NEEDS_PROMOTE_OUTPUTS_PREVIOUS_REVISION: ${{ needs.promote.outputs.previous_revision }}
+        run: gcloud run services update-traffic "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --to-revisions="${RUN_NEEDS_PROMOTE_OUTPUTS_PREVIOUS_REVISION}=100" --quiet
       - name: Mark GitHub deployment failed and rolled back
         if: always()
         env:
+          RUN_JOB_STATUS: ${{ job.status }}
+          RUN_GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_GITHUB_SERVER_URL: ${{ github.server_url }}
+          RUN_GITHUB_RUN_ID: ${{ github.run_id }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          STATE=$([ "${{ job.status }}" = success ] && echo failure || echo error)
+          STATE=$([ "${RUN_JOB_STATUS}" = success ] && echo failure || echo error)
           gh api --method POST \
-            "repos/${{ github.repository }}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
+            "repos/${RUN_GITHUB_REPOSITORY}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
             -f state="$STATE" \
-            -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f log_url="${RUN_GITHUB_SERVER_URL}/${RUN_GITHUB_REPOSITORY}/actions/runs/${RUN_GITHUB_RUN_ID}" \
             -f description='Production validation failed; rollback executed' >/dev/null
 
   mark-failed:
@@ -297,10 +342,13 @@ jobs:
     steps:
       - name: Publish pre-traffic failure
         env:
+          RUN_GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_GITHUB_SERVER_URL: ${{ github.server_url }}
+          RUN_GITHUB_RUN_ID: ${{ github.run_id }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh api --method POST \
-            "repos/${{ github.repository }}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
+            "repos/${RUN_GITHUB_REPOSITORY}/deployments/$GITHUB_DEPLOYMENT_ID/statuses" \
             -f state=failure \
-            -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f log_url="${RUN_GITHUB_SERVER_URL}/${RUN_GITHUB_REPOSITORY}/actions/runs/${RUN_GITHUB_RUN_ID}" \
             -f description='Deployment failed before production traffic changed' >/dev/null

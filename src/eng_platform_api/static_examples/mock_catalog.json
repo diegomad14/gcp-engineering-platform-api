@@ -15,13 +15,42 @@
       "region": "us-central1",
       "environment": "prod",
       "validation_targets": [
-        { "name": "Perseo", "type": "external_source", "description": "KPI data source" },
-        { "name": "FND", "type": "external_source", "description": "Field Network Device data" },
-        { "name": "SanPlat", "type": "external_source", "description": "SanPlat integration" }
+        {
+          "name": "Perseo",
+          "type": "external_source",
+          "description": "KPI data source"
+        },
+        {
+          "name": "FND",
+          "type": "external_source",
+          "description": "Field Network Device data"
+        },
+        {
+          "name": "SanPlat",
+          "type": "external_source",
+          "description": "SanPlat integration"
+        }
       ],
-      "quality": { "enabled": true, "profile": "python", "coverage_threshold": 70 },
-      "deployment": { "workflow_file": "platform-deploy.yml", "image_name": "cgm-sanplat-api", "artifact_repository": "cgm-sanplat-repo", "build_context": ".", "health_path": "/health" },
-      "finops": { "service": "cgm-sanplat-api", "env": "prod", "owner": "cgm", "cost_center": "cgm" }
+      "quality": {
+        "enabled": true,
+        "profile": "python",
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
+      },
+      "deployment": {
+        "workflow_file": "platform-deploy.yml",
+        "image_name": "cgm-sanplat-api",
+        "artifact_repository": "cgm-sanplat-repo",
+        "build_context": ".",
+        "health_path": "/health"
+      },
+      "finops": {
+        "service": "cgm-sanplat-api",
+        "env": "prod",
+        "owner": "cgm",
+        "cost_center": "cgm"
+      }
     },
     {
       "service_name": "cgm-sanplat-web",
@@ -32,13 +61,42 @@
       "region": "us-central1",
       "environment": "prod",
       "validation_targets": [
-        { "name": "Perseo", "type": "external_source", "description": "KPI data source" },
-        { "name": "FND", "type": "external_source", "description": "Field Network Device data" },
-        { "name": "SanPlat", "type": "external_source", "description": "SanPlat integration" }
+        {
+          "name": "Perseo",
+          "type": "external_source",
+          "description": "KPI data source"
+        },
+        {
+          "name": "FND",
+          "type": "external_source",
+          "description": "Field Network Device data"
+        },
+        {
+          "name": "SanPlat",
+          "type": "external_source",
+          "description": "SanPlat integration"
+        }
       ],
-      "quality": { "enabled": true, "profile": "node", "coverage_threshold": 70 },
-      "deployment": { "workflow_file": "platform-deploy.yml", "image_name": "cgm-sanplat-web", "artifact_repository": "cgm-sanplat-repo", "build_context": ".", "health_path": "/" },
-      "finops": { "service": "cgm-sanplat-web", "env": "prod", "owner": "cgm", "cost_center": "cgm" }
+      "quality": {
+        "enabled": true,
+        "profile": "node",
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
+      },
+      "deployment": {
+        "workflow_file": "platform-deploy.yml",
+        "image_name": "cgm-sanplat-web",
+        "artifact_repository": "cgm-sanplat-repo",
+        "build_context": ".",
+        "health_path": "/"
+      },
+      "finops": {
+        "service": "cgm-sanplat-web",
+        "env": "prod",
+        "owner": "cgm",
+        "cost_center": "cgm"
+      }
     },
     {
       "service_name": "cgm-bot-api",
@@ -49,9 +107,26 @@
       "region": "us-central1",
       "environment": "prod",
       "validation_targets": [],
-      "quality": { "enabled": true, "profile": "python", "coverage_threshold": 70 },
-      "deployment": { "workflow_file": "platform-deploy.yml", "image_name": "cgm-bot-api", "artifact_repository": "cgm-sanplat-repo", "build_context": "services/cgm-bot-api", "health_path": "/health" },
-      "finops": { "service": "cgm-bot-api", "env": "prod", "owner": "cgm", "cost_center": "cgm" }
+      "quality": {
+        "enabled": true,
+        "profile": "python",
+        "coverage_threshold": 80,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
+      },
+      "deployment": {
+        "workflow_file": "platform-deploy.yml",
+        "image_name": "cgm-bot-api",
+        "artifact_repository": "cgm-sanplat-repo",
+        "build_context": "services/cgm-bot-api",
+        "health_path": "/health"
+      },
+      "finops": {
+        "service": "cgm-bot-api",
+        "env": "prod",
+        "owner": "cgm",
+        "cost_center": "cgm"
+      }
     },
     {
       "service_name": "communications-ms",
@@ -62,9 +137,26 @@
       "region": "us-central1",
       "environment": "prod",
       "validation_targets": [],
-      "quality": { "enabled": true, "profile": "python", "coverage_threshold": 70 },
-      "deployment": { "workflow_file": "platform-deploy.yml", "image_name": "communications-ms", "artifact_repository": "cgm-sanplat-repo", "build_context": ".", "health_path": "/health" },
-      "finops": { "service": "communications-ms", "env": "prod", "owner": "cgm", "cost_center": "cgm" }
+      "quality": {
+        "enabled": true,
+        "profile": "python",
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
+      },
+      "deployment": {
+        "workflow_file": "platform-deploy.yml",
+        "image_name": "communications-ms",
+        "artifact_repository": "cgm-sanplat-repo",
+        "build_context": ".",
+        "health_path": "/health"
+      },
+      "finops": {
+        "service": "communications-ms",
+        "env": "prod",
+        "owner": "cgm",
+        "cost_center": "cgm"
+      }
     },
     {
       "service_name": "eng-platform-api",
@@ -75,9 +167,26 @@
       "region": "us-central1",
       "environment": "prod",
       "validation_targets": [],
-      "quality": { "enabled": true, "profile": "python", "coverage_threshold": 70 },
-      "deployment": { "workflow_file": "platform-deploy.yml", "image_name": "eng-platform-api", "artifact_repository": "cgm-sanplat-repo", "build_context": ".", "health_path": "/health" },
-      "finops": { "service": "eng-platform-api", "env": "prod", "owner": "platform", "cost_center": "platform" }
+      "quality": {
+        "enabled": true,
+        "profile": "python",
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
+      },
+      "deployment": {
+        "workflow_file": "platform-deploy.yml",
+        "image_name": "eng-platform-api",
+        "artifact_repository": "cgm-sanplat-repo",
+        "build_context": ".",
+        "health_path": "/health"
+      },
+      "finops": {
+        "service": "eng-platform-api",
+        "env": "prod",
+        "owner": "platform",
+        "cost_center": "platform"
+      }
     },
     {
       "service_name": "eng-platform-web",
@@ -88,9 +197,26 @@
       "region": "us-central1",
       "environment": "prod",
       "validation_targets": [],
-      "quality": { "enabled": true, "profile": "node", "coverage_threshold": 70 },
-      "deployment": { "workflow_file": "platform-deploy.yml", "image_name": "eng-platform-web", "artifact_repository": "cgm-sanplat-repo", "build_context": ".", "health_path": "/" },
-      "finops": { "service": "eng-platform-web", "env": "prod", "owner": "platform", "cost_center": "platform" }
+      "quality": {
+        "enabled": true,
+        "profile": "node",
+        "coverage_threshold": 80,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
+      },
+      "deployment": {
+        "workflow_file": "platform-deploy.yml",
+        "image_name": "eng-platform-web",
+        "artifact_repository": "cgm-sanplat-repo",
+        "build_context": ".",
+        "health_path": "/"
+      },
+      "finops": {
+        "service": "eng-platform-web",
+        "env": "prod",
+        "owner": "platform",
+        "cost_center": "platform"
+      }
     }
   ]
 }

@@ -5,6 +5,7 @@ Does NOT create GCP resources, IAM bindings, or secrets.
 """
 
 import textwrap
+import json
 from pathlib import Path
 
 from ..models import ServiceFactoryPlan, ServiceFactoryRequest, ServiceFactoryTemplate
@@ -67,6 +68,8 @@ def _build_yaml_contract(req: ServiceFactoryRequest) -> str:
         profile: {req.quality_profile or req.runtime}
         working_directory: {req.quality_working_directory}
         coverage_threshold: {req.coverage_threshold}
+        policy_version: oss-v2
+        differential_threshold: 80
         blocking: true
 
     security:
@@ -127,12 +130,13 @@ def _build_caller_workflow(
 
         jobs:
           quality:
-            uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-quality-gate.yml@v0.15.0
+            uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-quality-gate.yml@b6455d24611ee244414de66abe63e5507d2398a8
             with:
               service-name: {service_name}
               profile: {quality_profile}
               working-directory: {quality_working_directory}
               coverage-threshold: {coverage_threshold}
+              platform-ref: b6455d24611ee244414de66abe63e5507d2398a8
               platform-api-url: ${{{{ vars.ENG_PLATFORM_API_URL }}}}
             secrets:
               QUALITY_API_TOKEN: ${{{{ secrets.QUALITY_API_TOKEN }}}}
@@ -177,7 +181,7 @@ def _build_caller_workflow(
 
     jobs:
       call:
-        uses: diegomad14/gcp-engineering-platform-api/.github/workflows/{platform_workflow}@v0.15.0
+        uses: diegomad14/gcp-engineering-platform-api/.github/workflows/{platform_workflow}@b6455d24611ee244414de66abe63e5507d2398a8
         with:
           project-id: ${{{{ vars.GCP_PROJECT_ID }}}}
           region: ${{{{ vars.GCP_REGION }}}}
@@ -203,6 +207,8 @@ def _build_quality_config(req: ServiceFactoryRequest) -> str:
     profile: {req.quality_profile or req.runtime}
     working_directory: {req.quality_working_directory}
     coverage_threshold: {req.coverage_threshold}
+    policy_version: oss-v2
+    differential_threshold: 80
     blocking:
       lint: true
       tests: true
@@ -227,6 +233,8 @@ def _build_catalog_entry(req: ServiceFactoryRequest) -> str:
       enabled: true
       profile: {req.quality_profile or req.runtime}
       coverage_threshold: {req.coverage_threshold}
+      policy_version: oss-v2
+      differential_threshold: 80
     deployment:
       enabled: true
       workflow_file: platform-deploy.yml
@@ -253,8 +261,8 @@ def _build_platform_rollback_workflow() -> str:
     return (_REPO_ROOT / ".github" / "workflows" / "platform-rollback.yml").read_text()
 
 
-def _build_semantic_release_workflow() -> str:
-    return textwrap.dedent("""\
+def _build_semantic_release_workflow(service_name: str = "") -> str:
+    workflow = textwrap.dedent("""\
     name: Semantic Release
 
     on:
@@ -291,6 +299,19 @@ def _build_semantic_release_workflow() -> str:
               --package @semantic-release/github@12.0.9
               semantic-release
     """)
+
+    gate = f"""      - name: Require exact OSS quality evidence
+        uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-quality@ac9d68554c8b6332013785a5bcf451eabfee93ec
+        with:
+          platform-api-url: ${{{{ vars.ENG_PLATFORM_API_URL }}}}
+          service-name: {service_name}
+          commit-sha: ${{{{ github.sha }}}}
+          wait-seconds: '1800'
+"""
+    return workflow.replace(
+        "      - name: Create semantic version",
+        gate + "      - name: Create semantic version",
+    )
 
 
 def _build_agent_prompt(req: ServiceFactoryRequest) -> str:
@@ -375,6 +396,7 @@ def generate_plan(req: ServiceFactoryRequest) -> ServiceFactoryPlan:
             ".github/workflows/semantic-release.yml",
             f"catalog/services/{service_name}.yaml",
             ".quality-gate.yml",
+            f"{req.quality_working_directory.rstrip('/')}/.quality-sources.json",
             "cloud-run-service-labels.yaml",
             "onboarding-checklist.md",
             "agent-handoff-prompt.md",
@@ -419,11 +441,20 @@ def generate_plan(req: ServiceFactoryRequest) -> ServiceFactoryPlan:
         ),
         platform_deploy_workflow=_build_platform_deploy_workflow(),
         platform_rollback_workflow=_build_platform_rollback_workflow(),
-        semantic_release_workflow=_build_semantic_release_workflow(),
+        semantic_release_workflow=_build_semantic_release_workflow(req.service_name),
         catalog_entry=_build_catalog_entry(req),
         agent_prompt=_build_agent_prompt(req),
         labels_manifest=_build_labels_manifest(req),
         quality_config=_build_quality_config(req),
+        quality_sources=json.dumps(
+            {
+                "roots": ["src"],
+                "exclude": ["**/*.test.ts", "**/*.test.tsx", "src/test/*", "**/*.d.ts"]
+                if (req.quality_profile or req.runtime) == "node"
+                else [],
+            },
+            indent=2,
+        ),
         sonar_properties="",
     )
 

@@ -148,6 +148,15 @@ def _list_report_objects(service_name: str) -> list[dict]:
 
 
 def _status(payload: QualityReportCreate) -> QualityGateStatus:
+    if payload.policy_version != "oss-v1":
+        from . import catalog
+        from .quality_policy import policy_errors
+
+        return (
+            "FAILED"
+            if policy_errors(payload, catalog.get_service(payload.service_name))
+            else "PASSED"
+        )
     coverage_failed = (
         payload.coverage_threshold is not None
         and payload.coverage is not None

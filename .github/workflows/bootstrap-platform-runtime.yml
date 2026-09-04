@@ -47,11 +47,14 @@ jobs:
           ref: ${{ inputs.tag }}
           fetch-depth: 1
       - name: Validate bootstrap release
+        env:
+          RUN_VARS_GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          RUN_VARS_GCP_WIF_SERVICE_ACCOUNT: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
-          test -n "${{ vars.GCP_WIF_PROVIDER }}"
-          test -n "${{ vars.GCP_WIF_SERVICE_ACCOUNT }}"
+          test -n "${RUN_VARS_GCP_WIF_PROVIDER}"
+          test -n "${RUN_VARS_GCP_WIF_SERVICE_ACCOUNT}"
           [[ "$ALLOWED_LOGINS" =~ ^[A-Za-z0-9,-]+$ ]]
           [[ "$APP_ID" =~ ^[0-9]+$ ]]
           [[ "$INSTALLATION_ID" =~ ^[0-9]+$ ]]
@@ -63,7 +66,7 @@ jobs:
           sha="$(git rev-parse HEAD)"
           gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" --paginate \
             --jq '.check_runs[] | [.name,.conclusion] | @tsv' > "$RUNNER_TEMP/checks.tsv"
-          for check in quality workflows; do
+          for check in quality workflows 'normalized / quality-gate'; do
             awk -F '\t' -v required="$check" '$1 == required && $2 == "success" {found=1} END {exit !found}' "$RUNNER_TEMP/checks.tsv"
           done
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
@@ -142,4 +145,6 @@ jobs:
           service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
       - name: Restore previous revision
-        run: gcloud run services update-traffic "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --to-revisions="${{ needs.bootstrap.outputs.previous_revision }}=100" --quiet
+        env:
+          RUN_NEEDS_BOOTSTRAP_OUTPUTS_PREVIOUS_REVISION: ${{ needs.bootstrap.outputs.previous_revision }}
+        run: gcloud run services update-traffic "$SERVICE_NAME" --project="$PROJECT_ID" --region="$REGION" --to-revisions="${RUN_NEEDS_BOOTSTRAP_OUTPUTS_PREVIOUS_REVISION}=100" --quiet

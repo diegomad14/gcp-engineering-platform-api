@@ -57,7 +57,10 @@ def test_generate_service_plan():
     assert "agent-handoff-prompt.md" in data["generated_files"]
     assert "SonarQube" not in data["yaml_contract"]
     assert "reusable-quality-gate.yml" in data["caller_pr_check"]
-    assert "reusable-quality-gate.yml@v0.15.0" in data["caller_pr_check"]
+    assert (
+        "reusable-quality-gate.yml@b6455d24611ee244414de66abe63e5507d2398a8"
+        in data["caller_pr_check"]
+    )
     assert "workflow_dispatch" in data["platform_deploy_workflow"]
     assert "github_deployment_id" in data["platform_deploy_workflow"]
     assert "target_revision" in data["platform_rollback_workflow"]
