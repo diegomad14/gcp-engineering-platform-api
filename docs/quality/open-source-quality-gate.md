@@ -52,13 +52,11 @@ GitHub branch protection, where available, must require OSS checks instead of
 Sonar. Release workflow verification remains mandatory independently of billing
 or branch-protection availability. See the canonical wiki `release_process`.
 
-## Temporary control-plane bootstrap projection
+## Compatibility rollout record
 
-This bootstrap branch runs the full oss-v2 gate and preserves the original JSON
-artifact, but publishes a legacy projection while the running API still rejects
-new fields. All checks, including changed-line coverage, remain in the projection.
-Semantic release requires successful API CI for the exact main SHA; Bootstrap
-Platform Runtime also requires the normalized gate check before creating a
-candidate. After API rollout, restore the normal publisher and oss-v2 release
-verifier from `fix/oss-release-quality`; consumers use the immutable non-bootstrap
-workflow bundle. This projection is not a general release-policy bypass.
+The v0.19.0 control-plane bootstrap preserves the complete oss-v2 JSON artifact
+and publishes a legacy projection accepted by the preceding API. Its exact main
+SHA passed native checks and the differential gate before tagging and candidate
+validation. Normal releases now publish oss-v2 directly and require server-verified
+evidence. The one-time bootstrap workflow is removed after this transition;
+ordinary releases use signed Platform Deploy authorization.
