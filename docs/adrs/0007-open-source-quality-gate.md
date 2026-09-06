@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted; policy and migration requirements extended by [ADR 0008](0008-oss-only-release-quality.md).
 
 ## Context
 
@@ -22,7 +22,7 @@ evidence, plus a central per-service view.
   `/api/quality/summary`.
 - Require release, promotion and rollback workflows to validate an exact
   `service_name + commit_sha` result before changing Cloud Run.
-- Keep `reusable-sonarqube.yml` deprecated for migration compatibility only.
+- Historical migration step: keep `reusable-sonarqube.yml` temporarily. ADR 0008 completes its removal.
 
 ## Consequences
 
