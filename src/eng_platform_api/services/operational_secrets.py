@@ -64,6 +64,7 @@ def metadata(service: CatalogService) -> dict:
     items = []
     for secret in service.operational_secrets:
         version = current.get("versions", {}).get(secret.key)
+        applied = current.get("applied_versions", {}).get(secret.key)
         enabled = False
         if version and client is not None:
             info = client.get_secret_version(
@@ -78,8 +79,8 @@ def metadata(service: CatalogService) -> dict:
                 "required": secret.required,
                 "editable": secret.editable,
                 "configured": enabled,
-                "pending_version": version,
-                "applied_version": current.get("applied_versions", {}).get(secret.key),
+                "pending_version": version if version != applied else None,
+                "applied_version": applied,
             }
         )
     return {

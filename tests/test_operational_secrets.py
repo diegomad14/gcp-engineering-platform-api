@@ -188,3 +188,59 @@ def test_saved_operation_is_returned_without_republishing():
             == previous
         )
     writer.return_value.add_secret_version.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "saved,applied,pending,configured",
+    [
+        ("1", "1", None, True),
+        ("2", "1", "2", True),
+        ("1", None, "1", True),
+        (None, None, None, False),
+    ],
+)
+def test_metadata_only_marks_unapplied_versions_pending(
+    saved, applied, pending, configured
+):
+    current = {
+        "generation": 3,
+        "versions": {"WM_PASSWORD": saved} if saved else {},
+        "applied_versions": {"WM_PASSWORD": applied} if applied else {},
+    }
+    with (
+        mock.patch.object(secrets, "state", return_value=current),
+        mock.patch.object(secrets, "writer") as writer,
+    ):
+        writer.return_value.get_secret_version.return_value.state = (
+            secrets.secretmanager.SecretVersion.State.ENABLED
+        )
+        result = secrets.metadata(service())
+    item = result["items"][0]
+    assert item["pending_version"] == pending
+    assert item["applied_version"] == applied
+    assert item["configured"] is configured
+    assert result["generation"] == 3
+    assert current["versions"].get("WM_PASSWORD") == saved
+    writer.return_value.access_secret_version.assert_not_called()
+
+
+def test_snapshot_keeps_applied_versions_available_for_deployment():
+    selected = service()
+    current = {
+        "generation": 1,
+        "versions": {"WM_PASSWORD": "1"},
+        "applied_versions": {"WM_PASSWORD": "1"},
+    }
+    with (
+        mock.patch.object(secrets, "state", return_value=current),
+        mock.patch.object(secrets, "writer") as writer,
+    ):
+        writer.return_value.get_secret_version.return_value.state = (
+            secrets.secretmanager.SecretVersion.State.ENABLED
+        )
+        assert secrets.snapshot(selected) == {
+            "generation": 1,
+            "secrets": {
+                "WM_PASSWORD": f"{secrets.resource(selected, selected.operational_secrets[0])}/versions/1"
+            },
+        }
