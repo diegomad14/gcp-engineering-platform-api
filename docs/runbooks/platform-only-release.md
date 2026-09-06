@@ -25,6 +25,8 @@ Production configuration requires:
 - GitHub OAuth and GitHub App credentials from Secret Manager;
 - `ENG_PLATFORM_RELEASE_SIGNING_PRIVATE_KEY` from Secret Manager;
 - `ENG_PLATFORM_RELEASE_AUTH_FIRESTORE_COLLECTION` configured in Cloud Run;
+- `ENG_PLATFORM_SECRETS_WRITER_SERVICE_ACCOUNT` set by the API deploy workflow to
+  `eng-platform-secret-writer@cgm-assistant-prod.iam.gserviceaccount.com`;
 - `ENG_PLATFORM_API_URL` and `ENG_PLATFORM_FRONTEND_URL` matching the current
   Cloud Run service URLs;
 - `GCP_RELEASE_WIF_PROVIDER` configured in every catalog service repository.
@@ -62,3 +64,23 @@ a deployment. Historical tags cannot invoke old deploy workflows to bypass the
 policy. Manual rollback always dispatches the current `main` rollback workflow,
 with the historical tag, SHA and promoted revision as inputs. This validates
 original evidence and image identity without requalifying historical code.
+
+## Operational secrets candidate check
+
+The API `validate-candidate` job reads the exact revision returned by
+`deploy-candidate` and requires the secrets writer account above. Missing, empty,
+or different values, an unexpected revision response, and failed Cloud Run queries
+fail validation before promotion. The check prints only a fixed pass/fail message;
+it never prints container configuration, provider errors, or secret values.
+The check and health smoke must both pass. Existing merge semantics preserve
+other runtime variables and secret references.
+
+Before release, verify the runtime can impersonate the existing writer and the
+writer has metadata access to `wm-base-url`, `wm-username`, `wm-password`, and
+`wm-api-key`. This check does not grant IAM roles or access secret payloads.
+After promotion, an allowlisted operator must verify the secrets panel loads and
+`GET /api/services/cgm-sanplat-api/secrets` returns 200 with metadata only and
+`Cache-Control: no-store`; an unauthenticated request must still return 401.
+Do not save a secret to test the fix. Record the deployed revision and inspect
+post-release request logs before closing the incident. Preserve the standard
+health smoke and rollback; rolling back this fix can restore the original 503.
