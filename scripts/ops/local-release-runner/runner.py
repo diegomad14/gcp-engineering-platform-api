@@ -48,7 +48,6 @@ CI_WORKFLOWS = {
 }
 RELEASE_WORKFLOWS = CI_WORKFLOWS | {
     "semantic release",
-    "sonarqube main baseline",
 }
 DEPLOY_WORKFLOWS = {"platform deploy", "platform rollback"}
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")

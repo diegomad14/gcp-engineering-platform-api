@@ -5,7 +5,7 @@
 
 > Deprecated. New and migrated services use
 > [Open Source Quality Gate](open-source-quality-gate.md). This document remains
-> only for repositories that have not completed migration.
+> only as historical reference; all six active repositories have migrated.
 
 ## Overview
 

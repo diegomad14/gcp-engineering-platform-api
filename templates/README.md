@@ -40,5 +40,5 @@ manual candidate/promote/rollback templates were removed because their
 
 New services should use `github-actions/pr-check.yml`, which calls the open
 source reusable quality gate. Configure `ENG_PLATFORM_API_URL` and the
-`QUALITY_API_TOKEN` secret. The Sonar template has been retired and is
-kept only for legacy repositories during migration.
+`QUALITY_API_TOKEN` secret. The Sonar template and workflow have been retired.
+The CLI and API both generate the mandatory OSS gate.

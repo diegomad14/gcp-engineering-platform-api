@@ -123,13 +123,18 @@ GitHub login and avatar URL; the OAuth access token is not persisted. Deploy
 writes require an authenticated, allowlisted operator. Mock mode signs in as
 `diegomad14` for local and end-to-end tests.
 
-## SonarCloud and coverage
+## OSS quality and coverage
 
-CI writes Python coverage in Cobertura XML (`coverage.xml`) before the pinned
-SonarQube scanner runs. `sonar-project.properties` imports that report and waits
-for the Quality Gate, so a red Sonar result fails `quality` and blocks merge.
-Agents must additionally run `python scripts/quality/sonar_agent_check.py
---pull-request <PR_NUMBER>` before completing PR work.
+CI preserves native checks and publishes detailed Python coverage to the mandatory
+`oss-v2` gate. API coverage must be at least 70% globally and 80% on changed
+executable lines. Reports include tested/base SHA and are validated against the
+catalog before release, candidate and promotion; missing or stale evidence blocks.
+See [quality policy](docs/quality/open-source-quality-gate.md).
+
+The CLI uses the same Service Factory generator as the API. Install the project
+(`pip install -e .`) and run `python scripts/service_factory.py --help`.
+It emits OSS workflows, detailed coverage configuration and deployment artifacts;
+legacy Sonar flags remain accepted but have no effect.
 
 ## Release request
 

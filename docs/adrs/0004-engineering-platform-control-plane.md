@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Historical proposal. Quality-service decision superseded by [ADR 0008](0008-oss-only-release-quality.md).
 
 ## Context
 

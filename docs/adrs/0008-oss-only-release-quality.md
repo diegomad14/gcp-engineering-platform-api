@@ -1,6 +1,6 @@
 # ADR 0008 — OSS-only release quality
 
-Status: accepted, implementation rollout in progress (2026-09-04).
+Status: accepted and active in all six repositories (verified 2026-09-06).
 
 Replace SonarCloud with mandatory OSS evidence across Engineering Platform,
 SanPlat, communications-ms and cgm-bot-api. Keep current global and native

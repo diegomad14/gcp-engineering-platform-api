@@ -5,8 +5,8 @@
 
 ## Status
 
-Superseded by ADR 0007. The reusable Sonar workflow remains temporarily for
-legacy callers but is no longer generated for new services.
+Superseded by ADR 0008. The reusable Sonar workflow has been removed.
+The decision below is retained as history.
 
 ## Context
 
