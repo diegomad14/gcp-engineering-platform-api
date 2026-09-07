@@ -2,6 +2,8 @@
 
 from unittest import mock
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from eng_platform_api.main import app
@@ -43,7 +45,17 @@ def test_mock_login_and_logout_manage_the_operator_session():
     assert logout.json()["authenticated"] is False
 
 
-def test_github_oauth_login_and_callback_preserve_safe_destination():
+@pytest.mark.parametrize(
+    ("headers", "callback_origin"),
+    [
+        ({}, "https://api.example"),
+        ({"X-Eng-Platform-Web": "1"}, "https://localhost:5173"),
+        ({"X-Eng-Platform-Web": "https://attacker.example"}, "https://api.example"),
+    ],
+)
+def test_github_oauth_login_and_callback_preserve_safe_destination(
+    headers, callback_origin
+):
     authorize_client = mock.MagicMock()
     authorize_client.create_authorization_url.return_value = (
         "https://github.com/login/oauth/authorize?state=fixed-state",
@@ -59,10 +71,13 @@ def test_github_oauth_login_and_callback_preserve_safe_destination():
     }
     authenticated_client.get = mock.AsyncMock(return_value=user_response)
 
-    client = TestClient(app, base_url="https://testserver")
+    client = TestClient(app, base_url="https://testserver", headers=headers)
     with (
         mock.patch("eng_platform_api.routers.auth.config.mock_mode", False),
         mock.patch("eng_platform_api.routers.auth._configured", return_value=True),
+        mock.patch.dict(
+            "os.environ", {"ENG_PLATFORM_API_ORIGIN": "https://api.example"}
+        ),
         mock.patch(
             "eng_platform_api.routers.auth.secrets.token_urlsafe",
             return_value="fixed-state",
@@ -70,7 +85,7 @@ def test_github_oauth_login_and_callback_preserve_safe_destination():
         mock.patch(
             "eng_platform_api.routers.auth.AsyncOAuth2Client",
             side_effect=[authorize_client, token_client, authenticated_client],
-        ),
+        ) as oauth_client,
     ):
         login = client.get(
             "/api/auth/login?next=http://localhost:5173/deployments/eng-platform-api",
@@ -93,6 +108,12 @@ def test_github_oauth_login_and_callback_preserve_safe_destination():
         "avatar_url": "https://avatars.example/diegomad14",
     }
     user_response.raise_for_status.assert_called_once_with()
+    assert oauth_client.call_args_list[0].kwargs["redirect_uri"] == (
+        f"{callback_origin}/api/auth/callback"
+    )
+    assert oauth_client.call_args_list[1].kwargs["redirect_uri"] == (
+        f"{callback_origin}/api/auth/callback"
+    )
 
 
 def test_github_callback_rejects_missing_oauth_state():
