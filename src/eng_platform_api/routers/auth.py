@@ -45,10 +45,12 @@ def _safe_return_url(value: str) -> str:
 
 
 def _callback_url(request: Request) -> str:
-    """Construct the OAuth callback URL using the API's public HTTPS origin."""
+    """Keep callbacks on the origin that owns the OAuth state cookie."""
     callback_path = request.url_for("github_callback").path
     api_origin = urlparse(
-        os.getenv(
+        config.auth.frontend_url
+        if request.headers.get("x-eng-platform-web") == "1"
+        else os.getenv(
             "ENG_PLATFORM_API_ORIGIN",
             str(request.base_url).rstrip("/"),
         )
