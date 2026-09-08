@@ -47,7 +47,10 @@ def arguments(tmp_path, monkeypatch):
         "https://github.com/diegomad14/cgm-sanplat-api.git",
     )
     (source / "app.py").write_text("print('base')\n")
+    (source / "entrypoint.sh").write_text("#!/bin/sh\necho ready\n")
+    (source / "entrypoint.sh").chmod(0o755)
     git(source, "add", "app.py")
+    git(source, "add", "entrypoint.sh")
     git(source, "commit", "-m", "base")
     base = git(source, "rev-parse", "HEAD")
     (source / "app.py").write_text("print('release')\n")
@@ -111,6 +114,32 @@ def test_gate_dependencies_allow_independent_work_but_never_early_push(prepared)
     assert config["timeout"] == "1256s"
     step_config = json.dumps(config["steps"])
     assert all(f"${key}" in step_config for key in config["substitutions"])
+
+
+def test_source_permissions_allow_quality_writes_without_changing_runtime_modes(
+    prepared,
+):
+    # Run the generated setup in a local workspace, preserving its input manifest.
+    script = (prepared / "source.sh").read_text().replace("/workspace", ".")
+    completed = subprocess.run(
+        ["bash", "-c", script], cwd=prepared, capture_output=True, text=True
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert (prepared / "repo/app.py").stat().st_mode & 0o777 == 0o666
+    assert (prepared / "repo/entrypoint.sh").stat().st_mode & 0o777 == 0o777
+    assert (prepared / "release-source/app.py").stat().st_mode & 0o777 == 0o644
+    assert (prepared / "release-source/entrypoint.sh").stat().st_mode & 0o777 == 0o755
+    assert git(prepared / "repo", "diff", "--name-only", "HEAD") == ""
+
+
+def test_tooling_runs_as_nonroot_with_installable_private_environment():
+    dockerfile = (SCRIPTS / "Dockerfile.quality").read_text()
+    assert dockerfile.splitlines()[-2] == "USER quality"
+    assert "python -m venv /opt/quality" in dockerfile
+    assert "chown -R quality:quality /opt/quality" in dockerfile
+    assert 'PATH="/opt/quality/bin:${PATH}"' in dockerfile
+    assert "safe.directory /workspace/repo" in dockerfile
+    assert "safe.directory '*'" not in dockerfile
 
 
 @pytest.mark.parametrize(
@@ -385,6 +414,7 @@ def test_failed_command_captures_logs_timing_and_original_exit_code(tmp_path):
     assert captured["exit_code"] == 9
     assert captured["duration_seconds"] >= 0
     assert completed.stdout.count("failed-check") == 1
+    assert (tmp_path / "evidence").stat().st_mode & 0o777 == 0o777
 
 
 def test_final_summary_binds_report_digest_and_attempt(passing_evidence, monkeypatch):

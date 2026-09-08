@@ -284,6 +284,7 @@ def scripts(args: argparse.Namespace) -> dict[str, str]:
             f"git -C /workspace/repo remote set-url origin https://github.com/{args.repository}.git\n"
             "mkdir /workspace/release-source\n"
             f"git -C /workspace/repo archive {args.sha} | tar -x -C /workspace/release-source\n"
+            "chmod -R a+rwX /workspace/repo\n"
         ),
         "gate.sh": f'set -euo pipefail\ncd /workspace/repo\ntest "$(git rev-parse HEAD)" = {args.sha}\n{command}\n',
         "postgres.sh": (

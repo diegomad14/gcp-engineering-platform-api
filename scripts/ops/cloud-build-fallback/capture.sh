@@ -4,6 +4,7 @@ set -uo pipefail
 step=$1
 shift
 mkdir -p /workspace/evidence
+chmod a+rwx /workspace /workspace/evidence
 started=$(date +%s)
 "$@" 2>&1 | tee "/workspace/evidence/$step.log"
 code=${PIPESTATUS[0]}

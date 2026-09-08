@@ -2,4 +2,10 @@ FROM aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9
 FROM python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534
 COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
 RUN apt-get update && apt-get install -y --no-install-recommends git curl gcc libc6-dev libcurl4-openssl-dev unixodbc && rm -rf /var/lib/apt/lists/*
-RUN python -m pip install --no-cache-dir semgrep==1.176.1 pytest-cov==6.3.0 ruff==0.15.22 pytest-xdist==3.8.0 pydantic==2.13.5
+RUN groupadd --gid 1000 quality && useradd --uid 1000 --gid 1000 --create-home quality \
+    && python -m venv /opt/quality \
+    && /opt/quality/bin/python -m pip install --no-cache-dir setuptools==84.0.0 wheel==0.48.0 semgrep==1.176.1 pytest-cov==6.3.0 ruff==0.15.22 pytest-xdist==3.8.0 pydantic==2.13.5 \
+    && chown -R quality:quality /opt/quality
+ENV VIRTUAL_ENV=/opt/quality PATH="/opt/quality/bin:${PATH}" HOME=/home/quality
+USER quality
+RUN git config --global --add safe.directory /workspace/repo
