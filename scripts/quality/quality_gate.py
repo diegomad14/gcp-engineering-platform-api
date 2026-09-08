@@ -9,6 +9,7 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,23 +27,43 @@ def _run(command: str, cwd: Path, output_path: Path | None = None) -> dict[str, 
             "output": "Check not configured for this profile.",
             "skipped": True,
         }
-    completed = subprocess.run(
-        ["/bin/bash", "-e", "-o", "pipefail", "-c", command],
-        cwd=cwd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=os.environ.copy(),
-        check=False,
-    )
-    output = completed.stdout[-12000:]
     if output_path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(completed.stdout, encoding="utf-8")
-    print(f"\n$ {command}\n{output}", flush=True)
+    print(f"\n$ {command}", flush=True)
+    # Keep full diagnostics once on disk, with brief progress in Cloud Logging.
+    # The file is available during the run and long commands never appear idle.
+    log_context = (
+        output_path.open("w+", encoding="utf-8")
+        if output_path
+        else tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+    )
+    with (
+        log_context as log,
+        subprocess.Popen(
+            ["/bin/bash", "-e", "-o", "pipefail", "-c", command],
+            cwd=cwd,
+            text=True,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        ) as process,
+    ):
+        while True:
+            try:
+                returncode = process.wait(timeout=30)
+                break
+            except subprocess.TimeoutExpired:
+                print(f"Still running ({int(time.monotonic() - started)}s)", flush=True)
+        # Read only a bounded tail, even for very large scanner outputs.
+        size = os.fstat(log.fileno()).st_size
+        log.buffer.seek(max(0, size - 48000))
+        output = log.buffer.read().decode("utf-8", errors="replace")[-12000:]
+    duration = round(time.monotonic() - started, 3)
+    print(output[-1500:], flush=True)
+    print(f"\nCompleted in {duration}s (exit {returncode})", flush=True)
     return {
-        "returncode": completed.returncode,
-        "duration": round(time.monotonic() - started, 3),
+        "returncode": returncode,
+        "duration": duration,
         "output": output,
         "skipped": False,
     }
