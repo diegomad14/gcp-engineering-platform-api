@@ -173,3 +173,54 @@ No automatic retry or winner confirmation was launched. Timing and complete-cost
 acceptance of balanced ordering remain to be measured in a separately authorized
 cloud run or the next authorized release. The existing procedure remains available
 for recovery. Do not infer a 50% cloud improvement from a local scheduling model.
+
+The completed local balanced-order validation retained the exact 1,053 collected
+identities: 1,052 passed and one skipped in 403.12 seconds (403.882 wall seconds),
+15.2% below the earlier local run. Coverage was 78.3456%, with 13 additional lines
+and none lost against that local run. Peak process RSS was 714 MiB. Actual large
+case durations increased when run together; the simulated 235-second makespan
+was not observed. PostgreSQL settings and real timing assertions stayed intact.
+The final engine commit `edc0a9666eb45841e4ffe5a3b0f731d2b4e7d33e` passed its
+exact-commit normalized gate on Python 3.12: 403 tests, 88.89% global coverage and
+all required lint, format, type and security checks. SanPlat pins that engine SHA.
+
+### Complete cost model for the initial experiment
+
+The following are conservative list-price models, not invoice amounts. Retain
+full images, source and evidence for the stated horizon, without free credits,
+layer deduplication or assumed cleanup. AR cleanup is in dry-run; GCS source is
+Standard US multiregional and evidence is Standard us-central1. Scanning is
+disabled. Use AR USD 0.10/GiB-month and GCS USD 0.026/0.020/GiB-month, divided by
+730 hours. Logging is USD 0.50/GiB. Transfer and operations use conservative upper
+rates of USD 0.23/GiB sent, 0.02/GiB received and 0.010 per 1,000 requests.
+Sources: [GCS](https://cloud.google.com/storage/pricing),
+[Logging](https://cloud.google.com/products/observability/pricing).
+
+Mature project counters for 19:50–20:15 UTC measured 2,813,461 log bytes, 109 GCS
+requests, 143,541,028 sent bytes and 6,652,168 received bytes. Charge that entire
+window to each attempt, including unrelated traffic: logging USD 0.00131012,
+operations USD 0.00109 and transfer USD 0.030871. This deliberately overcounts
+shared traffic. Performance stored a 96,821,058-byte image, 2,216,684-byte source
+and 32 evidence objects totaling 2,209,679 bytes. Economy stored its 2,216,682-byte
+source; its image publication and evidence upload did not run.
+
+| Initial attempt | Complete 30-day model | Complete 90-day model |
+|---|---:|---:|
+| Performance, successful but too slow | USD 0.276332 | USD 0.294306 |
+| Economy, timed out | USD 0.161661 | USD 0.161767 |
+
+The successful attempt's 90-day bound remains below the old compute-only
+USD 0.326485 ceiling, although its time fails acceptance. Both initial attempts
+total USD 0.456073 with 90-day retention and the shared window counted twice
+(USD 0.422802 when counted once). Later diagnostic requests outside the captured
+window are additional exceptional costs, not measured here; they are not zero.
+
+For one release at the start of each day, integrate storage as
+`daily_storage_per_release * T * (T+1) / 2`, then add T times non-storage cost.
+At equal volume, the initial performance model is USD 8.1596 for 30 releases in
+30 days and USD 25.2878 for 90 in 90 days, below even the corresponding old
+compute-only USD 9.7945 and USD 29.3836. After 90 releases the existing stock adds
+USD 0.8088 for another 30 days if retained, before new releases. Lifetime storage
+cost remains unknown. Economy cannot model delivered releases from a timeout.
+There is still no selected winner, and these initial costs do not certify the
+balanced-order engine's future cloud duration or billing.
