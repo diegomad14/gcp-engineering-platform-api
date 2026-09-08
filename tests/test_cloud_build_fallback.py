@@ -225,9 +225,23 @@ def test_shell_values_remain_single_arguments_and_install_is_not_executed(
     )
     tests = tokens[tokens.index("--test-command") + 1]
     assert "-p postgres_workers" in tests
+    assert "-p pytest_schedule" in tests
+    assert f"FALLBACK_SOURCE_SHA={arguments.sha}" in tests
+    assert "FALLBACK_REPOSITORY=diegomad14/cgm-sanplat-api" in tests
+    assert "FALLBACK_DURATION_PROFILE=/workspace/duration-profile.json" in tests
     assert "-n 4 --dist worksteal" in tests
     assert "--cov=. --cov-report=json:quality-reports/coverage.json" in tests
     assert not sentinel.exists()
+
+
+def test_duration_hints_and_plugin_are_frozen_prepared_inputs(prepared):
+    request = json.loads((prepared / "request.json").read_text())
+    for filename in ("pytest_schedule.py", "duration-profile.json"):
+        assert (
+            request["input_hashes"][filename]
+            == hashlib.sha256((prepared / filename).read_bytes()).hexdigest()
+        )
+        assert filename in (prepared / "input-manifest.sha256").read_text()
 
 
 @pytest.fixture

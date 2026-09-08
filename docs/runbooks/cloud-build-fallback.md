@@ -34,6 +34,13 @@ python scripts/ops/cloud-build-fallback/control.py submit \
 `performance` uses the existing default-pool `E2_HIGHCPU_8` with four pytest
 workers. `economy` uses default-pool `E2_STANDARD_2` with two workers. Both use
 `worksteal`, the same SHA/base, pinned tooling, complete suite and merged coverage.
+Historical timings balance the initial contiguous worksteal blocks. Each worker
+starts a different long case. This only permutes collected tests: it never skips
+cases, replaces assertions or changes PostgreSQL durability. Timings are hints
+from the same repository, including for future commits; new test IDs receive a
+median estimate and remain in the suite. Every worker records the collection
+hash, scheduled-order hash, known/unknown counts and measured/current source SHA.
+Repositories without a duration profile retain normal worksteal ordering.
 Source preparation, tooling and PostgreSQL start concurrently; the runtime image
 build overlaps quality. Publication checks the canonical `oss-v2` policy, report
 hash and Docker revision/source labels. There is exactly one push.
@@ -140,3 +147,29 @@ RSS was 915 MiB. This is feasibility evidence, not the Cloud Build comparison.
 Local coverage was 78.3053%; compare raw coverage files before interpreting small
 differences from the rounded baseline report. Cloud results and final selection
 are recorded in the companion performance evidence after the bounded experiment.
+
+The initial cloud experiment on engine `b7611e02d596bfe5a0234f346c47859347822827`
+found an important scheduling bottleneck. With four workers, worksteal placed
+both consecutive 7,911-meter cases in the same initial block. They cost 404.46
+seconds (SQLite) and 225.49 seconds (PostgreSQL) in Cloud Build, effectively in
+series. The versioned duration profile and balanced initial order correct this
+without changing either case or the application commit.
+
+| Initial profile, before balanced ordering | Build | Execution | Result |
+|---|---|---:|---|
+| E2_HIGHCPU_8, four workers | `763cfa67-593d-426d-b723-2b24384641a7` | 900.283 s | Quality passed; time objective missed |
+| E2_STANDARD_2, two workers | `3bc1e4b9-7ccf-43b7-ba02-854890ecf19a` | 1,283.373 s | Provider timeout; publication did not run |
+
+The successful initial build retained 1,052 passed, one skipped and raw global
+coverage 78.3425% (reference 78.3363%); all canonical oss-v2 checks passed. Queue
+for that build was 53.580 seconds and is excluded from cost. Its compute estimate
+is USD 0.234074; the timed-out economy attempt adds USD 0.128337. Their combined
+exceptional compute is USD 0.362411, before storage, logging, operations and
+transfer. These are not complete invoice costs and neither initial profile is
+an accepted winner. Provider cleanup can make reported execution exceed the
+configured 1,256-second timeout; accounting uses the full reported interval.
+
+No automatic retry or winner confirmation was launched. Timing and complete-cost
+acceptance of balanced ordering remain to be measured in a separately authorized
+cloud run or the next authorized release. The existing procedure remains available
+for recovery. Do not infer a 50% cloud improvement from a local scheduling model.

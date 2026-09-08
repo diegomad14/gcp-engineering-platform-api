@@ -73,6 +73,38 @@ def test_mismatched_existing_state_cannot_launch(
         control.operate(tmp_path / "build", state, submit=True)
 
 
+def test_remote_identity_mismatch_preserves_state_without_resubmitting(
+    control, request_data, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(control, "validate_inputs", lambda _: request_data)
+    state_file = tmp_path / "state.json"
+    original = {
+        "request_fingerprint": request_data["request_fingerprint"],
+        "build_id": "build-1",
+        "status": "WORKING",
+    }
+    control.save(state_file, original)
+    calls = []
+
+    def cloud(*args):
+        calls.append(args)
+        return {
+            "id": "build-1",
+            "status": "SUCCESS",
+            "substitutions": {"_REQUEST_FINGERPRINT": "e" * 64},
+        }
+
+    monkeypatch.setattr(control, "cloud", cloud)
+    with pytest.raises(RuntimeError, match="Build identity does not match"):
+        control.operate(tmp_path / "build", state_file, submit=True)
+
+    assert calls == [
+        ("builds", "describe", "build-1", "--project=test", "--region=us-central1")
+    ]
+    assert control.read(state_file) == original
+    assert control.read(tmp_path / "build.submission.json") == original
+
+
 def test_experiment_caps_attempts_and_requires_same_source(
     control, request_data, tmp_path
 ):
@@ -134,9 +166,18 @@ def test_prepared_source_rejects_extra_files(control, tmp_path):
         control.validate_inputs(tmp_path)
 
 
-@pytest.mark.parametrize("tamper", [False, True])
+@pytest.mark.parametrize(
+    "scenario,rejection",
+    [
+        ("valid", None),
+        ("tampered_hash", "hash mismatch"),
+        ("wrong_sha", "Report does not match the prepared release"),
+        ("wrong_repository", "Report does not match the prepared release"),
+        ("failed_policy", "Quality policy rejected report"),
+    ],
+)
 def test_register_reuses_exact_report_and_rejects_tampering(
-    control, request_data, tmp_path, monkeypatch, tamper
+    control, request_data, tmp_path, monkeypatch, scenario, rejection
 ):
     import hashlib
     import io
@@ -184,13 +225,21 @@ def test_register_reuses_exact_report_and_rejects_tampering(
             }
         ],
     }
+    if scenario == "wrong_sha":
+        report["commit_sha"] = "c" * 40
+    elif scenario == "wrong_repository":
+        report["repository"] = "other/api"
+    elif scenario == "failed_policy":
+        report["checks"][0]["status"] = "FAILED"
+    # Identity and policy failures retain a correct hash and successful summary:
+    # the controller must independently reject their otherwise intact reports.
     report_bytes = json.dumps(report).encode()
     summary = {
         "passed": True,
         "build_id": "b1",
         "request_fingerprint": request_data["request_fingerprint"],
         "quality_report_sha256": "wrong"
-        if tamper
+        if scenario == "tampered_hash"
         else hashlib.sha256(report_bytes).hexdigest(),
     }
     responses = {
@@ -230,8 +279,8 @@ def test_register_reuses_exact_report_and_rejects_tampering(
         "logUrl": "https://console.cloud.google.com/build/test",
         "substitutions": {"_REQUEST_FINGERPRINT": request_data["request_fingerprint"]},
     }
-    if tamper:
-        with pytest.raises(ValueError, match="hash mismatch"):
+    if rejection:
+        with pytest.raises(ValueError, match=rejection):
             control.register_quality(tmp_path, build, "https://platform.test")
         assert not calls
     else:

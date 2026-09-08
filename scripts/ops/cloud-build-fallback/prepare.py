@@ -244,8 +244,21 @@ def scripts(args: argparse.Namespace) -> dict[str, str]:
         args.install_command or 'python -m pip install --no-build-isolation -e ".[dev]"'
     )
     install += f"\npython -m pip install pytest-xdist=={XDIST_VERSION}"
+    schedule_environment = {
+        "PYTHONPATH": "/workspace",
+        "FALLBACK_SOURCE_SHA": args.sha,
+        "FALLBACK_REPOSITORY": args.repository,
+        "FALLBACK_SCHEDULE_EVIDENCE_DIR": "/workspace/evidence",
+    }
+    if (HERE / "duration_profiles" / f"{args.service}.json").is_file():
+        schedule_environment["FALLBACK_DURATION_PROFILE"] = (
+            "/workspace/duration-profile.json"
+        )
     test = (
-        f"PYTHONPATH=/workspace python -m pytest -p postgres_workers -q -n {args.workers} --dist {args.distribution} "
+        " ".join(
+            f"{key}={shlex.quote(value)}" for key, value in schedule_environment.items()
+        )
+        + f" python -m pytest -p postgres_workers -p pytest_schedule -q -n {args.workers} --dist {args.distribution} "
         "--durations=25 --cov=. --cov-report=json:quality-reports/coverage.json"
     )
     command = shlex.join(
@@ -353,6 +366,10 @@ def prepare(args: argparse.Namespace) -> Path:
         for filename in ("capture.sh", "result.py", "Dockerfile.quality"):
             shutil.copy2(HERE / filename, stage / filename)
         shutil.copy2(HERE / "postgres_workers.py", stage / "postgres_workers.py")
+        shutil.copy2(HERE / "pytest_schedule.py", stage / "pytest_schedule.py")
+        duration_profile = HERE / "duration_profiles" / f"{args.service}.json"
+        if duration_profile.is_file():
+            shutil.copy2(duration_profile, stage / "duration-profile.json")
         policy_package = stage / "policy/eng_platform_api"
         (policy_package / "services").mkdir(parents=True)
         (policy_package / "__init__.py").touch()

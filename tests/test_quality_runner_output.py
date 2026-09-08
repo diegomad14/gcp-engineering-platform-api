@@ -40,7 +40,11 @@ def test_progress_is_saved_before_the_process_exits(runner, tmp_path, capsys):
     )
     result = runner._run(python_command(code), tmp_path, log)
     assert result["returncode"] == 0
-    assert log.read_text() == result["output"] == "suite started\nsuite finished\n"
+    # Libraries loaded by earlier tests can emit fork diagnostics on stderr.
+    # Preserve those too, while requiring both child markers exactly once.
+    assert log.read_text() == result["output"]
+    assert result["output"].splitlines().count("suite started") == 1
+    assert result["output"].endswith("suite started\nsuite finished\n")
     assert "suite finished" in capsys.readouterr().out
 
 
