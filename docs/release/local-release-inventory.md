@@ -36,7 +36,7 @@ reescribe.
 
 | Repo | HEAD documentado y verificado | `origin/main` verificado | Divergencia observada | Propuesta limpia |
 |---|---|---|---:|---|
-| API | `d2e8e4abbc750a4a331827ba4849fbc8ee892179` | `6f502ca8ca65cf7de019ac17c22ceadde57e7542` | 50 de `main`, 1 de la base | rama `codex/reconciled-local-release-audit-api`, padre `6f502ca` |
+| API | `d2e8e4abbc750a4a331827ba4849fbc8ee892179` | `6f502ca8ca65cf7de019ac17c22ceadde57e7542` | 50 de `main`, 1 de la base | rama `codex/reconciled-local-release-audit-api`, base `6f502ca` |
 | Web | `311eab1f2da2c9d9c793d1f1bf2a8994f64b49bc` | `8a6c13de165fbba9c4083adc625b76956f1bd399` | 20 de `main`, 1 de la base | `7c103939b4aa9547cbadc0e01fd4134c881ec6e3`, padre `8a6c13d` |
 
 Los conteos se obtuvieron con los rangos de Git de cada repositorio y se
