@@ -77,6 +77,11 @@ def test_generate_service_plan():
     assert "service_name: test-api" in data["catalog_entry"]
     assert "Never use GCP Console" in data["agent_prompt"]
     assert data["sonar_properties"] == ""
+    assert ".cgm/local-release.yaml" in data["generated_files"]
+    assert "policy_id: oss-v2" in data["local_release_config"]
+    assert "build_platform: linux/amd64" in data["local_release_config"]
+    assert "remote_effects_require_confirmation: true" in data["local_release_config"]
+    assert "separately approved" in " ".join(data["checklist"])
 
 
 def test_generate_plan_rejects_legacy_app_name():

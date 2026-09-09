@@ -29,7 +29,10 @@ def _release_identity(item: ReleaseItem) -> tuple[str, ...]:
 @router.post("/", response_model=list[ReleaseItem], status_code=201)
 def register_release(payload: ReleaseCreateRequest):
     """Register one independent release row for every payload service."""
-    releases = releases_store.save_release(payload)
+    try:
+        releases = releases_store.save_release(payload)
+    except releases_store.ReleaseConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     _invalidate_summary_cache()
     return releases
 

@@ -35,6 +35,7 @@ _KNOWN_TEMPLATES = [
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _TEMPLATE_DIR = _REPO_ROOT / "templates" / "github-actions"
+_SERVICE_FACTORY_TEMPLATE_DIR = _REPO_ROOT / "templates" / "service-factory"
 
 
 def _build_yaml_contract(req: ServiceFactoryRequest) -> str:
@@ -219,6 +220,25 @@ def _build_quality_config(req: ServiceFactoryRequest) -> str:
     """)
 
 
+def _build_local_release_config(req: ServiceFactoryRequest) -> str:
+    """Generate the declarative phase-5 local-first release contract."""
+    template = (_SERVICE_FACTORY_TEMPLATE_DIR / "local-release.yaml.tpl").read_text()
+    replacements = {
+        "__SERVICE_NAME__": req.service_name,
+        "__REPOSITORY__": req.repository,
+        "__PROFILE__": req.quality_profile or req.runtime,
+        "__WORKING_DIRECTORY__": req.quality_working_directory,
+        "__PROJECT_ID__": req.gcp_project,
+        "__REGION__": req.region,
+        "__IMAGE_NAME__": req.cloud_run_service_name or req.service_name,
+        "__ARTIFACT_REPOSITORY__": "cgm-sanplat-repo",
+        "__HEALTH_PATH__": req.health_path,
+    }
+    for key, value in replacements.items():
+        template = template.replace(key, value)
+    return template
+
+
 def _build_catalog_entry(req: ServiceFactoryRequest) -> str:
     return textwrap.dedent(f"""\
     service_name: {req.service_name}
@@ -323,12 +343,17 @@ def _build_agent_prompt(req: ServiceFactoryRequest) -> str:
     - Create a branch `chore/adopt-engineering-platform-deploy`.
     - Add generated workflows under `.github/workflows/`.
     - Add the generated quality config and service release contract.
+    - Add `.cgm/local-release.yaml`; use the local engine for planning,
+      exact-SHA evidence and digest reuse only after its gates are reviewed.
     - Open a PR with a Conventional Commit title.
     - Do not commit secrets, `.env`, service account JSON, tokens, customer data, or wiki-only notes.
     - Validate with actionlint and the repo's normal test/build commands.
     - Configure repository variable `CGM_ACTIONS_RUNNER` as `ubuntu-latest` by
       default; use `cgm-release-local` only from the documented disposable-VM
       GitHub Actions runner contingency.
+    - Keep protected Actions checks, semantic-release and existing deployment
+      authorization during migration. Do not remove or retarget triggers in
+      this onboarding change.
     - After merge, wait for semantic-release to create a `vX.Y.Z` tag.
     - Deploy only from Engineering Platform `/deployments` by selecting service `{req.service_name}` and the generated tag.
 
@@ -372,6 +397,8 @@ def _build_checklist(req: ServiceFactoryRequest) -> list[str]:
         "Confirm the local emergency runner image, QEMU/cloud-localds prerequisites and pinned SHA-256 values are available to operators",
         "Copy generated platform-deploy.yml, platform-rollback.yml, CI/quality, and semantic-release workflows into the service repository",
         "Copy gcp-service-release.yaml to the service repository",
+        "Copy .cgm/local-release.yaml and run doctor/plan/quality from a clean checkout",
+        "Keep protected Actions checks and duplicate workflows until local cutover is separately approved",
         "Add the generated catalog entry to Engineering Platform API catalog/services/<service>.yaml",
         "Open PRs with generated artifacts and catalog entry",
         "Merge, wait for semantic-release tag, then deploy from Engineering Platform /deployments",
@@ -384,6 +411,7 @@ def get_templates() -> list[ServiceFactoryTemplate]:
 
 def generate_plan(req: ServiceFactoryRequest) -> ServiceFactoryPlan:
     contract_yaml = _build_yaml_contract(req)
+    local_release_config = _build_local_release_config(req)
     service_name = req.service_name
 
     plan = ServiceFactoryPlan(
@@ -399,6 +427,7 @@ def generate_plan(req: ServiceFactoryRequest) -> ServiceFactoryPlan:
             ".quality-gate.yml",
             f"{req.quality_working_directory.rstrip('/')}/.quality-sources.json",
             "cloud-run-service-labels.yaml",
+            ".cgm/local-release.yaml",
             "onboarding-checklist.md",
             "agent-handoff-prompt.md",
         ],
@@ -447,6 +476,7 @@ def generate_plan(req: ServiceFactoryRequest) -> ServiceFactoryPlan:
         agent_prompt=_build_agent_prompt(req),
         labels_manifest=_build_labels_manifest(req),
         quality_config=_build_quality_config(req),
+        local_release_config=local_release_config,
         quality_sources=json.dumps(
             {
                 "roots": ["src"],

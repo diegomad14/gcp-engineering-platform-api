@@ -131,6 +131,18 @@ executable lines. Reports include tested/base SHA and are validated against the
 catalog before release, candidate and promotion; missing or stale evidence blocks.
 See [quality policy](docs/quality/open-source-quality-gate.md).
 
+## Local-first release preparation
+
+The local release engine is a reviewable pilot contract, not an active
+replacement for the protected GitHub path. It prepares exact-SHA manifests,
+OSS evidence, local BuildKit reuse and dry-run lifecycle plans. Remote
+execution remains blocked until a reviewed shared-exclusion lease and
+platform-issued authorization adapter exist; `--execute` plus confirmation is
+not sufficient. Actions checks, semantic-release, deployment authorization
+and branch protections remain authoritative during the proposed transition.
+
+See [local release](docs/release/local-release.md) and [local lifecycle](docs/release/local-lifecycle.md).
+
 The CLI uses the same Service Factory generator as the API. Install the project
 (`pip install -e .`) and run `python scripts/service_factory.py --help`.
 It emits OSS workflows, detailed coverage configuration and deployment artifacts;

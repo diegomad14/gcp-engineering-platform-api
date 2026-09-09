@@ -62,6 +62,8 @@ class CatalogService(BaseModel):
     project_id: str
     region: str
     environment: str = "prod"
+    release_model: str = "local-first-preparation"
+    release_policy: str = "oss-v2"
     validation_targets: list[ValidationTarget] = Field(default_factory=list)
     quality: ServiceQualityConfig = Field(default_factory=ServiceQualityConfig)
     deployment: ServiceDeploymentConfig = Field(default_factory=ServiceDeploymentConfig)
@@ -114,6 +116,9 @@ class ReleaseItem(BaseModel):
     repository: str
     version: str
     status: str  # candidate, promoted, rolled_back
+    release_id: str = ""
+    source_sha: str = ""
+    artifact_digest: str = ""
     revision: str = ""
     action: ReleaseServiceAction = "deployed"
     github_run_url: str = ""
@@ -126,6 +131,9 @@ class ReleaseCreateRequest(BaseModel):
     repository: str
     version: str
     status: str = "candidate"  # "candidate" | "promoted" | "rolled_back"
+    release_id: str = ""
+    source_sha: str = ""
+    artifact_digest: str = ""
     services: list[ServiceRevision] = Field(min_length=1)
     github_run_url: str = ""
     triggered_by: str = "github-actions"
@@ -458,6 +466,7 @@ class ServiceFactoryPlan(BaseModel):
     labels_manifest: str = ""
     quality_sources: str = ""
     quality_config: str = ""
+    local_release_config: str = ""
     sonar_properties: str = ""  # Deprecated compatibility output; always empty.
 
 

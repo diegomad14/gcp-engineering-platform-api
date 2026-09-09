@@ -22,6 +22,10 @@ _COLLECTION = os.getenv("ENG_PLATFORM_RELEASES_FIRESTORE_COLLECTION", "")
 _store_lock = threading.RLock()
 
 
+class ReleaseConflict(ValueError):
+    """A release identity was reused with different immutable inputs."""
+
+
 @lru_cache(maxsize=4)
 def _firestore_client(project_id: str):
     from google.cloud import firestore
@@ -92,6 +96,9 @@ def _item(
     action: str,
     github_run_url: str,
     created_at: str,
+    release_id: str = "",
+    source_sha: str = "",
+    artifact_digest: str = "",
 ) -> Optional[ReleaseItem]:
     if not service_name or not repository:
         return None
@@ -101,6 +108,9 @@ def _item(
             repository=repository,
             version=version,
             status=status,
+            release_id=release_id,
+            source_sha=source_sha,
+            artifact_digest=artifact_digest,
             revision=revision,
             action=cast(ReleaseServiceAction, action),
             github_run_url=github_run_url,
@@ -112,6 +122,9 @@ def _item(
             repository=repository,
             version=version,
             status=status,
+            release_id=release_id,
+            source_sha=source_sha,
+            artifact_digest=artifact_digest,
             revision=revision,
             action="missing",
             github_run_url=github_run_url,
@@ -165,6 +178,9 @@ def release_items_from_record(record: dict) -> list[ReleaseItem]:
             ),
             version=str(record.get("version", "")),
             status=str(record.get("status", "")),
+            release_id=str(record.get("release_id", "")),
+            source_sha=str(record.get("source_sha", "")),
+            artifact_digest=str(record.get("artifact_digest", "")),
             revision=str(record.get("revision", "")),
             action=str(record.get("action", "missing")),
             github_run_url=str(record.get("github_run_url", "")),
@@ -189,6 +205,9 @@ def release_items_from_record(record: dict) -> list[ReleaseItem]:
                 repository=_repository_for_service(service.service_name, record),
                 version=str(record.get("version", "")),
                 status=str(record.get("status", "")),
+                release_id=str(record.get("release_id", "")),
+                source_sha=str(record.get("source_sha", "")),
+                artifact_digest=str(record.get("artifact_digest", "")),
                 revision=service.revision,
                 action=service.action,
                 github_run_url=str(record.get("github_run_url", "")),
@@ -210,6 +229,9 @@ def save_release(payload: ReleaseCreateRequest) -> list[ReleaseItem]:
             repository=payload.repository,
             version=payload.version,
             status=payload.status,
+            release_id=payload.release_id,
+            source_sha=payload.source_sha,
+            artifact_digest=payload.artifact_digest,
             revision=normalized.revision,
             action=normalized.action,
             github_run_url=payload.github_run_url,
@@ -221,20 +243,99 @@ def save_release(payload: ReleaseCreateRequest) -> list[ReleaseItem]:
 
     collection = _firestore_collection()
     if collection is not None:
+        existing_rows: dict[str, ReleaseItem] = {}
+        if payload.release_id:
+            immutable = ("repository", "version", "source_sha", "artifact_digest")
+            for item in items:
+                document = collection.document(f"{payload.release_id}-{item.service_name}")
+                existing = document.get()
+                if getattr(existing, "exists", False):
+                    record = existing.to_dict() or {}
+                    if (
+                        record.get("release_id", "") != payload.release_id
+                        or record.get("service_name", "") != item.service_name
+                        or any(record.get(key, "") != getattr(payload, key) for key in immutable)
+                    ):
+                        raise ReleaseConflict(
+                            "Release identity already exists with different immutable inputs"
+                        )
+                    existing_rows[item.service_name] = ReleaseItem(**record)
+            if existing_rows:
+                if len(existing_rows) != len(items):
+                    raise ReleaseConflict("Release identity is missing one of its service rows")
+                return [existing_rows[item.service_name] for item in items]
         for item in items:
-            doc_id = f"{item.service_name}-{item.created_at}"
-            collection.document(doc_id).set(
-                {
-                    **item.model_dump(),
-                    "triggered_by": payload.triggered_by,
-                    "rollback_from_version": payload.rollback_from_version,
-                    "notes": payload.notes,
-                }
+            doc_id = (
+                f"{payload.release_id}-{item.service_name}"
+                if payload.release_id
+                else f"{item.service_name}-{item.created_at}"
             )
+            document = collection.document(doc_id)
+            record = {
+                **item.model_dump(),
+                "triggered_by": payload.triggered_by,
+                "rollback_from_version": payload.rollback_from_version,
+                "notes": payload.notes,
+            }
+            if not payload.release_id:
+                document.set(record)
+                continue
+            try:
+                # create() makes the release identity reservation atomic across
+                # independent API processes; set() could overwrite a raced
+                # release with a different source or digest.
+                document.create(record)
+                existing_rows[item.service_name] = item
+            except Exception as exc:
+                if exc.__class__.__name__ not in {"AlreadyExists", "Conflict"}:
+                    raise
+                existing = document.get()
+                if not getattr(existing, "exists", False):
+                    raise ReleaseConflict("Release identity disappeared during reservation") from exc
+                stored = existing.to_dict() or {}
+                immutable = ("repository", "version", "source_sha", "artifact_digest")
+                if (
+                    stored.get("release_id", "") != payload.release_id
+                    or stored.get("service_name", "") != item.service_name
+                    or any(stored.get(key, "") != getattr(payload, key) for key in immutable)
+                ):
+                    raise ReleaseConflict(
+                        "Release identity already exists with different immutable inputs"
+                    ) from exc
+                existing_rows[item.service_name] = ReleaseItem(**stored)
+        if payload.release_id:
+            if len(existing_rows) != len(items):
+                raise ReleaseConflict("Release identity is missing one of its service rows")
+            return [existing_rows[item.service_name] for item in items]
         return items
 
     with _store_lock:
         records = _load()
+        if payload.release_id:
+            existing = [
+                record
+                for record in records
+                if record.get("release_id") == payload.release_id
+            ]
+            if existing:
+                immutable = ("repository", "version", "source_sha", "artifact_digest")
+                if any(
+                    record.get(key, "") != getattr(payload, key)
+                    for record in existing
+                    for key in immutable
+                ):
+                    raise ReleaseConflict(
+                        "Release identity already exists with different immutable inputs"
+                    )
+                existing_by_service = {
+                    record.get("service_name"): record for record in existing
+                }
+                if all(item.service_name in existing_by_service for item in items):
+                    return [
+                        ReleaseItem(**existing_by_service[item.service_name])
+                        for item in items
+                    ]
+                raise ReleaseConflict("Release identity is missing one of its service rows")
         records.extend(
             {
                 **item.model_dump(),

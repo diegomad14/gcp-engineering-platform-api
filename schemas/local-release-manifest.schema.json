@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cgm.local/schemas/local-release-manifest.schema.json",
+  "title": "CGM local release manifest",
+  "description": "Durable local-first release manifest for preparation and guarded lifecycle phases.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "release_id",
+    "created_at",
+    "service_name",
+    "repository",
+    "source",
+    "version",
+    "quality",
+    "artifact",
+    "dependencies",
+    "stages",
+    "remote_effects",
+    "transition"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "release_id": { "type": "string", "format": "uuid" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "service_name": { "type": "string", "minLength": 1 },
+    "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+    "source": {
+      "type": "object",
+      "required": ["path", "sha", "branch", "dirty", "dirty_paths", "base_sha", "reviewed_sha", "publishable"],
+      "properties": {
+        "path": { "type": "string" },
+        "sha": { "$ref": "#/$defs/sha" },
+        "reviewed_sha": { "$ref": "#/$defs/sha" },
+        "base_sha": { "$ref": "#/$defs/sha" },
+        "branch": { "type": "string" },
+        "dirty": { "type": "boolean" },
+        "dirty_paths": { "type": "array", "items": { "type": "string" } },
+        "remote_origin": { "type": "string" },
+        "repository": { "type": "string" },
+        "publishable": { "type": "boolean" }
+      }
+    },
+    "version": {
+      "type": "object",
+      "required": ["tag", "semver", "commits", "notes", "notes_sha256", "local_tag"],
+      "properties": {
+        "tag": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$" },
+        "semver": { "type": "string" },
+        "change_level": { "type": "string" },
+        "previous_tag": { "type": "string" },
+        "previous_sha": { "type": "string" },
+        "commits": { "type": "array" },
+        "notes": { "type": "string" },
+        "notes_sha256": { "$ref": "#/$defs/digest" },
+        "local_tag": { "type": "object" }
+      }
+    },
+    "quality": {
+      "type": "object",
+      "required": ["policy_id", "status", "evidence_path", "errors", "ttl_hours"],
+      "properties": {
+        "policy_id": { "const": "oss-v2" },
+        "status": { "enum": ["PENDING", "PASSED", "FAILED"] },
+        "evidence_path": { "type": "string" },
+        "errors": { "type": "array", "items": { "type": "string" } },
+        "ttl_hours": { "const": 168 }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["context", "dockerfile", "inputs", "reuse_key", "local_image", "remote_published"],
+      "properties": {
+        "context": { "type": "string" },
+        "dockerfile": { "type": "string" },
+        "inputs": { "type": "object" },
+        "reuse_key": { "$ref": "#/$defs/digest" },
+        "image_reference": { "type": "string" },
+        "local_image": { "type": "string" },
+        "status": { "type": "string" },
+        "digest": { "type": "string" },
+        "remote_published": { "type": "boolean" }
+      }
+    },
+    "dependencies": { "type": "object" },
+    "stages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "status", "effect"],
+        "properties": {
+          "name": { "type": "string" },
+          "status": { "type": "string" },
+          "effect": { "type": "string" }
+        }
+      }
+    },
+    "remote_effects": { "type": "array", "items": { "type": "string" } },
+    "transition": {
+      "type": "object",
+      "required": ["phase", "remote_mutations_allowed", "actions_dispatch", "cloud_build"],
+      "properties": {
+        "phase": { "enum": ["phase-1", "phase-2", "phase-3", "phase-4", "phase-5"] },
+        "remote_mutations_allowed": { "type": "boolean" },
+        "actions_dispatch": { "const": false },
+        "cloud_build": { "const": false },
+        "note": { "type": "string" }
+      }
+    },
+    "runtime": { "type": "object", "additionalProperties": true }
+  },
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

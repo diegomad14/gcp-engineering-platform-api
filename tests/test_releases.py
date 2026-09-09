@@ -67,6 +67,32 @@ def test_register_creates_one_row_per_service(client):
     assert all("services" not in row for row in rows)
 
 
+def test_register_is_idempotent_by_release_identity(client):
+    payload = _payload(
+        release_id="release-123",
+        source_sha="a" * 40,
+        artifact_digest="sha256:" + "b" * 64,
+    )
+    first = client.post("/api/releases", json=payload)
+    second = client.post("/api/releases", json=payload)
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert second.json() == first.json()
+    assert client.get("/api/releases").json()["total_releases"] == 2
+
+
+def test_register_rejects_reused_identity_with_different_sha(client):
+    payload = _payload(release_id="release-123", source_sha="a" * 40)
+    assert client.post("/api/releases", json=payload).status_code == 201
+
+    conflict = client.post(
+        "/api/releases",
+        json={**payload, "source_sha": "b" * 40},
+    )
+    assert conflict.status_code == 409
+
+
 def test_api_only_release_is_not_synthesized_into_other_services(client):
     response = client.post(
         "/api/releases",
