@@ -27,6 +27,22 @@ workflows son límites configurados, no duraciones observadas. La fase 0 no
 inventa tiempos de ejecución cuando no existe evidencia local o remota
 capturada.
 
+## Auditoría de bases vigentes y reconciliación
+
+La referencia documentada se verificó contra el objeto completo, no solo contra
+el prefijo corto. La propuesta revisable parte de `origin/main` después de
+`git fetch origin main`; el checkout original se conserva aparte y no se
+reescribe.
+
+| Repo | HEAD documentado y verificado | `origin/main` verificado | Divergencia observada | Propuesta limpia |
+|---|---|---|---:|---|
+| API | `d2e8e4abbc750a4a331827ba4849fbc8ee892179` | `6f502ca8ca65cf7de019ac17c22ceadde57e7542` | 50 de `main`, 1 de la base | `2c2de6a8d8d4e4179a09c56a73f202bfca3e879d`, padre `6f502ca` |
+| Web | `311eab1f2da2c9d9c793d1f1bf2a8994f64b49bc` | `8a6c13de165fbba9c4083adc625b76956f1bd399` | 20 de `main`, 1 de la base | `7c103939b4aa9547cbadc0e01fd4134c881ec6e3`, padre `8a6c13d` |
+
+Los conteos se obtuvieron con los rangos de Git de cada repositorio y se
+confirmaron antes de reconciliar. No se hicieron push, publicaciones,
+despliegues, cambios administrativos ni cambios de permisos.
+
 ## Checkouts del catálogo
 
 | Servicio | Repositorio | Checkout observado | HEAD corto | Árbol |
@@ -35,12 +51,14 @@ capturada.
 | `cgm-sanplat-web` | `diegomad14/cgm-sanplat-web` | `feat/scrum-54-local-release-fallback` | `8e72653` | limpio |
 | `cgm-bot-api` | `diegomad14/cgm-bot-core` | `feat/scrum-54-local-release-fallback` | `9fa8a2a` | limpio |
 | `communications-ms` | `diegomad14/communications-ms` | `feat/scrum-54-local-release-fallback` | `04d0db8` | limpio |
-| `eng-platform-api` | `diegomad14/gcp-engineering-platform-api` | `fix/communications-runtime-quality` | `d2e8e4a` | sucio; ya tenía cambios de usuario al comenzar |
-| `eng-platform-web` | `diegomad14/gcp-engineering-platform-web` | `fix/scrum-54-drill-audit` | `311eab1` | limpio |
+| `eng-platform-api` | `diegomad14/gcp-engineering-platform-api` | `fix/communications-runtime-quality` | `d2e8e4a` | checkout original sucio; cambios preservados |
+| `eng-platform-api` | `diegomad14/gcp-engineering-platform-api` | `codex/reconciled-local-release-audit-api` | `2c2de6a` | limpio; parte de `origin/main` vigente |
+| `eng-platform-web` | `diegomad14/gcp-engineering-platform-web` | `fix/scrum-54-drill-audit` | `311eab1` | checkout original preservado con cambios preexistentes |
+| `eng-platform-web` | `diegomad14/gcp-engineering-platform-web` | `codex/reconciled-local-release-audit-web` | `7c10393` | limpio; parte de `origin/main` vigente |
 
-El checkout de `eng-platform-api` es el repositorio de implementación. Sus
-cambios previos se preservaron; el motor y sus pruebas se añadieron sin resetear
-ni sobrescribir ese trabajo.
+Los checkouts originales de API y Web se preservaron. El motor y sus pruebas se
+añadieron en worktrees limpios desde las bases vigentes, reaplicando solo los
+cambios del motor y sin resetear, limpiar ni sobrescribir los árboles originales.
 
 ## Dependencias de workflows y límites
 
@@ -52,11 +70,11 @@ de imagen, despliegue Cloud Run y tareas con límites configurados de hasta
 1800 segundos. Ninguno de esos pasos se invoca desde la fase 1.
 
 Los workflows actuales de los repos siguen dependiendo de `uses:` de Actions.
-El checkout de `eng-platform-api` también conserva un workflow de CI con una
-acción de Sonar, mientras que la documentación canónica del vault declara
-`oss-v2` y el retiro de Sonar para el proceso vigente. Esa divergencia queda
-registrada como pendiente de reconciliación antes de la fase de publicación; no
-se oculta dentro del motor local.
+La propuesta no modifica workflows: conserva los checks OSS, la autorización
+previa, la concurrencia por servicio y las correcciones de `origin/main`. El
+workflow Sonar que permanece en el checkout original de API no se toma como
+evidencia vigente ni se copia a la propuesta; la política canónica documentada
+es `oss-v2`.
 
 ## Artefactos entregados
 
