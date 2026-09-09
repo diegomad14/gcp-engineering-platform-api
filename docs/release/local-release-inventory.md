@@ -36,7 +36,7 @@ reescribe.
 
 | Repo | HEAD documentado y verificado | `origin/main` verificado | Divergencia observada | Propuesta limpia |
 |---|---|---|---:|---|
-| API | `d2e8e4abbc750a4a331827ba4849fbc8ee892179` | `6f502ca8ca65cf7de019ac17c22ceadde57e7542` | 50 de `main`, 1 de la base | `2c2de6a8d8d4e4179a09c56a73f202bfca3e879d`, padre `6f502ca` |
+| API | `d2e8e4abbc750a4a331827ba4849fbc8ee892179` | `6f502ca8ca65cf7de019ac17c22ceadde57e7542` | 50 de `main`, 1 de la base | rama `codex/reconciled-local-release-audit-api`, padre `6f502ca` |
 | Web | `311eab1f2da2c9d9c793d1f1bf2a8994f64b49bc` | `8a6c13de165fbba9c4083adc625b76956f1bd399` | 20 de `main`, 1 de la base | `7c103939b4aa9547cbadc0e01fd4134c881ec6e3`, padre `8a6c13d` |
 
 Los conteos se obtuvieron con los rangos de Git de cada repositorio y se
@@ -52,7 +52,7 @@ despliegues, cambios administrativos ni cambios de permisos.
 | `cgm-bot-api` | `diegomad14/cgm-bot-core` | `feat/scrum-54-local-release-fallback` | `9fa8a2a` | limpio |
 | `communications-ms` | `diegomad14/communications-ms` | `feat/scrum-54-local-release-fallback` | `04d0db8` | limpio |
 | `eng-platform-api` | `diegomad14/gcp-engineering-platform-api` | `fix/communications-runtime-quality` | `d2e8e4a` | checkout original sucio; cambios preservados |
-| `eng-platform-api` | `diegomad14/gcp-engineering-platform-api` | `codex/reconciled-local-release-audit-api` | `2c2de6a` | limpio; parte de `origin/main` vigente |
+| `eng-platform-api` | `diegomad14/gcp-engineering-platform-api` | `codex/reconciled-local-release-audit-api` | `HEAD` | limpio; parte de `origin/main` vigente |
 | `eng-platform-web` | `diegomad14/gcp-engineering-platform-web` | `fix/scrum-54-drill-audit` | `311eab1` | checkout original preservado con cambios preexistentes |
 | `eng-platform-web` | `diegomad14/gcp-engineering-platform-web` | `codex/reconciled-local-release-audit-web` | `7c10393` | limpio; parte de `origin/main` vigente |
 
