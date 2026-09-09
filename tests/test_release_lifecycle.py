@@ -803,3 +803,63 @@ def test_lifecycle_sanplat_dry_run_adoption_and_stage_progression(tmp_path):
             current[key] = item
         assert release_lifecycle._next_lifecycle_stage(current) == expected
         assert release_lifecycle._next_command(api_path, current, expected)
+
+
+@pytest.mark.parametrize(
+    "operation", ["publish", "candidate", "promote", "rollback", "register"]
+)
+def test_every_lifecycle_dry_run_has_no_remote_effects(
+    monkeypatch, tmp_path, operation
+):
+    value = manifest(tmp_path)
+    path = write_manifest(tmp_path, value)
+    monkeypatch.setattr(
+        release_lifecycle,
+        "_run_command",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("dry-run attempted an external command")
+        ),
+    )
+    kwargs = {
+        "state_dir": tmp_path / f"{operation}-state",
+        "execute": False,
+        "confirm_remote_effects": False,
+    }
+    if operation == "promote":
+        kwargs["confirmation"] = ""
+    elif operation == "rollback":
+        kwargs["target_revision"] = ""
+        kwargs["confirmation"] = ""
+    elif operation == "register":
+        kwargs.update(
+            {"status": "candidate", "revision": "", "platform_api_url": "", "token": ""}
+        )
+    target = (
+        release_lifecycle.register_release
+        if operation == "register"
+        else getattr(release_lifecycle, operation)
+    )
+    result = target(path, **kwargs)
+    assert result["execution"]["status"] == "PLANNED"
+    assert result["execution"]["remote_effects"] == []
+
+
+@pytest.mark.parametrize("operation", ["candidate", "promote", "rollback"])
+def test_sanplat_generic_routes_are_all_blocked(monkeypatch, tmp_path, operation):
+    value = manifest(tmp_path, "cgm-sanplat-api")
+    path = write_manifest(tmp_path, value)
+    with pytest.raises(
+        release_lifecycle.LifecycleError, match="SanPlat generic lifecycle commands"
+    ):
+        kwargs = {
+            "state_dir": tmp_path / f"{operation}-state",
+            "execute": True,
+            "confirm_remote_effects": True,
+        }
+        if operation == "promote":
+            kwargs["confirmation"] = "PROMOTE_PROD"
+        elif operation == "rollback":
+            kwargs.update(
+                {"target_revision": "known-good", "confirmation": "ROLLBACK_PROD"}
+            )
+        getattr(release_lifecycle, operation)(path, **kwargs)
