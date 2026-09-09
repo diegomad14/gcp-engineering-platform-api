@@ -80,7 +80,9 @@ es `oss-v2`.
 
 - `scripts/release/local_release.py`: CLI determinista, stdlib-only.
 - `scripts/release/local-release`: wrapper operativo.
-- `tests/test_local_release.py`: ocho pruebas del contrato inicial.
+- `tests/test_local_release.py` y `tests/test_release_lifecycle.py`: pruebas
+  del contrato, identidad, reconciliación y controles de ciclo; el gate
+  diferencial incluye `src` y `scripts/release` sin exclusiones.
 - `schemas/local-release-manifest.schema.json`: contrato durable del manifiesto.
 - `docs/release/local-release.md`: guía de uso y límites.
 - `docs/release/local-lifecycle.md`: publicación, candidate, registro,

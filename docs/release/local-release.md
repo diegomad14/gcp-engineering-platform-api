@@ -86,7 +86,10 @@ Un árbol sucio se rechaza para plan, calidad y preparación. `prepare
 
 El perfil Python/Node requiere la política `oss-v2`: SHA de código exacto,
 `base_sha` exacto, cobertura diferencial de líneas ejecutables de al menos 80%,
-toolchain compatible y vigencia máxima de 168 horas. El runner existente
+toolchain compatible y vigencia máxima de 168 horas. El alcance canónico de
+Python incluye `src` y `scripts/release`; sus auxiliares ejecutables se
+comprueban además con los controles estáticos aplicables. No hay exclusiones
+para conseguir un resultado verde. El runner existente
 también informa cobertura global, pero esa cifra no sustituye la evidencia
 diferencial. Sin el reporte diferencial correcto, la evidencia queda en
 `policy_status: FAILED` y no puede reutilizarse.
