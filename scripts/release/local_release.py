@@ -253,7 +253,9 @@ def parse_repository(remote: str) -> str:
 
 def resolve_base_sha(repo: Path, head: str, requested: str = "") -> str:
     if requested:
-        base = require_sha(git(repo, "rev-parse", f"{requested}^{{commit}}"), "base SHA")
+        base = require_sha(
+            git(repo, "rev-parse", f"{requested}^{{commit}}"), "base SHA"
+        )
     else:
         base = ""
         for candidate in ("origin/main", "main", "origin/master", "master"):
@@ -278,11 +280,15 @@ def load_catalog(platform_root: Path, service_name: str) -> dict[str, Any]:
         (item for item in services if item.get("service_name") == service_name), None
     )
     if not isinstance(service, dict):
-        raise ReleaseError(f"Service is not registered in the platform catalog: {service_name}")
+        raise ReleaseError(
+            f"Service is not registered in the platform catalog: {service_name}"
+        )
     return service
 
 
-def validate_catalog_repository(snapshot: dict[str, Any], service: dict[str, Any]) -> None:
+def validate_catalog_repository(
+    snapshot: dict[str, Any], service: dict[str, Any]
+) -> None:
     expected = str(service.get("repository", ""))
     if not REPOSITORY_RE.fullmatch(expected):
         raise ReleaseError("Catalog repository is invalid")
@@ -343,7 +349,9 @@ def commit_log(repo: Path, previous_tag: str | None) -> list[Commit]:
 def commit_release_level(commit: Commit) -> str | None:
     match = CONVENTIONAL_RE.fullmatch(commit.subject)
     breaking = bool(match and match.group("breaking")) or bool(
-        re.search(r"^BREAKING(?: CHANGE)?\s*:", commit.body, re.IGNORECASE | re.MULTILINE)
+        re.search(
+            r"^BREAKING(?: CHANGE)?\s*:", commit.body, re.IGNORECASE | re.MULTILINE
+        )
     )
     if breaking:
         return "major"
@@ -415,19 +423,25 @@ def version_plan(
     if requested_version:
         selected = SemVer.parse(requested_version)
         if previous and selected <= SemVer.parse(previous["name"]):
-            raise ReleaseError("Requested version must be greater than the previous release")
+            raise ReleaseError(
+                "Requested version must be greater than the previous release"
+            )
     else:
         if not previous:
             raise ReleaseError(
                 "No reachable SemVer tag; provide --version for an explicitly reviewed initial release"
             )
         if not level:
-            raise ReleaseError("No release-worthy Conventional Commit since the previous tag")
+            raise ReleaseError(
+                "No release-worthy Conventional Commit since the previous tag"
+            )
         selected = SemVer.parse(previous["name"]).bump(level)
     tag = selected.tag()
     tag_state = local_tag_state(repo, tag, snapshot["sha"])
     if tag_state["status"] == "conflict":
-        raise ReleaseError(f"Tag {tag} exists locally on another SHA; refusing to move it")
+        raise ReleaseError(
+            f"Tag {tag} exists locally on another SHA; refusing to move it"
+        )
     notes = release_notes(commits, tag)
     return {
         "tag": tag,
@@ -508,9 +522,17 @@ def workflow_inventory(repo: Path) -> dict[str, Any]:
                 "uses_actions": bool(
                     re.search(r"^\s*(?:-\s*)?uses:\s*", text, re.MULTILINE)
                 ),
-                "quality": bool(re.search(r"quality|test|lint|sonar|trivy|semgrep", text, re.I)),
-                "release": bool(re.search(r"semantic-release|release|deploy|promote|rollback", text, re.I)),
-                "cloud_build": bool(re.search(r"gcloud\s+builds|cloudbuild|--source", text, re.I)),
+                "quality": bool(
+                    re.search(r"quality|test|lint|sonar|trivy|semgrep", text, re.I)
+                ),
+                "release": bool(
+                    re.search(
+                        r"semantic-release|release|deploy|promote|rollback", text, re.I
+                    )
+                ),
+                "cloud_build": bool(
+                    re.search(r"gcloud\s+builds|cloudbuild|--source", text, re.I)
+                ),
                 "remote_effects": sorted(
                     marker
                     for marker in REMOTE_EFFECT_MARKERS
@@ -557,11 +579,15 @@ def context_fingerprint(context: Path) -> str:
     entries: list[dict[str, Any]] = []
     for path in iter_context_files(context):
         relative = path.relative_to(context).as_posix()
-        entries.append({"path": relative, "size": path.stat().st_size, "sha256": file_digest(path)})
+        entries.append(
+            {"path": relative, "size": path.stat().st_size, "sha256": file_digest(path)}
+        )
     return digest(entries)
 
 
-def build_inputs(repo: Path, service: dict[str, Any], version: dict[str, Any]) -> dict[str, Any]:
+def build_inputs(
+    repo: Path, service: dict[str, Any], version: dict[str, Any]
+) -> dict[str, Any]:
     deployment = service.get("deployment", {})
     context = (repo / str(deployment.get("build_context", "."))).resolve()
     if not context.is_relative_to(repo.resolve()):
@@ -574,7 +600,10 @@ def build_inputs(repo: Path, service: dict[str, Any], version: dict[str, Any]) -
     if dockerignore.exists():
         recipe_files.append(dockerignore)
     recipe = digest(
-        [{"path": str(item.relative_to(context)), "sha256": file_digest(item)} for item in recipe_files]
+        [
+            {"path": str(item.relative_to(context)), "sha256": file_digest(item)}
+            for item in recipe_files
+        ]
     )
     dependency_names = {
         "package.json",
@@ -596,7 +625,9 @@ def build_inputs(repo: Path, service: dict[str, Any], version: dict[str, Any]) -
     base_images = [
         match.group(1)
         for match in re.finditer(
-            r"^\s*FROM\s+(\S+)", dockerfile.read_text(encoding="utf-8", errors="replace"), re.MULTILINE
+            r"^\s*FROM\s+(\S+)",
+            dockerfile.read_text(encoding="utf-8", errors="replace"),
+            re.MULTILINE,
         )
     ]
     inputs = {
@@ -722,8 +753,16 @@ def quality_status(report: dict[str, Any]) -> tuple[str, list[str]]:
     checks = report.get("checks")
     if not isinstance(checks, list):
         return "FAILED", ["Quality report has no checks"]
-    failed = [str(item.get("name", "unknown")) for item in checks if item.get("status") == "FAILED"]
-    return ("PASSED", []) if not failed else ("FAILED", [f"Failed checks: {', '.join(failed)}"])
+    failed = [
+        str(item.get("name", "unknown"))
+        for item in checks
+        if item.get("status") == "FAILED"
+    ]
+    return (
+        ("PASSED", [])
+        if not failed
+        else ("FAILED", [f"Failed checks: {', '.join(failed)}"])
+    )
 
 
 def differential_status(
@@ -751,7 +790,9 @@ def differential_status(
     if coverage is not None and float(coverage) < threshold:
         errors.append(f"Changed-line coverage {coverage}% is below {threshold}%")
     if coverage is None and int(value.get("changed_lines", 0) or 0) != 0:
-        errors.append("Differential report has no coverage for changed executable lines")
+        errors.append(
+            "Differential report has no coverage for changed executable lines"
+        )
     return ("PASSED" if not errors else "FAILED", errors, value)
 
 
@@ -764,7 +805,10 @@ def validate_evidence(
     current_toolchain: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     evidence = read_json(evidence_path)
-    if not isinstance(evidence, dict) or evidence.get("schema_version") != SCHEMA_VERSION:
+    if (
+        not isinstance(evidence, dict)
+        or evidence.get("schema_version") != SCHEMA_VERSION
+    ):
         raise ReleaseError("Evidence is not a local release evidence record")
     expected = {
         "service_name": service["service_name"],
@@ -781,15 +825,22 @@ def validate_evidence(
     ]
     if mismatches:
         raise ReleaseError("Evidence cannot be reused: " + ", ".join(mismatches))
-    if evidence.get("quality_gate_status") != "PASSED" or evidence.get("policy_status") != "PASSED":
+    if (
+        evidence.get("quality_gate_status") != "PASSED"
+        or evidence.get("policy_status") != "PASSED"
+    ):
         raise ReleaseError("Evidence is not a passed oss-v2 gate")
     try:
-        expires = datetime.fromisoformat(str(evidence["expires_at"]).replace("Z", "+00:00"))
+        expires = datetime.fromisoformat(
+            str(evidence["expires_at"]).replace("Z", "+00:00")
+        )
     except (KeyError, TypeError, ValueError) as exc:
         raise ReleaseError("Evidence expiry is invalid") from exc
     if utc_now() > expires:
         raise ReleaseError("Evidence is stale")
-    if current_toolchain and evidence.get("toolchain", {}).get("sha256") != current_toolchain.get("sha256"):
+    if current_toolchain and evidence.get("toolchain", {}).get(
+        "sha256"
+    ) != current_toolchain.get("sha256"):
         raise ReleaseError("Evidence toolchain fingerprint differs")
     return evidence
 
@@ -817,7 +868,9 @@ def find_reusable_evidence(
     return None
 
 
-def find_manifest(state_dir: Path, service: dict[str, Any], snapshot: dict[str, Any]) -> tuple[Path, dict[str, Any]] | None:
+def find_manifest(
+    state_dir: Path, service: dict[str, Any], snapshot: dict[str, Any]
+) -> tuple[Path, dict[str, Any]] | None:
     for path in sorted(state_paths(state_dir)["manifests"].glob("*.json")):
         try:
             manifest = read_json(path)
@@ -908,7 +961,9 @@ def build_manifest(
         "quality": {
             "policy_id": POLICY_ID,
             "status": "PASSED" if evidence else "PENDING",
-            "evidence_path": str(quality_evidence_path) if quality_evidence_path else "",
+            "evidence_path": str(quality_evidence_path)
+            if quality_evidence_path
+            else "",
             "errors": quality_errors,
             "ttl_hours": QUALITY_TTL_HOURS,
         },
@@ -921,7 +976,9 @@ def build_manifest(
         "dependencies": {
             "workflow_inventory": inventory,
             "pre_merge_checks_depend_on_actions": bool(
-                any(item["actions_dependency"] for item in inventory["pre_merge_checks"])
+                any(
+                    item["actions_dependency"] for item in inventory["pre_merge_checks"]
+                )
             ),
             "cloud_build_in_new_path": False,
         },
@@ -974,8 +1031,14 @@ def prepare(
         existing = find_manifest(state_dir, service, snapshot)
         if existing:
             manifest_path, manifest = existing
-            if requested_version and manifest.get("version", {}).get("tag") != SemVer.parse(requested_version).tag():
-                raise ReleaseError("An existing release identity already uses another version")
+            if (
+                requested_version
+                and manifest.get("version", {}).get("tag")
+                != SemVer.parse(requested_version).tag()
+            ):
+                raise ReleaseError(
+                    "An existing release identity already uses another version"
+                )
         else:
             manifest = build_manifest(
                 platform_root,
@@ -1096,7 +1159,9 @@ def run_quality(
         profile=profile,
     )
     errors = gate_errors + diff_errors
-    policy_status = "PASSED" if gate_status == "PASSED" and diff_status == "PASSED" else "FAILED"
+    policy_status = (
+        "PASSED" if gate_status == "PASSED" and diff_status == "PASSED" else "FAILED"
+    )
     generated = utc_now()
     toolchain = toolchain_fingerprint(Path(snapshot["path"]))
     evidence = {
@@ -1135,14 +1200,21 @@ def build_local(
     execute: bool,
 ) -> dict[str, Any]:
     manifest = read_json(manifest_path)
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != SCHEMA_VERSION:
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != SCHEMA_VERSION
+    ):
         raise ReleaseError("Invalid release manifest")
     artifact = manifest.get("artifact", {})
     key = artifact.get("reuse_key")
     for path in sorted(state_paths(state_dir)["artifacts"].glob("*.json")):
         value = read_json(path)
         if value.get("reuse_key") == key and value.get("status") == "AVAILABLE":
-            return {"action": "reused", "artifact": value, "manifest_path": str(manifest_path)}
+            return {
+                "action": "reused",
+                "artifact": value,
+                "manifest_path": str(manifest_path),
+            }
     if not execute:
         return {
             "action": "planned",
@@ -1152,7 +1224,9 @@ def build_local(
             "remote_push": False,
         }
     if manifest.get("quality", {}).get("status") != "PASSED":
-        raise ReleaseError("Local build execution requires a passed oss-v2 quality record")
+        raise ReleaseError(
+            "Local build execution requires a passed oss-v2 quality record"
+        )
     context = Path(artifact["context"])
     image = artifact["local_image"]
     completed = run(
@@ -1198,7 +1272,9 @@ def build_local(
         "created_at": iso(utc_now()),
         "remote_published": False,
     }
-    path = state_paths(state_dir)["artifacts"] / f"{artifact_record['artifact_id']}.json"
+    path = (
+        state_paths(state_dir)["artifacts"] / f"{artifact_record['artifact_id']}.json"
+    )
     write_json(path, artifact_record)
     return {"action": "built", "artifact": artifact_record, "artifact_path": str(path)}
 
@@ -1261,10 +1337,14 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
 
-    doctor_parser = commands.add_parser("doctor", help="inspect tools and workflow dependencies")
+    doctor_parser = commands.add_parser(
+        "doctor", help="inspect tools and workflow dependencies"
+    )
     doctor_parser.add_argument("--repo-path", type=Path, required=True)
     doctor_parser.add_argument("--service", dest="service_name", default="")
-    doctor_parser.add_argument("--platform-root", type=Path, default=Path(__file__).parents[2])
+    doctor_parser.add_argument(
+        "--platform-root", type=Path, default=Path(__file__).parents[2]
+    )
     doctor_parser.add_argument("--json", action="store_true", dest="as_json")
 
     for name, help_text in (
@@ -1288,7 +1368,10 @@ def parser() -> argparse.ArgumentParser:
 
     for name, help_text in (
         ("publish", "publish one artifact, exact tag and GitHub Release idempotently"),
-        ("candidate", "deploy one published digest as a zero-traffic Cloud Run candidate"),
+        (
+            "candidate",
+            "deploy one published digest as a zero-traffic Cloud Run candidate",
+        ),
     ):
         command = commands.add_parser(name, help=help_text)
         command.add_argument("--manifest", type=Path, required=True)
@@ -1298,29 +1381,49 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--json", action="store_true", dest="as_json")
 
     for name, help_text, confirmation in (
-        ("promote", "promote an exact candidate revision to production", "PROMOTE_PROD"),
-        ("rollback", "restore traffic to an explicit known-good revision", "ROLLBACK_PROD"),
+        (
+            "promote",
+            "promote an exact candidate revision to production",
+            "PROMOTE_PROD",
+        ),
+        (
+            "rollback",
+            "restore traffic to an explicit known-good revision",
+            "ROLLBACK_PROD",
+        ),
     ):
         command = commands.add_parser(name, help=help_text)
         command.add_argument("--manifest", type=Path, required=True)
         command.add_argument("--state-dir", type=Path, default=default_state_dir())
         command.add_argument("--target-revision", default="")
         command.add_argument("--execute", action="store_true")
-        command.add_argument("--confirm", default="", help=f"type {confirmation} for a live effect")
+        command.add_argument(
+            "--confirm", default="", help=f"type {confirmation} for a live effect"
+        )
         command.add_argument("--confirm-remote-effects", action="store_true")
         command.add_argument("--json", action="store_true", dest="as_json")
 
-    register_parser = commands.add_parser("register", help="register one exact release state in Engineering Platform")
+    register_parser = commands.add_parser(
+        "register", help="register one exact release state in Engineering Platform"
+    )
     register_parser.add_argument("--manifest", type=Path, required=True)
     register_parser.add_argument("--state-dir", type=Path, default=default_state_dir())
-    register_parser.add_argument("--status", choices=("candidate", "promoted", "rolled_back"), default="candidate")
+    register_parser.add_argument(
+        "--status",
+        choices=("candidate", "promoted", "rolled_back"),
+        default="candidate",
+    )
     register_parser.add_argument("--revision", default="")
-    register_parser.add_argument("--platform-api-url", default=os.environ.get("ENG_PLATFORM_API_URL", ""))
+    register_parser.add_argument(
+        "--platform-api-url", default=os.environ.get("ENG_PLATFORM_API_URL", "")
+    )
     register_parser.add_argument("--execute", action="store_true")
     register_parser.add_argument("--confirm-remote-effects", action="store_true")
     register_parser.add_argument("--json", action="store_true", dest="as_json")
 
-    sanplat_parser = commands.add_parser("sanplat", help="plan a coordinated SanPlat API/Web corporate window")
+    sanplat_parser = commands.add_parser(
+        "sanplat", help="plan a coordinated SanPlat API/Web corporate window"
+    )
     sanplat_parser.add_argument("--api-manifest", type=Path, required=True)
     sanplat_parser.add_argument("--web-manifest", type=Path, required=True)
     sanplat_parser.add_argument("--state-dir", type=Path, default=default_state_dir())
@@ -1330,19 +1433,27 @@ def parser() -> argparse.ArgumentParser:
     sanplat_parser.add_argument("--confirm-remote-effects", action="store_true")
     sanplat_parser.add_argument("--json", action="store_true", dest="as_json")
 
-    adoption_parser = commands.add_parser("adopt", help="generate a phase-5 service adoption plan")
+    adoption_parser = commands.add_parser(
+        "adopt", help="generate a phase-5 service adoption plan"
+    )
     adoption_parser.add_argument("--service", dest="service_name", required=True)
     adoption_parser.add_argument("--repo-path", type=Path, required=True)
-    adoption_parser.add_argument("--platform-root", type=Path, default=Path(__file__).parents[2])
+    adoption_parser.add_argument(
+        "--platform-root", type=Path, default=Path(__file__).parents[2]
+    )
     adoption_parser.add_argument("--json", action="store_true", dest="as_json")
 
-    build_parser = commands.add_parser("build", help="plan or execute one local Docker/BuildKit build")
+    build_parser = commands.add_parser(
+        "build", help="plan or execute one local Docker/BuildKit build"
+    )
     build_parser.add_argument("--manifest", type=Path, required=True)
     build_parser.add_argument("--state-dir", type=Path, default=default_state_dir())
     build_parser.add_argument("--execute", action="store_true")
     build_parser.add_argument("--json", action="store_true", dest="as_json")
 
-    resume_parser = commands.add_parser("resume", help="read the first safe local pending stage")
+    resume_parser = commands.add_parser(
+        "resume", help="read the first safe local pending stage"
+    )
     resume_parser.add_argument("--release-id", required=True)
     resume_parser.add_argument("--state-dir", type=Path, default=default_state_dir())
     resume_parser.add_argument(
@@ -1357,33 +1468,75 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
-        platform_root = Path(getattr(args, "platform_root", Path(__file__).parents[2])).expanduser().resolve()
-        state_dir = Path(getattr(args, "state_dir", default_state_dir())).expanduser().resolve()
+        platform_root = (
+            Path(getattr(args, "platform_root", Path(__file__).parents[2]))
+            .expanduser()
+            .resolve()
+        )
+        state_dir = (
+            Path(getattr(args, "state_dir", default_state_dir())).expanduser().resolve()
+        )
         lifecycle = None
-        if args.command in {"publish", "candidate", "promote", "rollback", "register", "sanplat", "adopt", "resume"}:
+        if args.command in {
+            "publish",
+            "candidate",
+            "promote",
+            "rollback",
+            "register",
+            "sanplat",
+            "adopt",
+            "resume",
+        }:
             try:
                 from . import release_lifecycle as lifecycle
             except ImportError:
                 import release_lifecycle as lifecycle  # type: ignore[no-redef]
         if args.command == "doctor":
-            service = load_catalog(platform_root, args.service_name) if args.service_name else None
+            service = (
+                load_catalog(platform_root, args.service_name)
+                if args.service_name
+                else None
+            )
             value = doctor(args.repo_path, service)
         elif args.command in {"plan", "version", "notes"}:
             service = load_catalog(platform_root, args.service_name)
             snapshot = repo_snapshot(args.repo_path)
             if snapshot["dirty"] and not getattr(args, "allow_dirty", False):
-                raise ReleaseError("Working tree is dirty; use --allow-dirty only for a non-publishable plan")
-            base_sha = resolve_base_sha(Path(snapshot["path"]), snapshot["sha"], args.base_sha)
+                raise ReleaseError(
+                    "Working tree is dirty; use --allow-dirty only for a non-publishable plan"
+                )
+            base_sha = resolve_base_sha(
+                Path(snapshot["path"]), snapshot["sha"], args.base_sha
+            )
             plan = version_plan(
-                Path(snapshot["path"]), service, snapshot, base_sha=base_sha, requested_version=args.requested_version
+                Path(snapshot["path"]),
+                service,
+                snapshot,
+                base_sha=base_sha,
+                requested_version=args.requested_version,
             )
             plan["source_sha"] = snapshot["sha"]
             plan["repository"] = service["repository"]
             plan["service_name"] = args.service_name
             if args.command == "version":
-                value = {key: plan[key] for key in ("tag", "semver", "change_level", "previous_tag", "previous_sha", "local_tag")}
+                value = {
+                    key: plan[key]
+                    for key in (
+                        "tag",
+                        "semver",
+                        "change_level",
+                        "previous_tag",
+                        "previous_sha",
+                        "local_tag",
+                    )
+                }
             elif args.command == "notes":
-                value = {"tag": plan["tag"], "notes": plan["notes"], "sha256": plan["notes_sha256"], "commit_count": len(plan["commits"])}
+                value = {
+                    "tag": plan["tag"],
+                    "notes": plan["notes"],
+                    "sha256": plan["notes_sha256"],
+                    "commit_count": len(plan["commits"]),
+                }
             else:
                 value = {
                     "source": snapshot,
@@ -1475,11 +1628,17 @@ def main(argv: list[str] | None = None) -> int:
                 confirm_remote_effects=args.confirm_remote_effects,
             )
         elif args.command == "adopt":
-            value = lifecycle.adoption_plan(platform_root, args.repo_path, args.service_name)
+            value = lifecycle.adoption_plan(
+                platform_root, args.repo_path, args.service_name
+            )
         elif args.command == "resume":
-            value = lifecycle.resume(state_dir, args.release_id, reconcile=args.reconcile)
+            value = lifecycle.resume(
+                state_dir, args.release_id, reconcile=args.reconcile
+            )
         elif args.command == "build":
-            value = build_local(args.manifest.resolve(), state_dir=state_dir, execute=args.execute)
+            value = build_local(
+                args.manifest.resolve(), state_dir=state_dir, execute=args.execute
+            )
         output(value, args.as_json)
         return 0
     except ReleaseError as exc:

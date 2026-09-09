@@ -43,7 +43,10 @@ class LifecycleError(local_release.ReleaseError):
 
 def load_manifest(path: Path) -> dict[str, Any]:
     value = local_release.read_json(path.resolve())
-    if not isinstance(value, dict) or value.get("schema_version") != local_release.SCHEMA_VERSION:
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != local_release.SCHEMA_VERSION
+    ):
         raise LifecycleError(f"Invalid local release manifest: {path}")
     if not value.get("release_id") or not value.get("service_name"):
         raise LifecycleError("Manifest has no release identity")
@@ -129,7 +132,9 @@ def live_control_plan(manifest: dict[str, Any], operation: str) -> dict[str, Any
     file lock and a confirmation string as equivalent controls.
     """
     dependencies = manifest.get("dependencies") or {}
-    inventory = dependencies.get("workflow_inventory") if isinstance(dependencies, dict) else {}
+    inventory = (
+        dependencies.get("workflow_inventory") if isinstance(dependencies, dict) else {}
+    )
     inventory = inventory if isinstance(inventory, dict) else {}
     release_workflows = [
         item.get("path", "")
@@ -181,7 +186,11 @@ def _require_live_controls(manifest: dict[str, Any], operation: str) -> None:
     if operation not in LIVE_REMOTE_OPERATIONS:
         raise LifecycleError(f"Unsupported live operation: {operation}")
     service_name = _service_name(manifest)
-    if service_name in SANPLAT_SERVICES and operation in {"candidate", "promote", "rollback"}:
+    if service_name in SANPLAT_SERVICES and operation in {
+        "candidate",
+        "promote",
+        "rollback",
+    }:
         raise LifecycleError(
             "SanPlat generic lifecycle commands are blocked; use the reviewed "
             "SanPlat adapter and corporate-window record"
@@ -280,7 +289,9 @@ def publication_plan(manifest: dict[str, Any]) -> dict[str, Any]:
     repository = str(manifest.get("repository", ""))
     artifact = _artifact(manifest)
     image = str(artifact.get("image_reference", ""))
-    workflow_inventory = ((manifest.get("dependencies") or {}).get("workflow_inventory") or {})
+    workflow_inventory = (manifest.get("dependencies") or {}).get(
+        "workflow_inventory"
+    ) or {}
     release_workflows = [
         item
         for item in workflow_inventory.get("files", [])
@@ -341,12 +352,31 @@ def publication_plan(manifest: dict[str, Any]) -> dict[str, Any]:
                 ["gh", "api", f"repos/{repository}/events?per_page=100"],
                 ["gh", "api", f"repos/{repository}/releases/tags/{tag}"],
                 ["gh", "api", f"repos/{repository}/deployments?ref={tag}"],
-                ["gh", "run", "list", "--repo", repository, "--limit", "20", "--json", "databaseId,event,status,conclusion,workflowName,url"],
+                [
+                    "gh",
+                    "run",
+                    "list",
+                    "--repo",
+                    repository,
+                    "--limit",
+                    "20",
+                    "--json",
+                    "databaseId,event,status,conclusion,workflowName,url",
+                ],
             ],
-            "events": ["push", "create", "release", "deployment", "deployment_status", "workflow_run"],
+            "events": [
+                "push",
+                "create",
+                "release",
+                "deployment",
+                "deployment_status",
+                "workflow_run",
+            ],
         },
         "actions_guard": {
-            "release_workflows_detected": [item.get("path", "") for item in release_workflows],
+            "release_workflows_detected": [
+                item.get("path", "") for item in release_workflows
+            ],
             "must_not_push_branch": True,
             "note": "Push only the exact tag; do not push main, so automatic semantic-release cannot race this publisher.",
         },
@@ -409,14 +439,24 @@ def _local_tag_target(repo: Path, tag: str) -> str | None:
         check=False,
         timeout=60,
     )
-    if result.returncode != 0 or not local_release.SHA_RE.fullmatch(result.stdout.strip()):
+    if result.returncode != 0 or not local_release.SHA_RE.fullmatch(
+        result.stdout.strip()
+    ):
         return None
     return result.stdout.strip()
 
 
 def _remote_artifact_digest(image: str) -> str | None:
     result = _run_command(
-        ["gcloud", "artifacts", "docker", "images", "describe", image, "--format=value(image_summary.digest)"],
+        [
+            "gcloud",
+            "artifacts",
+            "docker",
+            "images",
+            "describe",
+            image,
+            "--format=value(image_summary.digest)",
+        ],
         check=False,
         timeout=60,
     )
@@ -432,7 +472,16 @@ def _remote_artifact_digest(image: str) -> str | None:
 
 def _release_view(repository: str, tag: str):
     result = _run_command(
-        ["gh", "release", "view", tag, "--repo", repository, "--json", "tagName,name,body,url"],
+        [
+            "gh",
+            "release",
+            "view",
+            tag,
+            "--repo",
+            repository,
+            "--json",
+            "tagName,name,body,url",
+        ],
         check=False,
         timeout=60,
     )
@@ -489,7 +538,9 @@ def publish(
     if execute:
         _require_live_controls(manifest, "publish")
         _require_remote_identity(manifest)
-    execution, execution_path = begin_execution(manifest, state_dir, "publish", dry_run=not execute)
+    execution, execution_path = begin_execution(
+        manifest, state_dir, "publish", dry_run=not execute
+    )
     execution["manifest_path"] = str(manifest_path.resolve())
     if not execute:
         event(
@@ -499,7 +550,11 @@ def publish(
             result="PLANNED",
         )
         save_execution(execution_path, execution)
-        return {"plan": plan, "execution": execution, "execution_path": str(execution_path)}
+        return {
+            "plan": plan,
+            "execution": execution,
+            "execution_path": str(execution_path),
+        }
     repo = Path(_source(manifest)["path"]).resolve()
     artifact = _artifact(manifest)
     image = str(artifact.get("image_reference", ""))
@@ -509,8 +564,12 @@ def publish(
         remote_digest = _remote_artifact_digest(image)
         if remote_digest:
             expected = str(artifact.get("digest", ""))
-            if expected and remote_digest != (expected if expected.startswith("sha256:") else f"sha256:{expected}"):
-                raise LifecycleError("Artifact Registry tag already points to another digest")
+            if expected and remote_digest != (
+                expected if expected.startswith("sha256:") else f"sha256:{expected}"
+            ):
+                raise LifecycleError(
+                    "Artifact Registry tag already points to another digest"
+                )
             artifact["digest"] = remote_digest
             artifact["remote_published"] = True
             event(
@@ -561,7 +620,9 @@ def publish(
         source_sha = str(_source(manifest)["sha"])
         remote_tag = _remote_tag_target(repo, tag)
         if remote_tag and remote_tag != source_sha:
-            raise LifecycleError(f"Remote tag {tag} exists on another SHA; refusing to move it")
+            raise LifecycleError(
+                f"Remote tag {tag} exists on another SHA; refusing to move it"
+            )
         if remote_tag == source_sha:
             event(
                 execution,
@@ -574,10 +635,24 @@ def publish(
         else:
             local_tag = _local_tag_target(repo, tag)
             if local_tag and local_tag != source_sha:
-                raise LifecycleError(f"Local tag {tag} exists on another SHA; refusing to move it")
+                raise LifecycleError(
+                    f"Local tag {tag} exists on another SHA; refusing to move it"
+                )
             if not local_tag:
                 notes = str((manifest.get("version") or {}).get("notes", "")).strip()
-                _run_command(["git", "tag", "-a", tag, source_sha, "-m", notes or f"Release {tag}"], cwd=repo, timeout=60)
+                _run_command(
+                    [
+                        "git",
+                        "tag",
+                        "-a",
+                        tag,
+                        source_sha,
+                        "-m",
+                        notes or f"Release {tag}",
+                    ],
+                    cwd=repo,
+                    timeout=60,
+                )
             event(
                 execution,
                 stage="publish-git",
@@ -592,7 +667,9 @@ def publish(
                 timeout=180,
             )
             if _remote_tag_target(repo, tag) != source_sha:
-                raise LifecycleError("Remote tag verification did not match the release SHA")
+                raise LifecycleError(
+                    "Remote tag verification did not match the release SHA"
+                )
             event(
                 execution,
                 stage="publish-git",
@@ -606,7 +683,9 @@ def publish(
         release = _release_view(repository, tag)
         if release is None:
             notes = str((manifest.get("version") or {}).get("notes", ""))
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md") as notes_file:
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", suffix=".md"
+            ) as notes_file:
                 notes_file.write(notes)
                 notes_file.flush()
                 command = [
@@ -650,7 +729,11 @@ def publish(
         if _artifact(manifest).get("remote_published"):
             _mark_phase(manifest, "phase-2")
             _write_manifest(manifest_path, manifest)
-        execution["status"] = "UNKNOWN" if execution.get("remote_effects") or execution.get("events") else "FAILED"
+        execution["status"] = (
+            "UNKNOWN"
+            if execution.get("remote_effects") or execution.get("events")
+            else "FAILED"
+        )
         execution["error"] = str(exc)
         event(
             execution,
@@ -701,7 +784,15 @@ def candidate_plan(manifest: dict[str, Any]) -> dict[str, Any]:
                 purpose="deploy the already-published digest with zero production traffic",
             ),
             _command(
-                ["gcloud", "run", "services", "update-traffic", service, "--set-tags", "candidate=<exact-revision>"],
+                [
+                    "gcloud",
+                    "run",
+                    "services",
+                    "update-traffic",
+                    service,
+                    "--set-tags",
+                    "candidate=<exact-revision>",
+                ],
                 effect="candidate URL tag",
                 purpose="expose the exact candidate revision without moving production traffic",
             ),
@@ -731,13 +822,16 @@ def _json_command(argv: list[str], *, timeout: int = 120) -> dict[str, Any]:
 def _revision_ready(value: dict[str, Any]) -> bool:
     status = value.get("status") or {}
     conditions = status.get("conditions") or []
-    return any(
-        str(condition.get("type", "")) == "Ready"
-        and str(condition.get("state", condition.get("status", ""))).lower()
-        in {"true", "condition_true", "condition_succeeded"}
-        for condition in conditions
-        if isinstance(condition, dict)
-    ) or str(status.get("service", "")).lower() == "ready"
+    return (
+        any(
+            str(condition.get("type", "")) == "Ready"
+            and str(condition.get("state", condition.get("status", ""))).lower()
+            in {"true", "condition_true", "condition_succeeded"}
+            for condition in conditions
+            if isinstance(condition, dict)
+        )
+        or str(status.get("service", "")).lower() == "ready"
+    )
 
 
 def _probe(url: str, path: str, *, expected: set[int] = {200}) -> dict[str, Any]:
@@ -760,7 +854,11 @@ def _probe(url: str, path: str, *, expected: set[int] = {200}) -> dict[str, Any]
 def _candidate_url(service_value: dict[str, Any], candidate_tag: str) -> str:
     traffic = (service_value.get("status") or {}).get("traffic") or []
     for item in traffic:
-        if isinstance(item, dict) and item.get("tag") == candidate_tag and item.get("url"):
+        if (
+            isinstance(item, dict)
+            and item.get("tag") == candidate_tag
+            and item.get("url")
+        ):
             return str(item["url"])
     raise LifecycleError("Cloud Run did not return a URL for the candidate tag")
 
@@ -779,12 +877,23 @@ def candidate(
         _require_live_controls(manifest, "candidate")
         _require_remote_identity(manifest)
         _require_digest(manifest)
-    execution, execution_path = begin_execution(manifest, state_dir, "candidate", dry_run=not execute)
+    execution, execution_path = begin_execution(
+        manifest, state_dir, "candidate", dry_run=not execute
+    )
     execution["manifest_path"] = str(manifest_path.resolve())
     if not execute:
-        event(execution, stage="candidate", intent="record candidate plan without Cloud Run effects", result="PLANNED")
+        event(
+            execution,
+            stage="candidate",
+            intent="record candidate plan without Cloud Run effects",
+            result="PLANNED",
+        )
         save_execution(execution_path, execution)
-        return {"plan": plan, "execution": execution, "execution_path": str(execution_path)}
+        return {
+            "plan": plan,
+            "execution": execution,
+            "execution_path": str(execution_path),
+        }
     project, region = _project_region(manifest)
     service = _service_name(manifest)
     image = _image_with_digest(manifest)
@@ -803,16 +912,55 @@ def candidate(
             "--no-traffic",
             "--quiet",
         ]
-        event(execution, stage="candidate-deploy", intent="deploy exact digest with no traffic", result="INTENT_RECORDED", remote_effect=True, command=deploy_command)
+        event(
+            execution,
+            stage="candidate-deploy",
+            intent="deploy exact digest with no traffic",
+            result="INTENT_RECORDED",
+            remote_effect=True,
+            command=deploy_command,
+        )
         _run_command(deploy_command, timeout=1800)
-        service_value = _json_command(["gcloud", "run", "services", "describe", service, "--project", project, "--region", region, "--format=json"])
-        revision = str((service_value.get("status") or {}).get("latestCreatedRevisionName", ""))
+        service_value = _json_command(
+            [
+                "gcloud",
+                "run",
+                "services",
+                "describe",
+                service,
+                "--project",
+                project,
+                "--region",
+                region,
+                "--format=json",
+            ]
+        )
+        revision = str(
+            (service_value.get("status") or {}).get("latestCreatedRevisionName", "")
+        )
         if not REVISION_RE.fullmatch(revision):
             raise LifecycleError("Cloud Run did not return a valid candidate revision")
-        revision_value = _json_command(["gcloud", "run", "revisions", "describe", revision, "--project", project, "--region", region, "--format=json"])
-        revision_digest = str((revision_value.get("status") or {}).get("imageDigest", ""))
+        revision_value = _json_command(
+            [
+                "gcloud",
+                "run",
+                "revisions",
+                "describe",
+                revision,
+                "--project",
+                project,
+                "--region",
+                region,
+                "--format=json",
+            ]
+        )
+        revision_digest = str(
+            (revision_value.get("status") or {}).get("imageDigest", "")
+        )
         if revision_digest != _require_digest(manifest):
-            raise LifecycleError("Candidate revision image digest differs from the published digest")
+            raise LifecycleError(
+                "Candidate revision image digest differs from the published digest"
+            )
         candidate_tag = _candidate_tag(manifest)
         traffic_command = [
             "gcloud",
@@ -828,9 +976,29 @@ def candidate(
             f"{candidate_tag}={revision}",
             "--quiet",
         ]
-        event(execution, stage="candidate-tag", intent="tag exact zero-traffic candidate", result="INTENT_RECORDED", remote_effect=True, command=traffic_command)
+        event(
+            execution,
+            stage="candidate-tag",
+            intent="tag exact zero-traffic candidate",
+            result="INTENT_RECORDED",
+            remote_effect=True,
+            command=traffic_command,
+        )
         _run_command(traffic_command, timeout=300)
-        service_value = _json_command(["gcloud", "run", "services", "describe", service, "--project", project, "--region", region, "--format=json"])
+        service_value = _json_command(
+            [
+                "gcloud",
+                "run",
+                "services",
+                "describe",
+                service,
+                "--project",
+                project,
+                "--region",
+                region,
+                "--format=json",
+            ]
+        )
         url = _candidate_url(service_value, candidate_tag)
         probe = _probe(url, str(_deployment(manifest).get("health_path", "/")))
         runtime = _runtime(manifest)
@@ -842,7 +1010,14 @@ def candidate(
             "probe": probe,
             "created_at": local_release.iso(local_release.utc_now()),
         }
-        event(execution, stage="candidate-validate", intent="validate exact candidate URL", result="CONFIRMED", remote_effect=True, detail=f"revision={revision} status={probe['status']}")
+        event(
+            execution,
+            stage="candidate-validate",
+            intent="validate exact candidate URL",
+            result="CONFIRMED",
+            remote_effect=True,
+            detail=f"revision={revision} status={probe['status']}",
+        )
         _mark_phase(manifest, "phase-3")
         _write_manifest(manifest_path, manifest)
         execution["status"] = "SUCCEEDED"
@@ -850,19 +1025,35 @@ def candidate(
         if execution.get("remote_effects"):
             _mark_phase(manifest, "phase-3")
             _write_manifest(manifest_path, manifest)
-        execution["status"] = "UNKNOWN" if execution.get("remote_effects") or execution.get("events") else "FAILED"
+        execution["status"] = (
+            "UNKNOWN"
+            if execution.get("remote_effects") or execution.get("events")
+            else "FAILED"
+        )
         execution["error"] = str(exc)
-        event(execution, stage="candidate", intent="reconcile after candidate interruption", result="UNKNOWN" if execution["status"] == "UNKNOWN" else "FAILED", remote_effect=execution["status"] == "UNKNOWN", detail=str(exc))
+        event(
+            execution,
+            stage="candidate",
+            intent="reconcile after candidate interruption",
+            result="UNKNOWN" if execution["status"] == "UNKNOWN" else "FAILED",
+            remote_effect=execution["status"] == "UNKNOWN",
+            detail=str(exc),
+        )
         save_execution(execution_path, execution)
         raise
     save_execution(execution_path, execution)
-    return {"plan": candidate_plan(manifest), "manifest": manifest, "execution": execution, "execution_path": str(execution_path)}
+    return {
+        "plan": candidate_plan(manifest),
+        "manifest": manifest,
+        "execution": execution,
+        "execution_path": str(execution_path),
+    }
 
 
 def promote_plan(manifest: dict[str, Any]) -> dict[str, Any]:
     project, region = _project_region(manifest)
     service = _service_name(manifest)
-    candidate_state = (_runtime(manifest).get("candidate") or {})
+    candidate_state = _runtime(manifest).get("candidate") or {}
     revision = str(candidate_state.get("revision", "<exact-revision>"))
     return {
         "phase": "phase-3",
@@ -871,12 +1062,46 @@ def promote_plan(manifest: dict[str, Any]) -> dict[str, Any]:
         "service_name": service,
         "candidate_revision": revision,
         "commands": [
-            _command(["gcloud", "run", "services", "describe", service, "--project", project, "--region", region, "--format=json"], effect="production snapshot", purpose="capture existing traffic before changing it", read_only=True),
-            _command(["gcloud", "run", "services", "update-traffic", service, "--project", project, "--region", region, "--to-revisions", f"{revision}=100", "--quiet"], effect="production traffic promotion", purpose="move 100% only to the validated candidate revision"),
+            _command(
+                [
+                    "gcloud",
+                    "run",
+                    "services",
+                    "describe",
+                    service,
+                    "--project",
+                    project,
+                    "--region",
+                    region,
+                    "--format=json",
+                ],
+                effect="production snapshot",
+                purpose="capture existing traffic before changing it",
+                read_only=True,
+            ),
+            _command(
+                [
+                    "gcloud",
+                    "run",
+                    "services",
+                    "update-traffic",
+                    service,
+                    "--project",
+                    project,
+                    "--region",
+                    region,
+                    "--to-revisions",
+                    f"{revision}=100",
+                    "--quiet",
+                ],
+                effect="production traffic promotion",
+                purpose="move 100% only to the validated candidate revision",
+            ),
         ],
         "gates": {
             "candidate_revision_explicit": revision != "<exact-revision>",
-            "candidate_digest_matches_manifest": bool(candidate_state.get("digest")) and candidate_state.get("digest") == _artifact(manifest).get("digest"),
+            "candidate_digest_matches_manifest": bool(candidate_state.get("digest"))
+            and candidate_state.get("digest") == _artifact(manifest).get("digest"),
             "confirmation": "PROMOTE_PROD",
             "rollback_revision_snapshot_required": True,
             "automatic_rollback": False,
@@ -918,19 +1143,32 @@ def promote(
         if confirmation != "PROMOTE_PROD":
             raise LifecycleError("Promotion requires --confirm PROMOTE_PROD")
         _require_remote_identity(manifest)
-        candidate_state = (_runtime(manifest).get("candidate") or {})
+        candidate_state = _runtime(manifest).get("candidate") or {}
         revision = str(candidate_state.get("revision", ""))
         if not REVISION_RE.fullmatch(revision):
             raise LifecycleError("Promotion requires an exact candidate revision")
         if str(candidate_state.get("digest", "")) != _require_digest(manifest):
-            raise LifecycleError("Candidate revision digest does not match the manifest")
-    execution, execution_path = begin_execution(manifest, state_dir, "promote", dry_run=not execute)
+            raise LifecycleError(
+                "Candidate revision digest does not match the manifest"
+            )
+    execution, execution_path = begin_execution(
+        manifest, state_dir, "promote", dry_run=not execute
+    )
     execution["manifest_path"] = str(manifest_path.resolve())
     if not execute:
-        event(execution, stage="promote", intent="record promotion plan without traffic effects", result="PLANNED")
+        event(
+            execution,
+            stage="promote",
+            intent="record promotion plan without traffic effects",
+            result="PLANNED",
+        )
         save_execution(execution_path, execution)
-        return {"plan": plan, "execution": execution, "execution_path": str(execution_path)}
-    candidate_state = (_runtime(manifest).get("candidate") or {})
+        return {
+            "plan": plan,
+            "execution": execution,
+            "execution_path": str(execution_path),
+        }
+    candidate_state = _runtime(manifest).get("candidate") or {}
     revision = str(candidate_state.get("revision", ""))
     if not REVISION_RE.fullmatch(revision):
         raise LifecycleError("Promotion requires an exact candidate revision")
@@ -939,10 +1177,36 @@ def promote(
     project, region = _project_region(manifest)
     service = _service_name(manifest)
     try:
-        revision_value = _json_command(["gcloud", "run", "revisions", "describe", revision, "--project", project, "--region", region, "--format=json"])
+        revision_value = _json_command(
+            [
+                "gcloud",
+                "run",
+                "revisions",
+                "describe",
+                revision,
+                "--project",
+                project,
+                "--region",
+                region,
+                "--format=json",
+            ]
+        )
         if not _revision_ready(revision_value):
             raise LifecycleError("Candidate revision is not Ready")
-        service_value = _json_command(["gcloud", "run", "services", "describe", service, "--project", project, "--region", region, "--format=json"])
+        service_value = _json_command(
+            [
+                "gcloud",
+                "run",
+                "services",
+                "describe",
+                service,
+                "--project",
+                project,
+                "--region",
+                region,
+                "--format=json",
+            ]
+        )
         traffic = _traffic_snapshot(service_value)
         previous_revision = _active_revision(traffic)
         if not previous_revision:
@@ -952,18 +1216,77 @@ def promote(
             "previous_revision": previous_revision,
             "captured_at": local_release.iso(local_release.utc_now()),
         }
-        event(execution, stage="snapshot", intent="capture current production traffic", result="CONFIRMED", remote_effect=False, detail=f"previous_revision={previous_revision}")
-        command = ["gcloud", "run", "services", "update-traffic", service, "--project", project, "--region", region, "--to-revisions", f"{revision}=100", "--quiet"]
-        event(execution, stage="promote", intent="move production traffic to exact candidate revision", result="INTENT_RECORDED", remote_effect=True, command=command)
+        event(
+            execution,
+            stage="snapshot",
+            intent="capture current production traffic",
+            result="CONFIRMED",
+            remote_effect=False,
+            detail=f"previous_revision={previous_revision}",
+        )
+        command = [
+            "gcloud",
+            "run",
+            "services",
+            "update-traffic",
+            service,
+            "--project",
+            project,
+            "--region",
+            region,
+            "--to-revisions",
+            f"{revision}=100",
+            "--quiet",
+        ]
+        event(
+            execution,
+            stage="promote",
+            intent="move production traffic to exact candidate revision",
+            result="INTENT_RECORDED",
+            remote_effect=True,
+            command=command,
+        )
         _run_command(command, timeout=600)
-        after = _json_command(["gcloud", "run", "services", "describe", service, "--project", project, "--region", region, "--format=json"])
+        after = _json_command(
+            [
+                "gcloud",
+                "run",
+                "services",
+                "describe",
+                service,
+                "--project",
+                project,
+                "--region",
+                region,
+                "--format=json",
+            ]
+        )
         if _active_revision(_traffic_snapshot(after)) != revision:
-            raise LifecycleError("Production traffic verification did not match the candidate revision")
+            raise LifecycleError(
+                "Production traffic verification did not match the candidate revision"
+            )
         url = str((after.get("status") or {}).get("url", ""))
-        probe = _probe(url, str(_deployment(manifest).get("health_path", "/"))) if url else None
+        probe = (
+            _probe(url, str(_deployment(manifest).get("health_path", "/")))
+            if url
+            else None
+        )
         runtime = _runtime(manifest)
-        runtime["production"] = {"revision": revision, "digest": candidate_state["digest"], "url": url, "probe": probe, "promoted_at": local_release.iso(local_release.utc_now())}
-        event(execution, stage="validate-production", intent="validate production traffic and smoke", result="CONFIRMED", remote_effect=True, detail=f"revision={revision}")
+        runtime["production"] = {
+            "revision": revision,
+            "digest": candidate_state["digest"],
+            "url": url,
+            "probe": probe,
+            "promoted_at": local_release.iso(local_release.utc_now()),
+        }
+        event(
+            execution,
+            stage="validate-production",
+            intent="validate production traffic and smoke",
+            result="CONFIRMED",
+            remote_effect=True,
+            detail=f"revision={revision}",
+        )
         _mark_phase(manifest, "phase-3")
         _write_manifest(manifest_path, manifest)
         execution["status"] = "SUCCEEDED"
@@ -971,19 +1294,43 @@ def promote(
         if execution.get("remote_effects"):
             _mark_phase(manifest, "phase-3")
             _write_manifest(manifest_path, manifest)
-        execution["status"] = "UNKNOWN" if execution.get("remote_effects") or execution.get("events") else "FAILED"
+        execution["status"] = (
+            "UNKNOWN"
+            if execution.get("remote_effects") or execution.get("events")
+            else "FAILED"
+        )
         execution["error"] = str(exc)
-        event(execution, stage="promote", intent="stop and require explicit rollback/reconciliation", result="UNKNOWN" if execution["status"] == "UNKNOWN" else "FAILED", remote_effect=execution["status"] == "UNKNOWN", detail=str(exc))
+        event(
+            execution,
+            stage="promote",
+            intent="stop and require explicit rollback/reconciliation",
+            result="UNKNOWN" if execution["status"] == "UNKNOWN" else "FAILED",
+            remote_effect=execution["status"] == "UNKNOWN",
+            detail=str(exc),
+        )
         save_execution(execution_path, execution)
         raise
     save_execution(execution_path, execution)
-    return {"plan": promote_plan(manifest), "manifest": manifest, "execution": execution, "execution_path": str(execution_path)}
+    return {
+        "plan": promote_plan(manifest),
+        "manifest": manifest,
+        "execution": execution,
+        "execution_path": str(execution_path),
+    }
 
 
-def rollback_plan(manifest: dict[str, Any], target_revision: str = "") -> dict[str, Any]:
+def rollback_plan(
+    manifest: dict[str, Any], target_revision: str = ""
+) -> dict[str, Any]:
     project, region = _project_region(manifest)
     service = _service_name(manifest)
-    target = target_revision or str(((_runtime(manifest).get("promotion") or {}).get("previous_revision", "<known-good-revision>")))
+    target = target_revision or str(
+        (
+            (_runtime(manifest).get("promotion") or {}).get(
+                "previous_revision", "<known-good-revision>"
+            )
+        )
+    )
     return {
         "phase": "phase-3",
         "stage": "rollback",
@@ -991,10 +1338,48 @@ def rollback_plan(manifest: dict[str, Any], target_revision: str = "") -> dict[s
         "service_name": service,
         "target_revision": target,
         "commands": [
-            _command(["gcloud", "run", "revisions", "describe", target, "--project", project, "--region", region, "--format=json"], effect="rollback target verification", purpose="verify the explicit known-good revision", read_only=True),
-            _command(["gcloud", "run", "services", "update-traffic", service, "--project", project, "--region", region, "--to-revisions", f"{target}=100", "--quiet"], effect="traffic rollback", purpose="restore traffic only; do not alter tags or migrations"),
+            _command(
+                [
+                    "gcloud",
+                    "run",
+                    "revisions",
+                    "describe",
+                    target,
+                    "--project",
+                    project,
+                    "--region",
+                    region,
+                    "--format=json",
+                ],
+                effect="rollback target verification",
+                purpose="verify the explicit known-good revision",
+                read_only=True,
+            ),
+            _command(
+                [
+                    "gcloud",
+                    "run",
+                    "services",
+                    "update-traffic",
+                    service,
+                    "--project",
+                    project,
+                    "--region",
+                    region,
+                    "--to-revisions",
+                    f"{target}=100",
+                    "--quiet",
+                ],
+                effect="traffic rollback",
+                purpose="restore traffic only; do not alter tags or migrations",
+            ),
         ],
-        "gates": {"target_revision_explicit": target != "<known-good-revision>", "confirmation": "ROLLBACK_PROD", "does_not_revert_migrations": True, "does_not_create_tag": True},
+        "gates": {
+            "target_revision_explicit": target != "<known-good-revision>",
+            "confirmation": "ROLLBACK_PROD",
+            "does_not_revert_migrations": True,
+            "does_not_create_tag": True,
+        },
         "execution_control": live_control_plan(manifest, "rollback"),
     }
 
@@ -1015,34 +1400,113 @@ def rollback(
         _require_live_controls(manifest, "rollback")
         if confirmation != "ROLLBACK_PROD":
             raise LifecycleError("Rollback requires --confirm ROLLBACK_PROD")
-        target = target_revision or str(((_runtime(manifest).get("promotion") or {}).get("previous_revision", "")))
+        target = target_revision or str(
+            ((_runtime(manifest).get("promotion") or {}).get("previous_revision", ""))
+        )
         if not REVISION_RE.fullmatch(target):
             raise LifecycleError("Rollback requires an explicit known-good revision")
-    execution, execution_path = begin_execution(manifest, state_dir, "rollback", dry_run=not execute)
+    execution, execution_path = begin_execution(
+        manifest, state_dir, "rollback", dry_run=not execute
+    )
     execution["manifest_path"] = str(manifest_path.resolve())
     if not execute:
-        event(execution, stage="rollback", intent="record rollback plan without traffic effects", result="PLANNED")
+        event(
+            execution,
+            stage="rollback",
+            intent="record rollback plan without traffic effects",
+            result="PLANNED",
+        )
         save_execution(execution_path, execution)
-        return {"plan": plan, "execution": execution, "execution_path": str(execution_path)}
-    target = target_revision or str(((_runtime(manifest).get("promotion") or {}).get("previous_revision", "")))
+        return {
+            "plan": plan,
+            "execution": execution,
+            "execution_path": str(execution_path),
+        }
+    target = target_revision or str(
+        ((_runtime(manifest).get("promotion") or {}).get("previous_revision", ""))
+    )
     if not REVISION_RE.fullmatch(target):
         raise LifecycleError("Rollback requires an explicit known-good revision")
     project, region = _project_region(manifest)
     service = _service_name(manifest)
     try:
-        revision_value = _json_command(["gcloud", "run", "revisions", "describe", target, "--project", project, "--region", region, "--format=json"])
+        revision_value = _json_command(
+            [
+                "gcloud",
+                "run",
+                "revisions",
+                "describe",
+                target,
+                "--project",
+                project,
+                "--region",
+                region,
+                "--format=json",
+            ]
+        )
         if not _revision_ready(revision_value):
             raise LifecycleError("Rollback target revision is not Ready")
-        command = ["gcloud", "run", "services", "update-traffic", service, "--project", project, "--region", region, "--to-revisions", f"{target}=100", "--quiet"]
-        event(execution, stage="rollback", intent="restore traffic to explicit known-good revision", result="INTENT_RECORDED", remote_effect=True, command=command)
+        command = [
+            "gcloud",
+            "run",
+            "services",
+            "update-traffic",
+            service,
+            "--project",
+            project,
+            "--region",
+            region,
+            "--to-revisions",
+            f"{target}=100",
+            "--quiet",
+        ]
+        event(
+            execution,
+            stage="rollback",
+            intent="restore traffic to explicit known-good revision",
+            result="INTENT_RECORDED",
+            remote_effect=True,
+            command=command,
+        )
         _run_command(command, timeout=600)
-        after = _json_command(["gcloud", "run", "services", "describe", service, "--project", project, "--region", region, "--format=json"])
+        after = _json_command(
+            [
+                "gcloud",
+                "run",
+                "services",
+                "describe",
+                service,
+                "--project",
+                project,
+                "--region",
+                region,
+                "--format=json",
+            ]
+        )
         if _active_revision(_traffic_snapshot(after)) != target:
-            raise LifecycleError("Rollback traffic verification did not match the requested revision")
+            raise LifecycleError(
+                "Rollback traffic verification did not match the requested revision"
+            )
         url = str((after.get("status") or {}).get("url", ""))
-        probe = _probe(url, str(_deployment(manifest).get("health_path", "/"))) if url else None
-        _runtime(manifest)["rollback"] = {"target_revision": target, "url": url, "probe": probe, "completed_at": local_release.iso(local_release.utc_now())}
-        event(execution, stage="validate-rollback", intent="validate restored traffic and smoke", result="CONFIRMED", remote_effect=True, detail=f"revision={target}")
+        probe = (
+            _probe(url, str(_deployment(manifest).get("health_path", "/")))
+            if url
+            else None
+        )
+        _runtime(manifest)["rollback"] = {
+            "target_revision": target,
+            "url": url,
+            "probe": probe,
+            "completed_at": local_release.iso(local_release.utc_now()),
+        }
+        event(
+            execution,
+            stage="validate-rollback",
+            intent="validate restored traffic and smoke",
+            result="CONFIRMED",
+            remote_effect=True,
+            detail=f"revision={target}",
+        )
         _mark_phase(manifest, "phase-3")
         _write_manifest(manifest_path, manifest)
         execution["status"] = "SUCCEEDED"
@@ -1050,16 +1514,34 @@ def rollback(
         if execution.get("remote_effects"):
             _mark_phase(manifest, "phase-3")
             _write_manifest(manifest_path, manifest)
-        execution["status"] = "UNKNOWN" if execution.get("remote_effects") or execution.get("events") else "FAILED"
+        execution["status"] = (
+            "UNKNOWN"
+            if execution.get("remote_effects") or execution.get("events")
+            else "FAILED"
+        )
         execution["error"] = str(exc)
-        event(execution, stage="rollback", intent="stop and preserve rollback state for reconciliation", result="UNKNOWN" if execution["status"] == "UNKNOWN" else "FAILED", remote_effect=execution["status"] == "UNKNOWN", detail=str(exc))
+        event(
+            execution,
+            stage="rollback",
+            intent="stop and preserve rollback state for reconciliation",
+            result="UNKNOWN" if execution["status"] == "UNKNOWN" else "FAILED",
+            remote_effect=execution["status"] == "UNKNOWN",
+            detail=str(exc),
+        )
         save_execution(execution_path, execution)
         raise
     save_execution(execution_path, execution)
-    return {"plan": rollback_plan(manifest, target), "manifest": manifest, "execution": execution, "execution_path": str(execution_path)}
+    return {
+        "plan": rollback_plan(manifest, target),
+        "manifest": manifest,
+        "execution": execution,
+        "execution_path": str(execution_path),
+    }
 
 
-def release_payload(manifest: dict[str, Any], *, status: str, revision: str = "") -> dict[str, Any]:
+def release_payload(
+    manifest: dict[str, Any], *, status: str, revision: str = ""
+) -> dict[str, Any]:
     if status not in RELEASE_STATUSES:
         raise LifecycleError(f"Unsupported platform release status: {status}")
     runtime = _runtime(manifest)
@@ -1071,7 +1553,11 @@ def release_payload(manifest: dict[str, Any], *, status: str, revision: str = ""
         }[status]
         state = runtime.get(state_key) or {}
         revision = str(state.get("revision") or state.get("target_revision") or "")
-    action = {"candidate": "deployed", "promoted": "promoted", "rolled_back": "rolled_back"}[status]
+    action = {
+        "candidate": "deployed",
+        "promoted": "promoted",
+        "rolled_back": "rolled_back",
+    }[status]
     return {
         "release_id": manifest["release_id"],
         "repository": manifest["repository"],
@@ -1079,7 +1565,13 @@ def release_payload(manifest: dict[str, Any], *, status: str, revision: str = ""
         "artifact_digest": _artifact(manifest).get("digest", ""),
         "version": (manifest.get("version") or {}).get("tag", ""),
         "status": status,
-        "services": [{"service_name": manifest["service_name"], "revision": revision, "action": action}],
+        "services": [
+            {
+                "service_name": manifest["service_name"],
+                "revision": revision,
+                "action": action,
+            }
+        ],
         "github_run_url": "",
         "triggered_by": "local-release",
         "notes": f"Local-first release {manifest['release_id']}; no Actions run was required.",
@@ -1102,36 +1594,81 @@ def register_release(
     _require_confirmation(execute, confirm_remote_effects)
     if execute:
         if not platform_api_url:
-            raise LifecycleError("Registration requires --platform-api-url or ENG_PLATFORM_API_URL")
+            raise LifecycleError(
+                "Registration requires --platform-api-url or ENG_PLATFORM_API_URL"
+            )
         _require_live_controls(manifest, "register")
         _require_remote_identity(manifest)
-    execution, execution_path = begin_execution(manifest, state_dir, "register", dry_run=not execute)
+    execution, execution_path = begin_execution(
+        manifest, state_dir, "register", dry_run=not execute
+    )
     execution["manifest_path"] = str(manifest_path.resolve())
-    plan = {"phase": "phase-3", "stage": "register", "payload": payload, "remote_mutations": ["Engineering Platform release record"]}
+    plan = {
+        "phase": "phase-3",
+        "stage": "register",
+        "payload": payload,
+        "remote_mutations": ["Engineering Platform release record"],
+    }
     if not execute:
-        event(execution, stage="register", intent="record platform registration payload without API mutation", result="PLANNED")
+        event(
+            execution,
+            stage="register",
+            intent="record platform registration payload without API mutation",
+            result="PLANNED",
+        )
         save_execution(execution_path, execution)
-        return {"plan": plan, "execution": execution, "execution_path": str(execution_path)}
+        return {
+            "plan": plan,
+            "execution": execution,
+            "execution_path": str(execution_path),
+        }
     endpoint = platform_api_url.rstrip("/") + "/api/releases/"
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
     try:
-        event(execution, stage="register", intent="register exact release identity in Engineering Platform", result="INTENT_RECORDED", remote_effect=True, detail=endpoint)
+        event(
+            execution,
+            stage="register",
+            intent="register exact release identity in Engineering Platform",
+            result="INTENT_RECORDED",
+            remote_effect=True,
+            detail=endpoint,
+        )
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 body = response.read().decode("utf-8")
                 response_status = int(response.status)
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            raise LifecycleError(f"Engineering Platform registration failed with HTTP {exc.code}") from exc
+            raise LifecycleError(
+                f"Engineering Platform registration failed with HTTP {exc.code}"
+            ) from exc
         try:
             value = json.loads(body)
         except json.JSONDecodeError as exc:
-            raise LifecycleError("Engineering Platform returned invalid registration JSON") from exc
-        event(execution, stage="register", intent="verify Engineering Platform registration response", result="CONFIRMED", remote_effect=True, detail=f"http_status={response_status}")
-        _runtime(manifest)["platform_registration"] = {"status": status, "response": value, "registered_at": local_release.iso(local_release.utc_now())}
+            raise LifecycleError(
+                "Engineering Platform returned invalid registration JSON"
+            ) from exc
+        event(
+            execution,
+            stage="register",
+            intent="verify Engineering Platform registration response",
+            result="CONFIRMED",
+            remote_effect=True,
+            detail=f"http_status={response_status}",
+        )
+        _runtime(manifest)["platform_registration"] = {
+            "status": status,
+            "response": value,
+            "registered_at": local_release.iso(local_release.utc_now()),
+        }
         _mark_phase(manifest, "phase-3")
         _write_manifest(manifest_path, manifest)
         execution["status"] = "SUCCEEDED"
@@ -1139,13 +1676,29 @@ def register_release(
         if execution.get("remote_effects"):
             _mark_phase(manifest, "phase-3")
             _write_manifest(manifest_path, manifest)
-        execution["status"] = "UNKNOWN" if execution.get("remote_effects") or execution.get("events") else "FAILED"
+        execution["status"] = (
+            "UNKNOWN"
+            if execution.get("remote_effects") or execution.get("events")
+            else "FAILED"
+        )
         execution["error"] = str(exc)
-        event(execution, stage="register", intent="reconcile platform registration after interruption", result="UNKNOWN" if execution["status"] == "UNKNOWN" else "FAILED", remote_effect=execution["status"] == "UNKNOWN", detail=str(exc))
+        event(
+            execution,
+            stage="register",
+            intent="reconcile platform registration after interruption",
+            result="UNKNOWN" if execution["status"] == "UNKNOWN" else "FAILED",
+            remote_effect=execution["status"] == "UNKNOWN",
+            detail=str(exc),
+        )
         save_execution(execution_path, execution)
         raise
     save_execution(execution_path, execution)
-    return {"plan": plan, "manifest": manifest, "execution": execution, "execution_path": str(execution_path)}
+    return {
+        "plan": plan,
+        "manifest": manifest,
+        "execution": execution,
+        "execution_path": str(execution_path),
+    }
 
 
 def sanplat_plan(
@@ -1155,33 +1708,82 @@ def sanplat_plan(
     release_group_id: str,
     auxiliary_services: list[str],
 ) -> dict[str, Any]:
-    api_candidate = (_runtime(api_manifest).get("candidate") or {})
-    web_candidate = (_runtime(web_manifest).get("candidate") or {})
+    api_candidate = _runtime(api_manifest).get("candidate") or {}
+    web_candidate = _runtime(web_manifest).get("candidate") or {}
     missing = []
     for label, state in (("api", api_candidate), ("web", web_candidate)):
         if not state.get("revision") or not state.get("digest"):
             missing.append(f"{label} candidate revision/digest")
-    group_id = release_group_id or f"pair-{api_manifest['release_id'][:12]}-{web_manifest['release_id'][:12]}"
+    group_id = (
+        release_group_id
+        or f"pair-{api_manifest['release_id'][:12]}-{web_manifest['release_id'][:12]}"
+    )
     return {
         "phase": "phase-4",
         "stage": "sanplat-coordinated-window",
         "release_group_id": group_id,
         "services": {
-            "api": {"service_name": api_manifest["service_name"], "release_id": api_manifest["release_id"], "revision": api_candidate.get("revision", ""), "digest": api_candidate.get("digest", "")},
-            "web": {"service_name": web_manifest["service_name"], "release_id": web_manifest["release_id"], "revision": web_candidate.get("revision", ""), "digest": web_candidate.get("digest", "")},
+            "api": {
+                "service_name": api_manifest["service_name"],
+                "release_id": api_manifest["release_id"],
+                "revision": api_candidate.get("revision", ""),
+                "digest": api_candidate.get("digest", ""),
+            },
+            "web": {
+                "service_name": web_manifest["service_name"],
+                "release_id": web_manifest["release_id"],
+                "revision": web_candidate.get("revision", ""),
+                "digest": web_candidate.get("digest", ""),
+            },
             "unchanged_auxiliary": auxiliary_services,
         },
         "ordered_steps": [
             {"name": "prepare", "effect": "none", "required": True},
-            {"name": "authorize", "effect": "corporate authorization", "required": True},
-            {"name": "capture-state", "effect": "read Cloud Run, jobs, queues and schedulers", "required": True},
-            {"name": "maintenance", "effect": "maintenance health 200 / business 503", "required": True},
-            {"name": "pause-deliveries", "effect": "pause new deliveries", "required": True},
-            {"name": "drain", "effect": "wait for active work and leases", "required": True},
-            {"name": "migrations", "effect": "only compatible/applicable migrations", "required": False},
-            {"name": "promote-pair", "effect": "activate exact API/Web revisions", "required": True},
-            {"name": "validate-functional", "effect": "Microsoft/SanPlat, persistence and anonymous rejection", "required": True},
-            {"name": "resume", "effect": "resume only resources previously enabled", "required": True},
+            {
+                "name": "authorize",
+                "effect": "corporate authorization",
+                "required": True,
+            },
+            {
+                "name": "capture-state",
+                "effect": "read Cloud Run, jobs, queues and schedulers",
+                "required": True,
+            },
+            {
+                "name": "maintenance",
+                "effect": "maintenance health 200 / business 503",
+                "required": True,
+            },
+            {
+                "name": "pause-deliveries",
+                "effect": "pause new deliveries",
+                "required": True,
+            },
+            {
+                "name": "drain",
+                "effect": "wait for active work and leases",
+                "required": True,
+            },
+            {
+                "name": "migrations",
+                "effect": "only compatible/applicable migrations",
+                "required": False,
+            },
+            {
+                "name": "promote-pair",
+                "effect": "activate exact API/Web revisions",
+                "required": True,
+            },
+            {
+                "name": "validate-functional",
+                "effect": "Microsoft/SanPlat, persistence and anonymous rejection",
+                "required": True,
+            },
+            {
+                "name": "resume",
+                "effect": "resume only resources previously enabled",
+                "required": True,
+            },
         ],
         "gates": {
             "release_group_id_preserved": bool(release_group_id),
@@ -1207,7 +1809,12 @@ def sanplat_plan(
             "source": "runtime API_BASE_URL declared by the Web deployment configuration",
             "candidate_validation": "candidate Web configuration must point to the intended API, never to an accidental candidate URL",
         },
-        "remote_mutations": ["SanPlat maintenance/pause/drain", "Cloud Run paired promotion", "functional validation", "resume"],
+        "remote_mutations": [
+            "SanPlat maintenance/pause/drain",
+            "Cloud Run paired promotion",
+            "functional validation",
+            "resume",
+        ],
     }
 
 
@@ -1223,26 +1830,61 @@ def sanplat(
 ) -> dict[str, Any]:
     api_manifest = load_manifest(api_manifest_path)
     web_manifest = load_manifest(web_manifest_path)
-    if api_manifest.get("service_name") != "cgm-sanplat-api" or web_manifest.get("service_name") != "cgm-sanplat-web":
-        raise LifecycleError("SanPlat coordination requires cgm-sanplat-api and cgm-sanplat-web manifests")
-    plan = sanplat_plan(api_manifest, web_manifest, release_group_id=release_group_id, auxiliary_services=auxiliary_services)
+    if (
+        api_manifest.get("service_name") != "cgm-sanplat-api"
+        or web_manifest.get("service_name") != "cgm-sanplat-web"
+    ):
+        raise LifecycleError(
+            "SanPlat coordination requires cgm-sanplat-api and cgm-sanplat-web manifests"
+        )
+    plan = sanplat_plan(
+        api_manifest,
+        web_manifest,
+        release_group_id=release_group_id,
+        auxiliary_services=auxiliary_services,
+    )
     _require_confirmation(execute, confirm_remote_effects)
-    execution, execution_path = begin_execution(api_manifest, state_dir, "sanplat", dry_run=not execute)
-    execution["related_release_ids"] = [api_manifest["release_id"], web_manifest["release_id"]]
-    execution["manifest_paths"] = [str(api_manifest_path.resolve()), str(web_manifest_path.resolve())]
+    execution, execution_path = begin_execution(
+        api_manifest, state_dir, "sanplat", dry_run=not execute
+    )
+    execution["related_release_ids"] = [
+        api_manifest["release_id"],
+        web_manifest["release_id"],
+    ]
+    execution["manifest_paths"] = [
+        str(api_manifest_path.resolve()),
+        str(web_manifest_path.resolve()),
+    ]
     if not execute:
-        event(execution, stage="sanplat", intent="record paired corporate-window plan without remote effects", result="PLANNED")
+        event(
+            execution,
+            stage="sanplat",
+            intent="record paired corporate-window plan without remote effects",
+            result="PLANNED",
+        )
         save_execution(execution_path, execution)
-        return {"plan": plan, "execution": execution, "execution_path": str(execution_path)}
+        return {
+            "plan": plan,
+            "execution": execution,
+            "execution_path": str(execution_path),
+        }
     message = "SanPlat execution is intentionally gated: supply a reviewed adapter and corporate-window record before any mutation"
     execution["status"] = "FAILED"
     execution["error"] = message
-    event(execution, stage="authorize", intent="require reviewed SanPlat adapter and corporate window", result="FAILED", detail=message)
+    event(
+        execution,
+        stage="authorize",
+        intent="require reviewed SanPlat adapter and corporate window",
+        result="FAILED",
+        detail=message,
+    )
     save_execution(execution_path, execution)
     raise LifecycleError(message)
 
 
-def adoption_plan(platform_root: Path, repo_path: Path, service_name: str) -> dict[str, Any]:
+def adoption_plan(
+    platform_root: Path, repo_path: Path, service_name: str
+) -> dict[str, Any]:
     service = local_release.load_catalog(platform_root.resolve(), service_name)
     snapshot = local_release.repo_snapshot(repo_path)
     inventory = local_release.workflow_inventory(Path(snapshot["path"]))
@@ -1276,7 +1918,9 @@ def adoption_plan(platform_root: Path, repo_path: Path, service_name: str) -> di
     }
 
 
-def _manifest_for_release(state_dir: Path, release_id: str) -> tuple[Path, dict[str, Any]]:
+def _manifest_for_release(
+    state_dir: Path, release_id: str
+) -> tuple[Path, dict[str, Any]]:
     matches = []
     for path in local_release.state_paths(state_dir)["manifests"].glob("*.json"):
         try:
@@ -1299,7 +1943,10 @@ def _execution_records(state_dir: Path, release_id: str) -> list[dict[str, Any]]
             continue
         if value.get("release_id") == release_id:
             records.append(value)
-    return sorted(records, key=lambda item: (int(item.get("attempt", 0)), str(item.get("updated_at", ""))))
+    return sorted(
+        records,
+        key=lambda item: (int(item.get("attempt", 0)), str(item.get("updated_at", ""))),
+    )
 
 
 def _next_lifecycle_stage(manifest: dict[str, Any]) -> str:
@@ -1359,7 +2006,11 @@ def _reconcile_read_only(manifest: dict[str, Any]) -> dict[str, Any]:
             digest = _remote_artifact_digest(image)
             expected = _require_digest(manifest)
             result["artifact_registry"] = {
-                "status": "CONFIRMED" if digest == expected else "MISMATCH" if digest else "NOT_FOUND",
+                "status": "CONFIRMED"
+                if digest == expected
+                else "MISMATCH"
+                if digest
+                else "NOT_FOUND",
                 "digest": digest or "",
                 "expected_digest": expected,
             }
@@ -1372,7 +2023,11 @@ def _reconcile_read_only(manifest: dict[str, Any]) -> dict[str, Any]:
             target = _remote_tag_target(repo_path, tag)
             expected_sha = str(source.get("sha", ""))
             result["git_tag"] = {
-                "status": "CONFIRMED" if target == expected_sha else "MISMATCH" if target else "NOT_FOUND",
+                "status": "CONFIRMED"
+                if target == expected_sha
+                else "MISMATCH"
+                if target
+                else "NOT_FOUND",
                 "target": target or "",
                 "expected_sha": expected_sha,
             }
@@ -1420,20 +2075,40 @@ def _reconcile_read_only(manifest: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def resume(state_dir: Path, release_id: str, *, reconcile: bool = False) -> dict[str, Any]:
+def resume(
+    state_dir: Path, release_id: str, *, reconcile: bool = False
+) -> dict[str, Any]:
     """Summarize the first safe continuation point without performing mutations."""
     manifest_path, manifest = _manifest_for_release(state_dir, release_id)
     executions = _execution_records(state_dir, release_id)
     latest = executions[-1] if executions else None
-    unknown = bool(latest and (latest.get("status") == "UNKNOWN" or latest.get("unknown_effects")))
+    unknown = bool(
+        latest and (latest.get("status") == "UNKNOWN" or latest.get("unknown_effects"))
+    )
     remote_state = _reconcile_read_only(manifest) if reconcile else {}
     remote_query_performed = reconcile
     reconciliation_status = "NOT_REQUESTED"
     if reconcile:
-        statuses = [value.get("status") for value in remote_state.values() if value.get("status") != "NOT_CHECKED"]
-        reconciliation_status = "CONFIRMED" if statuses and all(status == "CONFIRMED" for status in statuses) else "INCONCLUSIVE"
+        statuses = [
+            value.get("status")
+            for value in remote_state.values()
+            if value.get("status") != "NOT_CHECKED"
+        ]
+        reconciliation_status = (
+            "CONFIRMED"
+            if statuses and all(status == "CONFIRMED" for status in statuses)
+            else "INCONCLUSIVE"
+        )
     next_stage = _next_lifecycle_stage(manifest)
-    safe_to_continue = not unknown and next_stage in {"quality", "build", "publish", "register", "candidate", "promote", "close"}
+    safe_to_continue = not unknown and next_stage in {
+        "quality",
+        "build",
+        "publish",
+        "register",
+        "candidate",
+        "promote",
+        "close",
+    }
     if unknown:
         safe_to_continue = reconcile and reconciliation_status == "CONFIRMED"
     return {

@@ -93,6 +93,21 @@ def test_register_rejects_reused_identity_with_different_sha(client):
     assert conflict.status_code == 409
 
 
+def test_register_rejects_partial_release_identity(client):
+    service = _payload()["services"][0]
+    assert (
+        client.post(
+            "/api/releases",
+            json=_payload(release_id="release-123", services=[service]),
+        ).status_code
+        == 201
+    )
+
+    conflict = client.post("/api/releases", json=_payload(release_id="release-123"))
+
+    assert conflict.status_code == 409
+
+
 def test_api_only_release_is_not_synthesized_into_other_services(client):
     response = client.post(
         "/api/releases",
@@ -327,6 +342,110 @@ def test_firestore_save_and_query_uses_collection_backend():
 
         count = releases_store.count_releases(service_name="test-api")
         assert count == 1
+
+
+def test_firestore_release_identity_is_atomic_and_idempotent():
+    from unittest import mock as um
+
+    from eng_platform_api.models import ReleaseCreateRequest, ServiceRevision
+    from eng_platform_api.services import releases_store
+
+    class AlreadyExists(Exception):
+        pass
+
+    payload = ReleaseCreateRequest(
+        repository="diegomad14/test-repo",
+        version="v1.0.0",
+        release_id="release-123",
+        source_sha="a" * 40,
+        artifact_digest="sha256:" + "b" * 64,
+        services=[
+            ServiceRevision(service_name="test-api", revision="test-api-00001-abc")
+        ],
+    )
+    stored = {
+        **payload.model_dump(exclude={"services"}),
+        "service_name": "test-api",
+        "revision": "test-api-00001-abc",
+        "action": "deployed",
+        "github_run_url": "",
+        "created_at": "2026-09-09T00:00:00+00:00",
+    }
+    doc_mock = um.MagicMock()
+    collection_mock = um.MagicMock()
+    collection_mock.document.return_value = doc_mock
+    doc_mock.get.return_value = um.MagicMock(exists=False, to_dict=lambda: {})
+
+    with um.patch.object(
+        releases_store, "_firestore_collection", return_value=collection_mock
+    ):
+        first = releases_store.save_release(payload)
+        assert first[0].release_id == payload.release_id
+        doc_mock.get.return_value = um.MagicMock(exists=True, to_dict=lambda: stored)
+        second = releases_store.save_release(payload)
+
+    expected_item = {key: stored[key] for key in second[0].model_dump()}
+    assert second[0].model_dump() == expected_item
+    doc_mock.create.assert_called_once()
+
+    raced_doc = um.MagicMock()
+    raced_collection = um.MagicMock()
+    raced_collection.document.return_value = raced_doc
+    raced_doc.get.side_effect = [
+        um.MagicMock(exists=False, to_dict=lambda: {}),
+        um.MagicMock(exists=True, to_dict=lambda: stored),
+    ]
+    raced_doc.create.side_effect = AlreadyExists()
+    with um.patch.object(
+        releases_store, "_firestore_collection", return_value=raced_collection
+    ):
+        result = releases_store.save_release(payload)
+
+    expected_item = {key: stored[key] for key in result[0].model_dump()}
+    assert result[0].model_dump() == expected_item
+
+
+def test_firestore_release_identity_conflict_is_not_overwritten():
+    from unittest import mock as um
+
+    from eng_platform_api.models import ReleaseCreateRequest, ServiceRevision
+    from eng_platform_api.services import releases_store
+
+    class AlreadyExists(Exception):
+        pass
+
+    payload = ReleaseCreateRequest(
+        repository="diegomad14/test-repo",
+        version="v1.0.0",
+        release_id="release-123",
+        source_sha="a" * 40,
+        services=[
+            ServiceRevision(service_name="test-api", revision="test-api-00001-abc")
+        ],
+    )
+    conflicting = {
+        **payload.model_dump(exclude={"services"}),
+        "service_name": "test-api",
+        "source_sha": "c" * 40,
+        "revision": "test-api-00001-other",
+        "action": "deployed",
+        "github_run_url": "",
+        "created_at": "2026-09-09T00:00:00+00:00",
+    }
+    doc_mock = um.MagicMock()
+    collection_mock = um.MagicMock()
+    collection_mock.document.return_value = doc_mock
+    doc_mock.get.side_effect = [
+        um.MagicMock(exists=False, to_dict=lambda: {}),
+        um.MagicMock(exists=True, to_dict=lambda: conflicting),
+    ]
+    doc_mock.create.side_effect = AlreadyExists()
+
+    with um.patch.object(
+        releases_store, "_firestore_collection", return_value=collection_mock
+    ):
+        with pytest.raises(releases_store.ReleaseConflict):
+            releases_store.save_release(payload)
 
 
 def test_firestore_collection_returns_client_when_configured():

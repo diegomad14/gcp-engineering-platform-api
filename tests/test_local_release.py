@@ -106,14 +106,18 @@ def test_existing_conflicting_tag_fails_closed(conventional_repo):
     conflicting_sha = git(repo, "rev-parse", "HEAD")
     git(repo, "checkout", "main")
 
-    with pytest.raises(local_release.ReleaseError, match="exists locally on another SHA"):
+    with pytest.raises(
+        local_release.ReleaseError, match="exists locally on another SHA"
+    ):
         local_release.version_plan(repo, service(), snapshot(repo), base_sha=base_sha)
 
     assert git(repo, "rev-parse", "refs/tags/v1.3.0") == conflicting_sha
     assert head != base_sha
 
 
-def test_prepare_reuses_release_identity_but_creates_new_execution(conventional_repo, tmp_path):
+def test_prepare_reuses_release_identity_but_creates_new_execution(
+    conventional_repo, tmp_path
+):
     repo, base_sha = conventional_repo
     state_dir = tmp_path / "state"
 
@@ -163,13 +167,17 @@ def test_artifact_key_changes_when_dependency_input_changes(conventional_repo):
     version["source_sha"] = snap["sha"]
     before = local_release.build_inputs(repo, service(), version)["reuse_key"]
 
-    (repo / "pyproject.toml").write_text("[project]\nname='changed'\n", encoding="utf-8")
+    (repo / "pyproject.toml").write_text(
+        "[project]\nname='changed'\n", encoding="utf-8"
+    )
     after = local_release.build_inputs(repo, service(), version)["reuse_key"]
 
     assert before != after
 
 
-def test_evidence_reuse_requires_exact_sha_base_policy_and_toolchain(conventional_repo, tmp_path):
+def test_evidence_reuse_requires_exact_sha_base_policy_and_toolchain(
+    conventional_repo, tmp_path
+):
     repo, base_sha = conventional_repo
     snap = snapshot(repo)
     toolchain = local_release.toolchain_fingerprint(repo)
@@ -182,21 +190,22 @@ def test_evidence_reuse_requires_exact_sha_base_policy_and_toolchain(conventiona
         "policy_id": local_release.POLICY_ID,
         "quality_gate_status": "PASSED",
         "policy_status": "PASSED",
-        "expires_at": local_release.iso(
-            local_release.utc_now() + timedelta(hours=1)
-        ),
+        "expires_at": local_release.iso(local_release.utc_now() + timedelta(hours=1)),
         "toolchain": toolchain,
     }
     path = tmp_path / "evidence.json"
     path.write_text(json.dumps(evidence), encoding="utf-8")
 
-    assert local_release.validate_evidence(
-        path,
-        service=service(),
-        snapshot=snap,
-        base_sha=base_sha,
-        current_toolchain=toolchain,
-    )["policy_status"] == "PASSED"
+    assert (
+        local_release.validate_evidence(
+            path,
+            service=service(),
+            snapshot=snap,
+            base_sha=base_sha,
+            current_toolchain=toolchain,
+        )["policy_status"]
+        == "PASSED"
+    )
 
     with pytest.raises(local_release.ReleaseError, match="base SHA mismatch"):
         local_release.validate_evidence(

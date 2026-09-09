@@ -247,14 +247,19 @@ def save_release(payload: ReleaseCreateRequest) -> list[ReleaseItem]:
         if payload.release_id:
             immutable = ("repository", "version", "source_sha", "artifact_digest")
             for item in items:
-                document = collection.document(f"{payload.release_id}-{item.service_name}")
+                document = collection.document(
+                    f"{payload.release_id}-{item.service_name}"
+                )
                 existing = document.get()
                 if getattr(existing, "exists", False):
                     record = existing.to_dict() or {}
                     if (
                         record.get("release_id", "") != payload.release_id
                         or record.get("service_name", "") != item.service_name
-                        or any(record.get(key, "") != getattr(payload, key) for key in immutable)
+                        or any(
+                            record.get(key, "") != getattr(payload, key)
+                            for key in immutable
+                        )
                     ):
                         raise ReleaseConflict(
                             "Release identity already exists with different immutable inputs"
@@ -262,7 +267,9 @@ def save_release(payload: ReleaseCreateRequest) -> list[ReleaseItem]:
                     existing_rows[item.service_name] = ReleaseItem(**record)
             if existing_rows:
                 if len(existing_rows) != len(items):
-                    raise ReleaseConflict("Release identity is missing one of its service rows")
+                    raise ReleaseConflict(
+                        "Release identity is missing one of its service rows"
+                    )
                 return [existing_rows[item.service_name] for item in items]
         for item in items:
             doc_id = (
@@ -291,13 +298,18 @@ def save_release(payload: ReleaseCreateRequest) -> list[ReleaseItem]:
                     raise
                 existing = document.get()
                 if not getattr(existing, "exists", False):
-                    raise ReleaseConflict("Release identity disappeared during reservation") from exc
+                    raise ReleaseConflict(
+                        "Release identity disappeared during reservation"
+                    ) from exc
                 stored = existing.to_dict() or {}
                 immutable = ("repository", "version", "source_sha", "artifact_digest")
                 if (
                     stored.get("release_id", "") != payload.release_id
                     or stored.get("service_name", "") != item.service_name
-                    or any(stored.get(key, "") != getattr(payload, key) for key in immutable)
+                    or any(
+                        stored.get(key, "") != getattr(payload, key)
+                        for key in immutable
+                    )
                 ):
                     raise ReleaseConflict(
                         "Release identity already exists with different immutable inputs"
@@ -305,7 +317,9 @@ def save_release(payload: ReleaseCreateRequest) -> list[ReleaseItem]:
                 existing_rows[item.service_name] = ReleaseItem(**stored)
         if payload.release_id:
             if len(existing_rows) != len(items):
-                raise ReleaseConflict("Release identity is missing one of its service rows")
+                raise ReleaseConflict(
+                    "Release identity is missing one of its service rows"
+                )
             return [existing_rows[item.service_name] for item in items]
         return items
 
@@ -335,7 +349,9 @@ def save_release(payload: ReleaseCreateRequest) -> list[ReleaseItem]:
                         ReleaseItem(**existing_by_service[item.service_name])
                         for item in items
                     ]
-                raise ReleaseConflict("Release identity is missing one of its service rows")
+                raise ReleaseConflict(
+                    "Release identity is missing one of its service rows"
+                )
         records.extend(
             {
                 **item.model_dump(),

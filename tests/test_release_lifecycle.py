@@ -104,7 +104,10 @@ def test_publish_dry_run_records_no_remote_effects(tmp_path):
     assert result["execution"]["remote_effects"] == []
     assert result["execution_path"]
     assert result["plan"]["execution_control"]["status"] == "BLOCKED"
-    assert result["plan"]["execution_control"]["shared_exclusion"]["cli_cli"]["configured"] is False
+    assert (
+        result["plan"]["execution_control"]["shared_exclusion"]["cli_cli"]["configured"]
+        is False
+    )
 
 
 def test_candidate_promote_and_rollback_plans_are_digest_and_revision_bound(tmp_path):
@@ -172,7 +175,10 @@ def test_sanplat_plan_preserves_pair_and_stops_execution_without_adapter(tmp_pat
 
     api_path = write_manifest(tmp_path, api)
     web_path = write_manifest(tmp_path, web)
-    with pytest.raises(release_lifecycle.LifecycleError, match="SanPlat execution is intentionally gated"):
+    with pytest.raises(
+        release_lifecycle.LifecycleError,
+        match="SanPlat execution is intentionally gated",
+    ):
         release_lifecycle.sanplat(
             api_path,
             web_path,
@@ -199,7 +205,9 @@ def test_live_mutations_fail_closed_without_shared_exclusion_or_authorization(tm
     sanplat_value = manifest(tmp_path, "cgm-sanplat-api")
     sanplat_path = tmp_path / "sanplat-generic.json"
     sanplat_path.write_text(json.dumps(sanplat_value), encoding="utf-8")
-    with pytest.raises(release_lifecycle.LifecycleError, match="SanPlat generic lifecycle commands"):
+    with pytest.raises(
+        release_lifecycle.LifecycleError, match="SanPlat generic lifecycle commands"
+    ):
         release_lifecycle.candidate(
             sanplat_path,
             state_dir=tmp_path / "state",
@@ -251,9 +259,7 @@ def test_resume_reconciles_unknown_without_retrying_a_mutation(monkeypatch, tmp_
         },
     )
 
-    result = release_lifecycle.resume(
-        state_dir, value["release_id"], reconcile=True
-    )
+    result = release_lifecycle.resume(state_dir, value["release_id"], reconcile=True)
 
     assert result["reconciliation_status"] == "CONFIRMED"
     assert result["safe_to_continue"] is True
