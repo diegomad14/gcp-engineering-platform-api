@@ -63,6 +63,8 @@ class LeaseHandle:
     generation: int
     version: int
     expires_at: str
+    status: str = ""
+    takeover_allowed: bool = False
 
     @classmethod
     def from_payload(cls, value: dict[str, Any]) -> "LeaseHandle":
@@ -75,6 +77,8 @@ class LeaseHandle:
                 generation=int(value["generation"]),
                 version=int(value["version"]),
                 expires_at=str(value["expires_at"]),
+                status=str(value.get("status", "")),
+                takeover_allowed=bool(value.get("takeover_allowed", False)),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ExecutionControlError(

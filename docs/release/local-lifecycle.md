@@ -53,6 +53,38 @@ prueba de exclusión multi-host. Para producción se debe configurar la
 colección existente mediante `ENG_PLATFORM_RELEASE_CONTROL_FIRESTORE_COLLECTION`
 y conservar el consumo durable de autorizaciones en Firestore.
 
+## Integración local del control — comando dedicado
+
+La integración local reproducible se ejecuta fuera del lifecycle normal con
+`scripts/release/firestore-control-integration`. El comando inicia únicamente
+el emulador oficial mediante `gcloud emulators firestore start` en loopback,
+levanta dos procesos uvicorn de esta API y ejecuta dos clientes independientes
+del adaptador común. Usa un proyecto sintético y colecciones con namespace
+aislado; no modifica el release normal ni habilita proveedores.
+
+Requiere el SDK `google-cloud-firestore` del entorno de desarrollo, el
+componente `cloud-firestore-emulator` y Java 21 o superior. El comando falla
+cerrado si `gcloud`, el emulador o Java no están disponibles, si el host no es
+loopback o si el árbol no está limpio. Nunca sustituye Firestore por JSON,
+TestClient o dobles de transporte/transacciones.
+
+```bash
+OPENJDK_HOME="$(brew --prefix openjdk)/libexec/openjdk.jdk/Contents/Home"
+JAVA_HOME="$OPENJDK_HOME" \
+PATH="$OPENJDK_HOME/bin:/private/tmp/eng-platform-audit-venv.jnvwf7/bin:$PATH" \
+PYTHON_BIN=/private/tmp/eng-platform-audit-venv.jnvwf7/bin/python \
+scripts/release/firestore-control-integration \
+  --evidence-dir /ruta/a/evidencia-firestore-local
+```
+
+La suite verifica consumo concurrente de un ticket, competencia de dos
+releases por el mismo servicio/entorno, recursos independientes, claims
+alterados y expirados, pérdida de respuesta, reinicio de API/cliente,
+propietarios obsoletos, expiración, `UNKNOWN`, reconciliación
+`INDETERMINATE`/`NOT_STARTED` y el bloqueo de activación remota/SanPlat. Los
+logs y JSON saneados son evidencia local de integración; no demuestran
+Firestore productivo, multi-host real, Actions, proveedores ni SanPlat.
+
 ## Fase 2 — Publicación idempotente
 
 ```bash
