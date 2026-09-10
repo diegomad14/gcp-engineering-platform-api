@@ -85,6 +85,27 @@ propietarios obsoletos, expiración, `UNKNOWN`, reconciliación
 logs y JSON saneados son evidencia local de integración; no demuestran
 Firestore productivo, multi-host real, Actions, proveedores ni SanPlat.
 
+Las rutas del lifecycle también tienen una colección de fixtures loopback en
+`tests/test_release_lifecycle_local_integration.py`. Conserva el transporte
+`urllib` y los subprocesses reales del módulo, pero dirige las llamadas a un
+`ThreadingHTTPServer` y ejecutables sintéticos en un directorio temporal.
+Acredita `register` confirmado, HTTP 503 y respuesta incierta después de
+registrar la intención, candidate con fallo parcial y dry-run sin HTTP ni
+subprocess. Es evidencia `LOCAL_FIXTURE`, no prueba de GitHub, Artifact
+Registry, Cloud Run o SanPlat.
+
+El lifecycle exige que cualquier evidencia `PASSED` contenga el reporte
+normalizado existente, su digest, identidad exacta de servicio/repositorio/SHA,
+base y política, checks no incompletos y al menos un check `PASSED`. El gate
+canónico sigue siendo la autoridad y conserva `oss-v2`, diferencial mínimo 80%
+y TTL de 168 horas. La reconciliación de `UNKNOWN` compara además la revisión y
+el digest esperado; una respuesta positiva genérica no habilita continuación.
+
+El plan SanPlat conserva la pareja, SHA/tag/digest/revisión y el orden de
+ventana, pero marca como bloqueo la ausencia de `API_BASE_URL` explícito en el
+manifiesto Web, las identidades candidatas discordantes, el adaptador revisado,
+la autorización común y la ventana corporativa. No ejecuta ningún paso live.
+
 ## Fase 2 — Publicación idempotente
 
 ```bash
