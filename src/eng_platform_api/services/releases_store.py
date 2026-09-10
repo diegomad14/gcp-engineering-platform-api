@@ -72,8 +72,7 @@ def _firestore_create_release(
                 record.get("release_id", "") != payload.release_id
                 or record.get("service_name", "") != item.service_name
                 or any(
-                    record.get(key, "") != getattr(payload, key)
-                    for key in immutable
+                    record.get(key, "") != getattr(payload, key) for key in immutable
                 )
             ):
                 raise ReleaseConflict(

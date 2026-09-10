@@ -167,10 +167,14 @@ def health_server():
 
 
 def _allow_local_fixture_execution(monkeypatch):
-    monkeypatch.setattr(release_lifecycle, "_require_live_controls", lambda *_args: None)
+    monkeypatch.setattr(
+        release_lifecycle, "_require_live_controls", lambda *_args: None
+    )
 
 
-def test_register_success_uses_real_loopback_http_transport(register_server, monkeypatch, tmp_path):
+def test_register_success_uses_real_loopback_http_transport(
+    register_server, monkeypatch, tmp_path
+):
     _allow_local_fixture_execution(monkeypatch)
     path = _write_manifest(tmp_path)
 
@@ -187,10 +191,15 @@ def test_register_success_uses_real_loopback_http_transport(register_server, mon
 
     assert result["execution"]["status"] == "SUCCEEDED"
     assert _RegisterHandler.requests[0]["path"] == "/api/releases/"
-    assert _RegisterHandler.requests[0]["body"]["release_id"] == _manifest(tmp_path)["release_id"]
+    assert (
+        _RegisterHandler.requests[0]["body"]["release_id"]
+        == _manifest(tmp_path)["release_id"]
+    )
 
 
-def test_register_http_failure_is_recorded_as_unknown_after_intent(register_server, monkeypatch, tmp_path):
+def test_register_http_failure_is_recorded_as_unknown_after_intent(
+    register_server, monkeypatch, tmp_path
+):
     _allow_local_fixture_execution(monkeypatch)
     _RegisterHandler.mode = "failure"
     path = _write_manifest(tmp_path)
@@ -219,12 +228,19 @@ def test_candidate_success_and_partial_local_command_failure_use_real_subprocess
     _allow_local_fixture_execution(monkeypatch)
     executable, state = _local_gcloud(tmp_path)
     path = _write_manifest(tmp_path)
-    env = {"PATH": f"{executable.parent}:{os.environ['PATH']}", "LOCAL_GCLOUD_STATE": str(state), "LOCAL_HEALTH_URL": health_server}
+    env = {
+        "PATH": f"{executable.parent}:{os.environ['PATH']}",
+        "LOCAL_GCLOUD_STATE": str(state),
+        "LOCAL_HEALTH_URL": health_server,
+    }
     for key, value in env.items():
         monkeypatch.setenv(key, value)
 
     result = release_lifecycle.candidate(
-        path, state_dir=tmp_path / "success-state", execute=True, confirm_remote_effects=True
+        path,
+        state_dir=tmp_path / "success-state",
+        execute=True,
+        confirm_remote_effects=True,
     )
     assert result["execution"]["status"] == "SUCCEEDED"
     assert result["manifest"]["runtime"]["candidate"]["url"] == health_server
