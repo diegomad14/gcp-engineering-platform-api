@@ -1,8 +1,9 @@
 # Release local y trazable
 
 Estado: fases 0–5 están implementadas como contratos revisables y dry-run;
-ninguna fase se declara cerrada. Las mutaciones remotas siguen bloqueadas por
-falta de un adaptador revisado de exclusión compartida y autorización previa.
+ninguna fase se declara cerrada. El contrato reutilizable de exclusión y
+autorización ya está implementado, pero las mutaciones remotas siguen
+bloqueadas por falta de integración aceptada con Actions y activación remota.
 El lifecycle está documentado en `docs/release/local-lifecycle.md`, 2026-09-09.
 
 El motor vive en `scripts/release/local_release.py` y solo usa la biblioteca
@@ -124,9 +125,11 @@ La publicación de tag/release de GitHub, el push de Artifact Registry, el
 registro en Engineering Platform, el candidate Cloud Run, la promoción y el
 rollback están implementados como comandos separados y guardados en
 `local-lifecycle.md`; todos quedan en dry-run. El modo live además exige un
-adaptador revisado de exclusión CLI/CLI y CLI/Actions, autorización previa
-ligada a identidad y una aprobación explícita; mientras esos adaptadores no
-existan, el motor falla cerrado. Para SanPlat se debe conservar la ventana corporativa completa:
+handshake CLI/Actions aceptado, una autorización previa ligada a identidad y
+una aprobación explícita; mientras esa integración no exista, el motor falla
+cerrado. El adaptador ejecutable está en
+`scripts/release/execution_control.py` y solo habla con el control plane; no
+emite autorizaciones ni ejecuta proveedores. Para SanPlat se debe conservar la ventana corporativa completa:
 captura de estado, preparación, autorización, maintenance/pause, drain,
 migraciones aplicables, promoción de la pareja exacta, validación funcional real
 y reanudación de lo que estaba activo.

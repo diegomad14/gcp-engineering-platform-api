@@ -22,6 +22,7 @@ from .routers import (
     metrics,
     quality,
     release_authorizations,
+    release_execution,
     releases,
     service_factory,
     secrets as operational_secrets_router,
@@ -60,6 +61,7 @@ app.include_router(metrics.router)
 app.include_router(costs.router)
 app.include_router(quality.router)
 app.include_router(release_authorizations.router)
+app.include_router(release_execution.router)
 app.include_router(service_factory.router)
 app.include_router(operational_secrets_router.router)
 

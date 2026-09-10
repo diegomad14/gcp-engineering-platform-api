@@ -43,6 +43,15 @@ class GitHubConfig:
 
 
 @dataclass
+class ReleaseExecutionConfig:
+    """Shared execution state; remote activation stays disabled by default."""
+
+    remote_activation_enabled: bool = False
+    store_path: str = "data/release_execution_control.json"
+    firestore_collection: str = ""
+
+
+@dataclass
 class AuthConfig:
     github_client_id: str = ""
     github_client_secret: str = ""
@@ -74,6 +83,9 @@ class PlatformConfig:
     billing: BillingConfig = field(default_factory=BillingConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
+    release_execution: ReleaseExecutionConfig = field(
+        default_factory=ReleaseExecutionConfig
+    )
     auth: AuthConfig = field(default_factory=AuthConfig)
     sonarqube: SonarQubeConfig = field(default_factory=SonarQubeConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
@@ -130,6 +142,18 @@ def load_config() -> PlatformConfig:
         runner_label=os.getenv("CGM_ACTIONS_RUNNER", "").strip(),
     )
 
+    release_execution = ReleaseExecutionConfig(
+        # Activation remains disabled until a separately approved integration.
+        remote_activation_enabled=False,
+        store_path=os.getenv(
+            "ENG_PLATFORM_RELEASE_CONTROL_STORE_PATH",
+            "data/release_execution_control.json",
+        ),
+        firestore_collection=os.getenv(
+            "ENG_PLATFORM_RELEASE_CONTROL_FIRESTORE_COLLECTION", ""
+        ).strip(),
+    )
+
     auth = AuthConfig(
         github_client_id=os.getenv("ENG_PLATFORM_GITHUB_OAUTH_CLIENT_ID", ""),
         github_client_secret=os.getenv("ENG_PLATFORM_GITHUB_OAUTH_CLIENT_SECRET", ""),
@@ -164,6 +188,7 @@ def load_config() -> PlatformConfig:
         billing=billing,
         monitoring=monitoring,
         github=github,
+        release_execution=release_execution,
         auth=auth,
         sonarqube=sonarqube,
         quality=quality,

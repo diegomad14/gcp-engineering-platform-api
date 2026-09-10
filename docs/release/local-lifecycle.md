@@ -13,17 +13,45 @@ los dos adaptadores aún no están configurados, el modo live falla cerrado.
 `release_lifecycle.live_control_plan()` deja explícitos los dos cruces que no
 se deben inferir del lock local:
 
-- CLI/CLI: falta una lease durable y compartida entre procesos y hosts.
+- CLI/CLI: el contrato de lease durable ya está implementado sobre el estado
+  local bloqueado o Firestore configurado; la verificación contra dos hosts aún
+  no está aceptada.
 - CLI/Actions: falta un handshake que coordine esa lease con la concurrencia,
   dispatch y estado de los workflows protegidos.
 
-También falta el adaptador que entregue una autorización previa ligada a
-`release_id`, repositorio, `source_sha`, digest y operación. Por eso una
-confirmación textual nunca habilita por sí sola una publicación o despliegue.
-La implementación conserva las protecciones actuales de Actions y el camino
-de autorización del control plane. Los comandos genéricos de candidate,
-promote y rollback rechazan manifiestos SanPlat; solo un adaptador SanPlat
-revisado y una ventana corporativa pueden desbloquear esa coordinación.
+El adaptador local consume una autorización firmada por Engineering Platform y
+la liga a actor, `release_id`, repositorio, SHA, tag, digest, destino,
+operación y configuración. La autorización no puede emitirse desde el CLI, una
+opción local, un manifiesto ni un token de calidad. Los endpoints de control
+solo guardan estado: no contienen callbacks que ejecuten efectos externos.
+
+Las claves de exclusión son explícitas: `publication:<repository>:<policy>`
+para reservar versión/publicación y `deployment:<service>:<environment-or-group>`
+para reservar un destino canónico. La adquisición, renovación y liberación
+validan propietario, generación y versión; una lease vencida queda sin takeover
+automático. Solo una observación reconciliada `NOT_STARTED` permite un nuevo
+propietario; `COMPLETE` e `INDETERMINATE` no reenvían el efecto. La intención se
+registra antes de actuar y `UNKNOWN` exige reconciliación, sin reintento
+automático.
+
+La implementación conserva las protecciones actuales de Actions y el camino de
+autorización del control plane. Los comandos genéricos de candidate, promote y
+rollback rechazan manifiestos SanPlat; solo un adaptador SanPlat revisado y una
+ventana corporativa pueden desbloquear esa coordinación. La activación remota
+del lifecycle permanece deshabilitada y no existe un bypass del CLI.
+
+La API expone el contrato interno en:
+
+- `POST /api/internal/release-execution/authorizations/consume`
+- `POST /api/internal/release-execution/leases/{acquire,renew,release,reconcile}`
+- `POST /api/internal/release-execution/intents`
+- `POST /api/internal/release-execution/intents/{result,reconcile}`
+
+El store local usa `ENG_PLATFORM_RELEASE_CONTROL_STORE_PATH` y bloqueo de
+archivo; es una persistencia durable de un solo host para desarrollo, no una
+prueba de exclusión multi-host. Para producción se debe configurar la
+colección existente mediante `ENG_PLATFORM_RELEASE_CONTROL_FIRESTORE_COLLECTION`
+y conservar el consumo durable de autorizaciones en Firestore.
 
 ## Fase 2 — Publicación idempotente
 

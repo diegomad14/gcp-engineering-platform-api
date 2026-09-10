@@ -1,4 +1,4 @@
-"""Short-lived, signed authorizations for GitHub release workflows."""
+"""Short-lived, signed authorizations issued by Engineering Platform."""
 
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ from ..config import config
 
 ISSUER = "engineering-platform"
 AUDIENCE = "github-release-workflow"
+LOCAL_AUDIENCE = "engineering-platform-local-release"
+LOCAL_EXECUTION_MODE = "local-cli"
 TOKEN_TTL_SECONDS = 300
 
 
@@ -71,11 +73,17 @@ def issue(
     target_revision: str = "",
     execution_repository: str = "",
     configuration: dict[str, Any] | None = None,
+    release_id: str = "",
+    artifact_digest: str = "",
+    target: str = "",
+    operation: str = "",
+    audience: str = AUDIENCE,
+    execution_mode: str = "github-actions",
 ) -> tuple[str, dict[str, Any]]:
     now = int(time.time())
     claims: dict[str, Any] = {
         "iss": ISSUER,
-        "aud": AUDIENCE,
+        "aud": audience,
         "iat": now,
         "exp": now + TOKEN_TTL_SECONDS,
         "jti": str(uuid.uuid4()),
@@ -86,23 +94,33 @@ def issue(
         "github_deployment_id": str(github_deployment_id),
         "requested_by": requested_by,
         "kind": kind,
+        "execution_mode": execution_mode,
     }
+    for key, value in {
+        "release_id": release_id,
+        "artifact_digest": artifact_digest,
+        "target": target,
+        "operation": operation,
+    }.items():
+        if value:
+            claims[key] = value
     if target_revision:
         claims["target_revision"] = target_revision
+    if configuration is not None:
+        claims["configuration_hash"] = hashlib.sha256(
+            json.dumps(configuration, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
     if execution_repository:
         claims["execution_repository"] = execution_repository
-        claims["configuration_hash"] = hashlib.sha256(
-            json.dumps(
-                configuration or {}, sort_keys=True, separators=(",", ":")
-            ).encode()
-        ).hexdigest()
     header = {"alg": "EdDSA", "typ": "JWT", "kid": "release-v1"}
     signing_input = f"{_json_segment(header)}.{_json_segment(claims)}".encode()
     token = f"{signing_input.decode()}.{_b64encode(_private_key().sign(signing_input))}"
     return token, claims
 
 
-def verify(token: str, expected: dict[str, str]) -> dict[str, Any]:
+def verify(
+    token: str, expected: dict[str, str], *, audience: str = AUDIENCE
+) -> dict[str, Any]:
     try:
         header_segment, payload_segment, signature_segment = token.split(".")
         header = json.loads(_b64decode(header_segment))
@@ -121,7 +139,7 @@ def verify(token: str, expected: dict[str, str]) -> dict[str, Any]:
     now = int(time.time())
     if (
         claims.get("iss") != ISSUER
-        or claims.get("aud") != AUDIENCE
+        or claims.get("aud") != audience
         or not isinstance(claims.get("iat"), int)
         or not isinstance(claims.get("exp"), int)
         or claims["iat"] > now + 30

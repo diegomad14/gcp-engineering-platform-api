@@ -35,6 +35,8 @@ SANPLAT_SERVICES = frozenset({"cgm-sanplat-api", "cgm-sanplat-web"})
 LIVE_REMOTE_OPERATIONS = frozenset(
     {"publish", "candidate", "register", "promote", "rollback"}
 )
+# This round delivers the reusable control adapter, not operational activation.
+REMOTE_ACTIVATION_ENABLED = False
 
 
 class LifecycleError(local_release.ReleaseError):
@@ -127,9 +129,9 @@ def live_control_plan(manifest: dict[str, Any], operation: str) -> dict[str, Any
     """Describe controls required before any local remote mutation.
 
     ``main`` currently coordinates Actions runs and platform-issued release
-    authorizations. The local engine has no shared lease or authorization
-    adapter yet, so the honest plan is blocked rather than treating a local
-    file lock and a confirmation string as equivalent controls.
+    authorizations. The reusable platform adapter is present, but the local
+    engine has no accepted CLI/Actions handshake and remote activation remains
+    disabled, so the honest plan stays blocked.
     """
     dependencies = manifest.get("dependencies") or {}
     inventory = (
@@ -167,6 +169,19 @@ def live_control_plan(manifest: dict[str, Any], operation: str) -> dict[str, Any
             "status": "BLOCKED",
             "configured": False,
             "required": "platform-issued authorization bound to release_id, repository, source_sha, digest and operation",
+            "adapter": "Engineering Platform signed local-release ticket",
+            "contract_implemented": True,
+        },
+        "adapter_contract": {
+            "status": "IMPLEMENTED",
+            "lease_store": "Engineering Platform local durable state or configured Firestore",
+            "intent_store": "same shared persistence as the lease",
+            "authorization": "existing Ed25519 one-time consumption mechanism",
+            "external_effects": [],
+        },
+        "remote_activation": {
+            "enabled": REMOTE_ACTIVATION_ENABLED,
+            "cli_override_supported": False,
         },
         "sanplat_generic_bypass": {
             "status": "BLOCKED" if sanplat_generic else "NOT_APPLICABLE",
@@ -196,8 +211,9 @@ def _require_live_controls(manifest: dict[str, Any], operation: str) -> None:
             "SanPlat adapter and corporate-window record"
         )
     raise LifecycleError(
-        f"Live {operation} is blocked: shared CLI/CLI and CLI/Actions exclusion "
-        "plus prior platform authorization are not configured"
+        f"Live {operation} is blocked: remote activation is disabled; shared "
+        "CLI/CLI and CLI/Actions exclusion plus prior platform authorization "
+        "are not configured"
     )
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -222,6 +223,207 @@ class ReleaseAuthorizationConsumeRequest(BaseModel):
 class ReleaseAuthorizationConsumeResponse(BaseModel):
     accepted: bool = True
     jti: str
+
+
+# ── Shared local-release execution control ───────────────────────────────
+
+ExecutionOperation = Literal["publish", "candidate", "register", "promote", "rollback"]
+ExecutionScope = Literal["publication", "deployment"]
+ExecutionLeaseStatus = Literal["HELD", "RELEASED", "UNKNOWN", "RECONCILED"]
+ExecutionIntentStatus = Literal["INTENDED", "CONFIRMED", "FAILED", "UNKNOWN"]
+ExecutionResultStatus = Literal["CONFIRMED", "FAILED", "UNKNOWN"]
+ExecutionReconciliationObservation = Literal["NOT_STARTED", "COMPLETE", "INDETERMINATE"]
+
+
+class ReleaseExecutionContext(BaseModel):
+    """Immutable identity shared by every release executor."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    release_id: str = Field(min_length=1, max_length=128)
+    repository: str = Field(min_length=1, max_length=256)
+    source_sha: str = Field(
+        min_length=40, max_length=64, pattern=r"^[0-9a-fA-F]{40,64}$"
+    )
+    tag: str = Field(min_length=1, max_length=128)
+    artifact_digest: str = Field(default="", max_length=71)
+    target: str = Field(default="", max_length=256)
+    operation: ExecutionOperation
+    configuration_hash: str = Field(default="", max_length=64)
+    actor_id: str = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_digests(self) -> ReleaseExecutionContext:
+        if self.artifact_digest and not re.fullmatch(
+            r"sha256:[0-9a-fA-F]{64}", self.artifact_digest
+        ):
+            raise ValueError("artifact_digest must be a sha256 digest")
+        if self.configuration_hash and not re.fullmatch(
+            r"[0-9a-fA-F]{64}", self.configuration_hash
+        ):
+            raise ValueError("configuration_hash must be a SHA-256 hex digest")
+        return self
+
+
+class ReleaseExecutionAuthorizationConsumeRequest(ReleaseExecutionContext):
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=1, max_length=8192)
+
+
+class ReleaseExecutionAuthorizationConsumeResponse(BaseModel):
+    accepted: bool = True
+    jti: str
+    actor_id: str
+    expires_at: int
+
+
+class ExecutionLeaseAcquireRequest(ReleaseExecutionContext):
+    model_config = ConfigDict(extra="forbid")
+
+    scope: ExecutionScope
+    scope_key: str = Field(min_length=1, max_length=256)
+    owner_id: str = Field(min_length=1, max_length=256)
+    authorization_jti: str = Field(min_length=1, max_length=128)
+    ttl_seconds: int = Field(default=900, ge=30, le=3600)
+    reconciliation_id: str = Field(default="", max_length=128)
+
+    @model_validator(mode="after")
+    def validate_scope_key(self) -> ExecutionLeaseAcquireRequest:
+        prefix = f"{self.scope}:"
+        if not self.scope_key.startswith(prefix):
+            raise ValueError(f"scope_key must start with {prefix}")
+        return self
+
+
+class ExecutionLease(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lease_id: str
+    scope: ExecutionScope
+    scope_key: str
+    owner_id: str
+    generation: int = Field(ge=1)
+    version: int = Field(ge=1)
+    acquired_at: str
+    expires_at: str
+    status: ExecutionLeaseStatus
+    context: ReleaseExecutionContext
+    authorization_jti: str
+    reconciliation_id: str = ""
+    reconciliation_observation: str = ""
+    takeover_allowed: bool = False
+    final_status: str = ""
+    released_at: str = ""
+
+
+class ExecutionLeaseRenewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lease_id: str = Field(min_length=1, max_length=128)
+    scope_key: str = Field(min_length=1, max_length=256)
+    owner_id: str = Field(min_length=1, max_length=256)
+    generation: int = Field(ge=1)
+    version: int = Field(ge=1)
+    ttl_seconds: int = Field(default=900, ge=30, le=3600)
+
+
+class ExecutionLeaseReleaseRequest(ExecutionLeaseRenewRequest):
+    final_status: Literal["CONFIRMED", "FAILED"]
+
+
+class ExecutionLeaseReconcileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lease_id: str = Field(min_length=1, max_length=128)
+    scope_key: str = Field(min_length=1, max_length=256)
+    owner_id: str = Field(min_length=1, max_length=256)
+    generation: int = Field(ge=1)
+    reconciliation_id: str = Field(min_length=1, max_length=128)
+    observation: ExecutionReconciliationObservation
+    observation_digest: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-fA-F]{64}$"
+    )
+
+
+class ExecutionIntentCreateRequest(ReleaseExecutionContext):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(
+        min_length=1, max_length=256, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"
+    )
+    effect_digest: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-fA-F]{64}$"
+    )
+    scope: ExecutionScope
+    scope_key: str = Field(min_length=1, max_length=256)
+    owner_id: str = Field(min_length=1, max_length=256)
+    lease_id: str = Field(min_length=1, max_length=128)
+    lease_generation: int = Field(ge=1)
+    authorization_jti: str = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_scope_key(self) -> ExecutionIntentCreateRequest:
+        prefix = f"{self.scope}:"
+        if not self.scope_key.startswith(prefix):
+            raise ValueError(f"scope_key must start with {prefix}")
+        return self
+
+
+class ExecutionIntent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    intent_id: str
+    idempotency_key: str
+    status: ExecutionIntentStatus
+    created_at: str
+    updated_at: str
+    context: ReleaseExecutionContext
+    scope: ExecutionScope
+    scope_key: str
+    owner_id: str
+    lease_id: str
+    lease_generation: int = Field(ge=1)
+    authorization_jti: str
+    effect_digest: str
+    intent_fingerprint: str
+    result_digest: str = ""
+    error_code: str = ""
+    reconciliation_required: bool = False
+    reconciliation_id: str = ""
+    observation_digest: str = ""
+
+
+class ExecutionIntentResultRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    intent_id: str = Field(min_length=1, max_length=256)
+    scope_key: str = Field(min_length=1, max_length=256)
+    owner_id: str = Field(min_length=1, max_length=256)
+    lease_id: str = Field(min_length=1, max_length=128)
+    lease_generation: int = Field(ge=1)
+    status: ExecutionResultStatus
+    result_digest: str = Field(default="", max_length=64)
+    error_code: str = Field(default="", max_length=128)
+
+    @model_validator(mode="after")
+    def validate_result_digest(self) -> ExecutionIntentResultRequest:
+        if self.result_digest and not re.fullmatch(
+            r"[0-9a-fA-F]{64}", self.result_digest
+        ):
+            raise ValueError("result_digest must be a SHA-256 hex digest")
+        return self
+
+
+class ExecutionIntentReconcileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    intent_id: str = Field(min_length=1, max_length=256)
+    reconciliation_id: str = Field(min_length=1, max_length=128)
+    outcome: ExecutionResultStatus
+    observation_digest: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-fA-F]{64}$"
+    )
 
 
 class DeploymentItem(BaseModel):
