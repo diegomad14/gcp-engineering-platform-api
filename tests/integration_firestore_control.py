@@ -442,11 +442,11 @@ def _sanitized_environment() -> dict[str, str]:
     return env
 
 
-def _component_versions(gcloud: str) -> dict[str, str]:
+def _component_versions(gcloud: str, env: dict[str, str]) -> dict[str, str]:
     result = {"gcloud": "unknown", "firestore_emulator": "unknown", "java": "unknown"}
     try:
         result["gcloud"] = subprocess.check_output(
-            [gcloud, "--version"], text=True, stderr=subprocess.STDOUT
+            [gcloud, "--version"], text=True, stderr=subprocess.STDOUT, env=env
         ).splitlines()[0]
     except (OSError, subprocess.CalledProcessError, IndexError):
         pass
@@ -464,6 +464,7 @@ def _component_versions(gcloud: str) -> dict[str, str]:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            env=env,
         )
         components = json.loads(output.stdout)
         if components:
@@ -479,6 +480,7 @@ def _component_versions(gcloud: str) -> dict[str, str]:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            env=env,
         ).stdout.splitlines()[0]
     except (OSError, subprocess.CalledProcessError, IndexError):
         pass
@@ -596,7 +598,7 @@ def _start_local_processes(
         api_processes[1],
         emulator_host,
         api_urls[0],
-        {"api2": api_urls[1], **_component_versions(gcloud)},
+        {"api2": api_urls[1], **_component_versions(gcloud, emulator_env)},
     )
 
 
@@ -605,6 +607,22 @@ def _wait_for_expiry(expires_at: str) -> None:
     delay = max(0.0, expiry - time.time() + 1.0)
     if delay:
         time.sleep(delay)
+
+
+def _emulator_warning_summary(log_path: Path) -> dict[str, int]:
+    try:
+        text = log_path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    return {
+        "transaction_lock_timeout_lines": text.count(
+            "WARNING: Operation failed: Transaction lock timeout."
+        ),
+        "already_exists_lines": text.count(
+            "WARNING: Operation failed: entity already exists:"
+        ),
+        "jdk_unsafe_warning_lines": text.count("Unsafe::allocateMemory"),
+    }
 
 
 def _run_suite(args: argparse.Namespace) -> dict[str, Any]:
@@ -662,6 +680,7 @@ def _run_suite(args: argparse.Namespace) -> dict[str, Any]:
     from eng_platform_api.services import release_authorization
     from scripts.release import release_lifecycle
 
+    process_start = time.perf_counter()
     emulator, api1, api2, emulator_host, api1_url, runtime = _start_local_processes(
         evidence_dir,
         env,
@@ -671,10 +690,13 @@ def _run_suite(args: argparse.Namespace) -> dict[str, Any]:
         private_pem,
         public_pem,
     )
+    process_start_seconds = time.perf_counter() - process_start
     api2_url = str(runtime.pop("api2"))
     os.environ.update(_safe_child_environment(env, emulator_host, project))
     scenarios: list[dict[str, Any]] = []
     external_effects = 0
+    scenario_start = time.perf_counter()
+    summary: dict[str, Any] | None = None
 
     try:
         shared_context, shared_token = _issue(
@@ -770,16 +792,6 @@ def _run_suite(args: argparse.Namespace) -> dict[str, Any]:
                 {"valid_owners": 1, "different_release_ids": True},
             )
         )
-        _assert_ok(
-            _one(
-                _run_client(
-                    "release", api2_url, compete_a, "", {"lease": winners[0]["lease"]}
-                ),
-                "release compete",
-            ),
-            "release compete",
-        )
-
         independent, independent_token = _issue(
             _context(
                 f"{namespace}-independent", "service-independent/qa", "cli-integration"
@@ -819,6 +831,15 @@ def _run_suite(args: argparse.Namespace) -> dict[str, Any]:
                 "release independent",
             ),
             "release independent",
+        )
+        _assert_ok(
+            _one(
+                _run_client(
+                    "release", api2_url, compete_a, "", {"lease": winners[0]["lease"]}
+                ),
+                "release compete",
+            ),
+            "release compete",
         )
 
         tamper_context, tamper_token = _issue(
@@ -1188,7 +1209,11 @@ def _run_suite(args: argparse.Namespace) -> dict[str, Any]:
                 ),
                 **runtime,
             },
-            "durations_seconds": {"total": round(time.perf_counter() - started, 3)},
+            "durations_seconds": {
+                "emulator_and_api_start": round(process_start_seconds, 3),
+                "scenarios": round(time.perf_counter() - scenario_start, 3),
+                "total": round(time.perf_counter() - started, 3),
+            },
             "scenarios": scenarios,
             "final_emulator_state": final_state,
             "remote_effects": {
@@ -1204,6 +1229,13 @@ def _run_suite(args: argparse.Namespace) -> dict[str, Any]:
     finally:
         _stop_process(api2)
         _stop_process(emulator)
+        if summary is not None:
+            summary["emulator_warnings"] = _emulator_warning_summary(
+                evidence_dir / "emulator.log"
+            )
+            (evidence_dir / "integration-summary.json").write_text(
+                json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+            )
 
 
 def main() -> int:
