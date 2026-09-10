@@ -2091,6 +2091,56 @@ def _reconcile_read_only(manifest: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _unknown_operation(execution: dict[str, Any]) -> str:
+    """Return the lifecycle operation whose remote effect is uncertain."""
+    for effect in reversed(execution.get("unknown_effects") or []):
+        stage = str(effect.get("stage", ""))
+        for operation in LIVE_REMOTE_OPERATIONS:
+            if stage == operation or stage.startswith(f"{operation}-"):
+                return operation
+    current_stage = str(execution.get("current_stage", ""))
+    for operation in LIVE_REMOTE_OPERATIONS:
+        if current_stage == operation or current_stage.startswith(f"{operation}-"):
+            return operation
+    return ""
+
+
+def _reconciliation_proves_unknown_effect(
+    manifest: dict[str, Any], operation: str, remote_state: dict[str, Any]
+) -> bool:
+    """Require evidence for the phase that may have performed the effect."""
+    runtime = _runtime(manifest)
+    cloud_run = remote_state.get("cloud_run") or {}
+    if operation == "publish":
+        return True
+    if operation == "candidate":
+        # Candidate state is written only after the exact revision, digest, tag,
+        # and smoke check have been observed. Without it, a lost deploy response
+        # must remain blocked even if publication is fully reconciled.
+        candidate = runtime.get("candidate") or {}
+        return bool(candidate.get("revision") and candidate.get("digest")) and (
+            cloud_run.get("status") == "CONFIRMED"
+        )
+    if operation == "promote":
+        candidate = runtime.get("candidate") or {}
+        return (
+            cloud_run.get("status") == "CONFIRMED"
+            and cloud_run.get("active_revision") == candidate.get("revision")
+        )
+    if operation == "rollback":
+        rollback = runtime.get("rollback") or {}
+        return (
+            cloud_run.get("status") == "CONFIRMED"
+            and cloud_run.get("active_revision") == rollback.get("target_revision")
+        )
+    if operation == "register":
+        # The local lifecycle has no read-only registration endpoint. A POST
+        # response alone is therefore not evidence that a lost response was
+        # applied; keep UNKNOWN blocked until the manifest has confirmation.
+        return bool(runtime.get("platform_registration"))
+    return False
+
+
 def resume(
     state_dir: Path, release_id: str, *, reconcile: bool = False
 ) -> dict[str, Any]:
@@ -2101,6 +2151,7 @@ def resume(
     unknown = bool(
         latest and (latest.get("status") == "UNKNOWN" or latest.get("unknown_effects"))
     )
+    unknown_operation = _unknown_operation(latest or {}) if unknown else ""
     remote_state = _reconcile_read_only(manifest) if reconcile else {}
     remote_query_performed = reconcile
     reconciliation_status = "NOT_REQUESTED"
@@ -2115,6 +2166,14 @@ def resume(
             if statuses and all(status == "CONFIRMED" for status in statuses)
             else "INCONCLUSIVE"
         )
+        if (
+            unknown
+            and reconciliation_status == "CONFIRMED"
+            and not _reconciliation_proves_unknown_effect(
+                manifest, unknown_operation, remote_state
+            )
+        ):
+            reconciliation_status = "INCONCLUSIVE"
     next_stage = _next_lifecycle_stage(manifest)
     safe_to_continue = not unknown and next_stage in {
         "quality",
@@ -2126,7 +2185,13 @@ def resume(
         "close",
     }
     if unknown:
-        safe_to_continue = reconcile and reconciliation_status == "CONFIRMED"
+        safe_to_continue = (
+            reconcile
+            and reconciliation_status == "CONFIRMED"
+            and _reconciliation_proves_unknown_effect(
+                manifest, unknown_operation, remote_state
+            )
+        )
     return {
         "release_id": release_id,
         "manifest_path": str(manifest_path),

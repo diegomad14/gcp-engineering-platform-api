@@ -268,6 +268,41 @@ def test_resume_reconciles_unknown_without_retrying_a_mutation(monkeypatch, tmp_
     assert result["note"].endswith("never mutates remote state automatically")
 
 
+def test_resume_keeps_unknown_candidate_blocked_without_candidate_evidence(
+    monkeypatch, tmp_path
+):
+    value = manifest(tmp_path)
+    value["runtime"].pop("candidate")
+    state_dir = tmp_path / "state"
+    manifest_path = state_dir / "manifests" / f"{value['release_id']}.json"
+    release_lifecycle.local_release.write_json(manifest_path, value)
+    execution, execution_path = release_lifecycle.begin_execution(
+        value, state_dir, "candidate", dry_run=False
+    )
+    execution["status"] = "UNKNOWN"
+    execution["current_stage"] = "candidate-deploy"
+    execution["unknown_effects"] = [
+        {"stage": "candidate-deploy", "result": "UNKNOWN"}
+    ]
+    release_lifecycle.save_execution(execution_path, execution)
+    monkeypatch.setattr(
+        release_lifecycle,
+        "_reconcile_read_only",
+        lambda _manifest: {
+            "artifact_registry": {"status": "CONFIRMED"},
+            "git_tag": {"status": "CONFIRMED"},
+            "github_release": {"status": "CONFIRMED"},
+            "cloud_run": {"status": "NOT_CHECKED"},
+        },
+    )
+
+    result = release_lifecycle.resume(state_dir, value["release_id"], reconcile=True)
+
+    assert result["reconciliation_status"] == "INCONCLUSIVE"
+    assert result["unknown_effect_requires_reconciliation"] is True
+    assert result["safe_to_continue"] is False
+
+
 def test_revision_ready_accepts_cloud_run_condition_succeeded():
     assert release_lifecycle._revision_ready(
         {"status": {"conditions": [{"type": "Ready", "state": "CONDITION_SUCCEEDED"}]}}
