@@ -40,6 +40,67 @@ def _firestore_collection():
     return _firestore_client(project_id).collection(_COLLECTION)
 
 
+def _firestore_create_release(
+    collection: object,
+    items: list[ReleaseItem],
+    payload: ReleaseCreateRequest,
+) -> list[ReleaseItem]:
+    """Reserve every service row for a release identity atomically."""
+    from google.cloud import firestore
+
+    client = getattr(collection, "_client", None)
+    if client is None:
+        raise RuntimeError("Firestore collection has no client")
+    transaction = client.transaction()
+
+    @firestore.transactional
+    def reserve(transaction):
+        existing_rows: dict[str, ReleaseItem] = {}
+        documents = {
+            item.service_name: collection.document(
+                f"{payload.release_id}-{item.service_name}"
+            )
+            for item in items
+        }
+        immutable = ("repository", "version", "source_sha", "artifact_digest")
+        for item in items:
+            snapshot = documents[item.service_name].get(transaction=transaction)
+            if not getattr(snapshot, "exists", False):
+                continue
+            record = snapshot.to_dict() or {}
+            if (
+                record.get("release_id", "") != payload.release_id
+                or record.get("service_name", "") != item.service_name
+                or any(
+                    record.get(key, "") != getattr(payload, key)
+                    for key in immutable
+                )
+            ):
+                raise ReleaseConflict(
+                    "Release identity already exists with different immutable inputs"
+                )
+            existing_rows[item.service_name] = ReleaseItem(**record)
+
+        if existing_rows:
+            if len(existing_rows) != len(items):
+                raise ReleaseConflict(
+                    "Release identity is missing one of its service rows"
+                )
+            return [existing_rows[item.service_name] for item in items]
+
+        for item in items:
+            record = {
+                **item.model_dump(),
+                "triggered_by": payload.triggered_by,
+                "rollback_from_version": payload.rollback_from_version,
+                "notes": payload.notes,
+            }
+            transaction.create(documents[item.service_name], record)
+        return items
+
+    return list(reserve(transaction))
+
+
 def _resolve_path() -> Path:
     return (
         Path(_DEFAULT_STORE_PATH)
@@ -243,40 +304,10 @@ def save_release(payload: ReleaseCreateRequest) -> list[ReleaseItem]:
 
     collection = _firestore_collection()
     if collection is not None:
-        existing_rows: dict[str, ReleaseItem] = {}
         if payload.release_id:
-            immutable = ("repository", "version", "source_sha", "artifact_digest")
-            for item in items:
-                document = collection.document(
-                    f"{payload.release_id}-{item.service_name}"
-                )
-                existing = document.get()
-                if getattr(existing, "exists", False):
-                    record = existing.to_dict() or {}
-                    if (
-                        record.get("release_id", "") != payload.release_id
-                        or record.get("service_name", "") != item.service_name
-                        or any(
-                            record.get(key, "") != getattr(payload, key)
-                            for key in immutable
-                        )
-                    ):
-                        raise ReleaseConflict(
-                            "Release identity already exists with different immutable inputs"
-                        )
-                    existing_rows[item.service_name] = ReleaseItem(**record)
-            if existing_rows:
-                if len(existing_rows) != len(items):
-                    raise ReleaseConflict(
-                        "Release identity is missing one of its service rows"
-                    )
-                return [existing_rows[item.service_name] for item in items]
+            return _firestore_create_release(collection, items, payload)
         for item in items:
-            doc_id = (
-                f"{payload.release_id}-{item.service_name}"
-                if payload.release_id
-                else f"{item.service_name}-{item.created_at}"
-            )
+            doc_id = f"{item.service_name}-{item.created_at}"
             document = collection.document(doc_id)
             record = {
                 **item.model_dump(),
@@ -284,43 +315,7 @@ def save_release(payload: ReleaseCreateRequest) -> list[ReleaseItem]:
                 "rollback_from_version": payload.rollback_from_version,
                 "notes": payload.notes,
             }
-            if not payload.release_id:
-                document.set(record)
-                continue
-            try:
-                # create() makes the release identity reservation atomic across
-                # independent API processes; set() could overwrite a raced
-                # release with a different source or digest.
-                document.create(record)
-                existing_rows[item.service_name] = item
-            except Exception as exc:
-                if exc.__class__.__name__ not in {"AlreadyExists", "Conflict"}:
-                    raise
-                existing = document.get()
-                if not getattr(existing, "exists", False):
-                    raise ReleaseConflict(
-                        "Release identity disappeared during reservation"
-                    ) from exc
-                stored = existing.to_dict() or {}
-                immutable = ("repository", "version", "source_sha", "artifact_digest")
-                if (
-                    stored.get("release_id", "") != payload.release_id
-                    or stored.get("service_name", "") != item.service_name
-                    or any(
-                        stored.get(key, "") != getattr(payload, key)
-                        for key in immutable
-                    )
-                ):
-                    raise ReleaseConflict(
-                        "Release identity already exists with different immutable inputs"
-                    ) from exc
-                existing_rows[item.service_name] = ReleaseItem(**stored)
-        if payload.release_id:
-            if len(existing_rows) != len(items):
-                raise ReleaseConflict(
-                    "Release identity is missing one of its service rows"
-                )
-            return [existing_rows[item.service_name] for item in items]
+            document.set(record)
         return items
 
     with _store_lock:
