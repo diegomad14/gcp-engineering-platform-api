@@ -171,7 +171,9 @@ def test_sanplat_plan_preserves_pair_and_stops_execution_without_adapter(tmp_pat
         "resume",
     ]
     assert plan["gates"]["adapter_configured"] is False
-    assert plan["gates"]["frontend_api_base_url_declared"] is True
+    assert plan["gates"]["frontend_api_base_url_declared"] is False
+    assert "web API_BASE_URL" in plan["gates"]["missing_candidate_evidence"]
+    assert plan["gates"]["candidate_identity_exact"] is True
     assert "API_BASE_URL" in plan["frontend_config"]["source"]
 
     api_path = write_manifest(tmp_path, api)

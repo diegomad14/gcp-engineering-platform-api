@@ -1731,9 +1731,30 @@ def sanplat_plan(
     api_candidate = _runtime(api_manifest).get("candidate") or {}
     web_candidate = _runtime(web_manifest).get("candidate") or {}
     missing = []
-    for label, state in (("api", api_candidate), ("web", web_candidate)):
+    identity_mismatches = []
+    for label, current in (
+        ("api", (api_manifest, api_candidate)),
+        ("web", (web_manifest, web_candidate)),
+    ):
+        manifest, state = current
+        expected_digest = str((_artifact(manifest)).get("digest", ""))
+        expected_tag = _candidate_tag(manifest)
         if not state.get("revision") or not state.get("digest"):
             missing.append(f"{label} candidate revision/digest")
+        if state.get("digest") != expected_digest:
+            identity_mismatches.append(f"{label} candidate digest")
+        if state.get("tag") and state.get("tag") != expected_tag:
+            identity_mismatches.append(f"{label} candidate tag")
+    web_deployment = (web_manifest.get("catalog") or {}).get("deployment") or {}
+    frontend_api_base_url = str(
+        web_deployment.get("api_base_url")
+        or (web_manifest.get("frontend") or {}).get("api_base_url", "")
+    )
+    web_candidate_url = str(web_candidate.get("url", ""))
+    if not frontend_api_base_url:
+        missing.append("web API_BASE_URL")
+    elif web_candidate_url and frontend_api_base_url == web_candidate_url:
+        identity_mismatches.append("web API_BASE_URL points to candidate URL")
     group_id = (
         release_group_id
         or f"pair-{api_manifest['release_id'][:12]}-{web_manifest['release_id'][:12]}"
@@ -1756,6 +1777,14 @@ def sanplat_plan(
                 "digest": web_candidate.get("digest", ""),
             },
             "unchanged_auxiliary": auxiliary_services,
+        },
+        "identity": {
+            "api_source_sha": str((_source(api_manifest)).get("sha", "")),
+            "web_source_sha": str((_source(web_manifest)).get("sha", "")),
+            "api_tag": str((api_manifest.get("version") or {}).get("tag", "")),
+            "web_tag": str((web_manifest.get("version") or {}).get("tag", "")),
+            "api_digest": str((_artifact(api_manifest)).get("digest", "")),
+            "web_digest": str((_artifact(web_manifest)).get("digest", "")),
         },
         "ordered_steps": [
             {"name": "prepare", "effect": "none", "required": True},
@@ -1809,10 +1838,14 @@ def sanplat_plan(
             "release_group_id_preserved": bool(release_group_id),
             "exact_pair_required": True,
             "missing_candidate_evidence": missing,
+            "candidate_identity_exact": not identity_mismatches,
+            "candidate_identity_mismatches": identity_mismatches,
             "corporate_window_required": True,
             "adapter_configured": False,
-            "frontend_api_base_url_declared": True,
-            "candidate_url_must_not_become_web_default": True,
+            "frontend_api_base_url_declared": bool(frontend_api_base_url),
+            "candidate_url_must_not_become_web_default": bool(
+                frontend_api_base_url and frontend_api_base_url != web_candidate_url
+            ),
             "execution": "blocked until a reviewed SanPlat adapter and window record are supplied",
         },
         "execution_control": {
@@ -1826,7 +1859,8 @@ def sanplat_plan(
             "reason": "SanPlat requires the reviewed adapter and corporate-window record before any mutation",
         },
         "frontend_config": {
-            "source": "runtime API_BASE_URL declared by the Web deployment configuration",
+            "api_base_url": frontend_api_base_url,
+            "source": "manifest Web deployment API_BASE_URL; absence is a blocking gap",
             "candidate_validation": "candidate Web configuration must point to the intended API, never to an accidental candidate URL",
         },
         "remote_mutations": [
