@@ -350,9 +350,6 @@ def test_firestore_release_identity_is_atomic_and_idempotent():
     from eng_platform_api.models import ReleaseCreateRequest, ServiceRevision
     from eng_platform_api.services import releases_store
 
-    class AlreadyExists(Exception):
-        pass
-
     payload = ReleaseCreateRequest(
         repository="diegomad14/test-repo",
         version="v1.0.0",
@@ -374,10 +371,17 @@ def test_firestore_release_identity_is_atomic_and_idempotent():
     doc_mock = um.MagicMock()
     collection_mock = um.MagicMock()
     collection_mock.document.return_value = doc_mock
+    client_mock = um.MagicMock()
+    transaction_mock = um.MagicMock()
+    client_mock.transaction.return_value = transaction_mock
+    collection_mock._client = client_mock
     doc_mock.get.return_value = um.MagicMock(exists=False, to_dict=lambda: {})
 
-    with um.patch.object(
-        releases_store, "_firestore_collection", return_value=collection_mock
+    with (
+        um.patch.object(
+            releases_store, "_firestore_collection", return_value=collection_mock
+        ),
+        um.patch("google.cloud.firestore.transactional", side_effect=lambda fn: fn),
     ):
         first = releases_store.save_release(payload)
         assert first[0].release_id == payload.release_id
@@ -386,23 +390,7 @@ def test_firestore_release_identity_is_atomic_and_idempotent():
 
     expected_item = {key: stored[key] for key in second[0].model_dump()}
     assert second[0].model_dump() == expected_item
-    doc_mock.create.assert_called_once()
-
-    raced_doc = um.MagicMock()
-    raced_collection = um.MagicMock()
-    raced_collection.document.return_value = raced_doc
-    raced_doc.get.side_effect = [
-        um.MagicMock(exists=False, to_dict=lambda: {}),
-        um.MagicMock(exists=True, to_dict=lambda: stored),
-    ]
-    raced_doc.create.side_effect = AlreadyExists()
-    with um.patch.object(
-        releases_store, "_firestore_collection", return_value=raced_collection
-    ):
-        result = releases_store.save_release(payload)
-
-    expected_item = {key: stored[key] for key in result[0].model_dump()}
-    assert result[0].model_dump() == expected_item
+    transaction_mock.create.assert_called_once()
 
 
 def test_firestore_release_identity_conflict_is_not_overwritten():
@@ -410,9 +398,6 @@ def test_firestore_release_identity_conflict_is_not_overwritten():
 
     from eng_platform_api.models import ReleaseCreateRequest, ServiceRevision
     from eng_platform_api.services import releases_store
-
-    class AlreadyExists(Exception):
-        pass
 
     payload = ReleaseCreateRequest(
         repository="diegomad14/test-repo",
@@ -435,14 +420,17 @@ def test_firestore_release_identity_conflict_is_not_overwritten():
     doc_mock = um.MagicMock()
     collection_mock = um.MagicMock()
     collection_mock.document.return_value = doc_mock
-    doc_mock.get.side_effect = [
-        um.MagicMock(exists=False, to_dict=lambda: {}),
-        um.MagicMock(exists=True, to_dict=lambda: conflicting),
-    ]
-    doc_mock.create.side_effect = AlreadyExists()
+    client_mock = um.MagicMock()
+    transaction_mock = um.MagicMock()
+    client_mock.transaction.return_value = transaction_mock
+    collection_mock._client = client_mock
+    doc_mock.get.return_value = um.MagicMock(exists=True, to_dict=lambda: conflicting)
 
-    with um.patch.object(
-        releases_store, "_firestore_collection", return_value=collection_mock
+    with (
+        um.patch.object(
+            releases_store, "_firestore_collection", return_value=collection_mock
+        ),
+        um.patch("google.cloud.firestore.transactional", side_effect=lambda fn: fn),
     ):
         with pytest.raises(releases_store.ReleaseConflict):
             releases_store.save_release(payload)

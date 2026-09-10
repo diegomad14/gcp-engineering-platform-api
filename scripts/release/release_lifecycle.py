@@ -1143,6 +1143,10 @@ def _active_revision(traffic: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _revision_digest(value: dict[str, Any]) -> str:
+    return str((value.get("status") or {}).get("imageDigest", ""))
+
+
 def promote(
     manifest_path: Path,
     *,
@@ -2081,11 +2085,45 @@ def _reconcile_read_only(manifest: dict[str, Any]) -> dict[str, Any]:
                 ]
             )
             traffic = _traffic_snapshot(service_value)
-            result["cloud_run"] = {
+            cloud_run = {
                 "status": "CONFIRMED",
                 "active_revision": _active_revision(traffic),
                 "traffic": traffic,
             }
+            revision_checks = (
+                ("candidate", candidate_state, "revision"),
+                ("production", production_state, "revision"),
+                ("rollback", runtime.get("rollback") or {}, "target_revision"),
+            )
+            for name, state, revision_key in revision_checks:
+                revision = str(state.get(revision_key, ""))
+                if not revision:
+                    continue
+                revision_value = _json_command(
+                    [
+                        "gcloud",
+                        "run",
+                        "revisions",
+                        "describe",
+                        revision,
+                        "--project",
+                        project,
+                        "--region",
+                        region,
+                        "--format=json",
+                    ]
+                )
+                digest = _revision_digest(revision_value)
+                expected_digest = str(state.get("digest", ""))
+                cloud_run[f"{name}_revision"] = revision
+                cloud_run[f"{name}_digest"] = digest
+                cloud_run[f"{name}_revision_status"] = (
+                    "CONFIRMED"
+                    if _revision_ready(revision_value)
+                    and (not expected_digest or digest == expected_digest)
+                    else "MISMATCH"
+                )
+            result["cloud_run"] = cloud_run
         except LifecycleError as exc:
             result["cloud_run"] = {"status": "UNAVAILABLE", "detail": str(exc)}
     return result
@@ -2118,20 +2156,27 @@ def _reconciliation_proves_unknown_effect(
         # and smoke check have been observed. Without it, a lost deploy response
         # must remain blocked even if publication is fully reconciled.
         candidate = runtime.get("candidate") or {}
-        return bool(candidate.get("revision") and candidate.get("digest")) and (
-            cloud_run.get("status") == "CONFIRMED"
+        return (
+            bool(candidate.get("revision") and candidate.get("digest"))
+            and cloud_run.get("status") == "CONFIRMED"
+            and cloud_run.get("candidate_revision_status") == "CONFIRMED"
+            and cloud_run.get("candidate_revision") == candidate.get("revision")
+            and cloud_run.get("candidate_digest") == candidate.get("digest")
         )
     if operation == "promote":
         candidate = runtime.get("candidate") or {}
         return (
             cloud_run.get("status") == "CONFIRMED"
             and cloud_run.get("active_revision") == candidate.get("revision")
+            and cloud_run.get("candidate_revision_status") == "CONFIRMED"
+            and cloud_run.get("candidate_digest") == candidate.get("digest")
         )
     if operation == "rollback":
         rollback = runtime.get("rollback") or {}
         return (
             cloud_run.get("status") == "CONFIRMED"
             and cloud_run.get("active_revision") == rollback.get("target_revision")
+            and cloud_run.get("rollback_revision_status") == "CONFIRMED"
         )
     if operation == "register":
         # The local lifecycle has no read-only registration endpoint. A POST

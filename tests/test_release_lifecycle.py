@@ -281,9 +281,7 @@ def test_resume_keeps_unknown_candidate_blocked_without_candidate_evidence(
     )
     execution["status"] = "UNKNOWN"
     execution["current_stage"] = "candidate-deploy"
-    execution["unknown_effects"] = [
-        {"stage": "candidate-deploy", "result": "UNKNOWN"}
-    ]
+    execution["unknown_effects"] = [{"stage": "candidate-deploy", "result": "UNKNOWN"}]
     release_lifecycle.save_execution(execution_path, execution)
     monkeypatch.setattr(
         release_lifecycle,
@@ -300,6 +298,46 @@ def test_resume_keeps_unknown_candidate_blocked_without_candidate_evidence(
 
     assert result["reconciliation_status"] == "INCONCLUSIVE"
     assert result["unknown_effect_requires_reconciliation"] is True
+    assert result["safe_to_continue"] is False
+
+
+def test_resume_keeps_unknown_promote_blocked_on_stale_active_revision(
+    monkeypatch, tmp_path
+):
+    value = manifest(tmp_path)
+    state_dir = tmp_path / "state"
+    manifest_path = state_dir / "manifests" / f"{value['release_id']}.json"
+    release_lifecycle.local_release.write_json(manifest_path, value)
+    execution, execution_path = release_lifecycle.begin_execution(
+        value, state_dir, "promote", dry_run=False
+    )
+    execution["status"] = "UNKNOWN"
+    execution["current_stage"] = "promote-traffic"
+    execution["unknown_effects"] = [{"stage": "promote-traffic", "result": "UNKNOWN"}]
+    release_lifecycle.save_execution(execution_path, execution)
+    common = {
+        "artifact_registry": {"status": "CONFIRMED"},
+        "git_tag": {"status": "CONFIRMED"},
+        "github_release": {"status": "CONFIRMED"},
+    }
+    monkeypatch.setattr(
+        release_lifecycle,
+        "_reconcile_read_only",
+        lambda _manifest: {
+            **common,
+            "cloud_run": {
+                "status": "CONFIRMED",
+                "active_revision": "eng-platform-api-00011-old",
+                "candidate_revision_status": "CONFIRMED",
+                "candidate_revision": value["runtime"]["candidate"]["revision"],
+                "candidate_digest": value["runtime"]["candidate"]["digest"],
+            },
+        },
+    )
+
+    result = release_lifecycle.resume(state_dir, value["release_id"], reconcile=True)
+
+    assert result["reconciliation_status"] == "INCONCLUSIVE"
     assert result["safe_to_continue"] is False
 
 
@@ -456,6 +494,49 @@ def test_lifecycle_read_only_reconciliation_helpers(monkeypatch, tmp_path):
     assert reconciled["git_tag"]["status"] == "CONFIRMED"
     assert reconciled["github_release"]["status"] == "CONFIRMED"
     assert reconciled["cloud_run"]["active_revision"] == "eng-platform-api-00011-old"
+
+
+def test_read_only_reconciliation_binds_candidate_to_revision_and_digest(
+    monkeypatch, tmp_path
+):
+    value = manifest(tmp_path)
+    tag = value["version"]["tag"]
+    digest = value["artifact"]["digest"]
+
+    monkeypatch.setattr(
+        release_lifecycle, "_remote_artifact_digest", lambda _image: digest
+    )
+    monkeypatch.setattr(
+        release_lifecycle, "_remote_tag_target", lambda _repo, _tag: "a" * 40
+    )
+    monkeypatch.setattr(
+        release_lifecycle, "_release_view", lambda _repo, _tag: {"tagName": tag}
+    )
+
+    def command(argv, **_kwargs):
+        if argv[0] == "gcloud" and "revisions" in argv:
+            return {
+                "status": {
+                    "imageDigest": digest,
+                    "conditions": [{"type": "Ready", "state": "True"}],
+                }
+            }
+        return {
+            "status": {
+                "traffic": [
+                    {"percent": 100, "revisionName": "eng-platform-api-00011-old"}
+                ]
+            }
+        }
+
+    monkeypatch.setattr(release_lifecycle, "_json_command", command)
+
+    reconciled = release_lifecycle._reconcile_read_only(value)
+
+    cloud_run = reconciled["cloud_run"]
+    assert cloud_run["candidate_revision_status"] == "CONFIRMED"
+    assert cloud_run["candidate_revision"] == value["runtime"]["candidate"]["revision"]
+    assert cloud_run["candidate_digest"] == digest
 
 
 def test_publish_execute_reconciles_existing_remote_state_with_local_doubles(

@@ -751,13 +751,22 @@ def doctor(repo_path: Path, service: dict[str, Any] | None) -> dict[str, Any]:
 
 def quality_status(report: dict[str, Any]) -> tuple[str, list[str]]:
     checks = report.get("checks")
-    if not isinstance(checks, list):
+    if not isinstance(checks, list) or not checks:
         return "FAILED", ["Quality report has no checks"]
+    invalid = [
+        str(item.get("name", "unknown")) if isinstance(item, dict) else "unknown"
+        for item in checks
+        if not isinstance(item, dict) or item.get("status") not in {"PASSED", "SKIPPED"}
+    ]
+    if invalid:
+        return "FAILED", [f"Invalid or incomplete checks: {', '.join(invalid)}"]
     failed = [
         str(item.get("name", "unknown"))
         for item in checks
         if item.get("status") == "FAILED"
     ]
+    if not any(item.get("status") == "PASSED" for item in checks):
+        return "FAILED", ["Quality report has no passed checks"]
     return (
         ("PASSED", [])
         if not failed
@@ -830,6 +839,43 @@ def validate_evidence(
         or evidence.get("policy_status") != "PASSED"
     ):
         raise ReleaseError("Evidence is not a passed oss-v2 gate")
+    report_path_value = evidence.get("report_path")
+    report_sha256 = evidence.get("report_sha256")
+    if not isinstance(report_path_value, str) or not report_path_value:
+        raise ReleaseError("Quality evidence has no normalized report path")
+    if not isinstance(report_sha256, str) or not report_sha256:
+        raise ReleaseError("Quality evidence has no normalized report digest")
+    report_path = Path(report_path_value).expanduser()
+    if not report_path.is_file():
+        raise ReleaseError("Quality evidence report is missing")
+    if file_digest(report_path) != report_sha256:
+        raise ReleaseError("Quality evidence report digest does not match")
+    report = read_json(report_path)
+    report_status, report_errors = quality_status(report)
+    if report_status != "PASSED":
+        raise ReleaseError(
+            "Quality evidence report is not complete: " + "; ".join(report_errors)
+        )
+    report_identity = {
+        "service_name": service["service_name"],
+        "repository": service["repository"],
+        "commit_sha": snapshot["sha"],
+        "base_sha": base_sha,
+        "policy_version": POLICY_ID,
+    }
+    report_mismatches = [
+        key for key, value in report_identity.items() if report.get(key) != value
+    ]
+    if report_mismatches:
+        raise ReleaseError(
+            "Quality evidence report identity mismatch: " + ", ".join(report_mismatches)
+        )
+    changed_lines = int(report.get("changed_lines", 0) or 0)
+    coverage = report.get("differential_coverage")
+    if changed_lines and (coverage is None or float(coverage) < 80.0):
+        raise ReleaseError(
+            "Quality evidence report is below the 80% differential minimum"
+        )
     try:
         expires = datetime.fromisoformat(
             str(evidence["expires_at"]).replace("Z", "+00:00")

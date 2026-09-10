@@ -181,6 +181,18 @@ def test_evidence_reuse_requires_exact_sha_base_policy_and_toolchain(
     repo, base_sha = conventional_repo
     snap = snapshot(repo)
     toolchain = local_release.toolchain_fingerprint(repo)
+    report_path = tmp_path / "quality-report.json"
+    report = {
+        "service_name": service()["service_name"],
+        "repository": service()["repository"],
+        "commit_sha": snap["sha"],
+        "base_sha": base_sha,
+        "policy_version": local_release.POLICY_ID,
+        "checks": [{"name": "Tests", "status": "PASSED"}],
+        "changed_lines": 0,
+        "differential_coverage": None,
+    }
+    report_path.write_text(json.dumps(report), encoding="utf-8")
     evidence = {
         "schema_version": local_release.SCHEMA_VERSION,
         "service_name": service()["service_name"],
@@ -192,6 +204,8 @@ def test_evidence_reuse_requires_exact_sha_base_policy_and_toolchain(
         "policy_status": "PASSED",
         "expires_at": local_release.iso(local_release.utc_now() + timedelta(hours=1)),
         "toolchain": toolchain,
+        "report_path": str(report_path),
+        "report_sha256": local_release.file_digest(report_path),
     }
     path = tmp_path / "evidence.json"
     path.write_text(json.dumps(evidence), encoding="utf-8")
@@ -374,6 +388,13 @@ def test_local_release_quality_evidence_and_differential_validation(
     report = {"checks": [{"name": "tests", "status": "PASSED"}]}
     assert local_release.quality_status(report) == ("PASSED", [])
     assert local_release.quality_status({})[0] == "FAILED"
+    assert local_release.quality_status({"checks": []})[0] == "FAILED"
+    assert (
+        local_release.quality_status(
+            {"checks": [{"name": "build", "status": "SKIPPED"}]}
+        )[0]
+        == "FAILED"
+    )
     failed, errors = local_release.quality_status(
         {"checks": [{"name": "format", "status": "FAILED"}]}
     )
@@ -427,6 +448,20 @@ def test_local_release_quality_evidence_and_differential_validation(
         "expires_at": local_release.iso(local_release.utc_now() + timedelta(hours=1)),
         "toolchain": {"sha256": "tool"},
     }
+    report_path = tmp_path / "quality-report.json"
+    report = {
+        "service_name": service()["service_name"],
+        "repository": service()["repository"],
+        "commit_sha": "a" * 40,
+        "base_sha": "b" * 40,
+        "policy_version": local_release.POLICY_ID,
+        "checks": [{"name": "Tests", "status": "PASSED"}],
+        "changed_lines": 0,
+        "differential_coverage": None,
+    }
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    evidence["report_path"] = str(report_path)
+    evidence["report_sha256"] = local_release.file_digest(report_path)
     path = tmp_path / "evidence.json"
     path.write_text(json.dumps(evidence), encoding="utf-8")
     with pytest.raises(local_release.ReleaseError, match="invalid"):
@@ -490,7 +525,14 @@ def test_local_release_quality_runner_and_local_build_doubles(
     repo, base_sha = conventional_repo
     state_dir = tmp_path / "state"
     real_report = {
+        "service_name": service()["service_name"],
+        "repository": service()["repository"],
+        "commit_sha": local_release.repo_snapshot(repo)["sha"],
+        "base_sha": base_sha,
+        "policy_version": local_release.POLICY_ID,
         "checks": [{"name": "Tests", "status": "PASSED"}],
+        "changed_lines": 1,
+        "differential_coverage": 100,
     }
     diff_path = tmp_path / "diff.json"
     diff_path.write_text(
