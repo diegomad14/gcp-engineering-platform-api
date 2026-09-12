@@ -318,6 +318,7 @@ def _worker(
 ) -> None:
     """Run one real adapter client in an independent process."""
     try:
+        context = ExecutionContext(**context_payload)
         # The official emulator can spend >20s resolving contended locks.
         # Keep the bounded client wait inside the parent's 45s result budget.
         client = PlatformExecutionControlClient(
@@ -325,9 +326,11 @@ def _worker(
             timeout=40.0,
             # Kept solely in the spawned process memory; never persisted in
             # the scenario result or evidence.
-            auth_headers=options.get("auth_headers"),
+            auth_headers=options.get("auth_headers")
+            or _session_headers(
+                os.environ["ENG_PLATFORM_SESSION_SECRET"], context.actor_id
+            ),
         )
-        context = ExecutionContext(**context_payload)
 
         def wait_barrier() -> None:
             if barrier is not None:
