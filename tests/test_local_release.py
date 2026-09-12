@@ -1,14 +1,424 @@
 import json
+import multiprocessing
+import os
 import subprocess
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
-from scripts.release import local_release
+from scripts.release import local_release, release_lifecycle
+from scripts.release.execution_control import (
+    ExecutionContext,
+    ExecutionControlError,
+    PlatformExecutionControlClient,
+)
 
 
 ROOT = Path(__file__).parents[1]
+
+
+def test_capability_issue_keeps_actor_out_of_issuance_payload():
+    requests = []
+
+    def transport(path, payload):
+        requests.append((path, payload))
+        return {"token": "fixture-capability", "expires_at": 1}
+
+    client = PlatformExecutionControlClient("", transport=transport)
+    context = ExecutionContext(
+        release_id="release-1",
+        repository="example/service",
+        service_name="service",
+        source_sha="a" * 40,
+        tag="v1.0.0",
+        operation="candidate",
+        actor_id="not-sent-to-issuer",
+        target="project/region/service",
+        configuration_hash="b" * 64,
+    )
+    assert client.issue_capability(context) == "fixture-capability"
+    assert requests == [
+        (
+            "/api/internal/release-execution/authorizations/issue",
+            {
+                "release_id": "release-1",
+                "repository": "example/service",
+                "service_name": "service",
+                "source_sha": "a" * 40,
+                "tag": "v1.0.0",
+                "artifact_digest": "",
+                "target": "project/region/service",
+                "operation": "candidate",
+                "configuration_hash": "b" * 64,
+            },
+        )
+    ]
+
+
+def test_control_client_rejects_unprotected_auth_sources(monkeypatch):
+    monkeypatch.delenv("ENG_PLATFORM_AUTH_HEADERS_FILE", raising=False)
+    monkeypatch.setenv("ENG_PLATFORM_OAUTH_BEARER_TOKEN", "unsupported")
+    with pytest.raises(ExecutionControlError, match="protected platform session"):
+        PlatformExecutionControlClient("https://control.example")
+
+
+def test_lifecycle_context_hashes_canonical_deployment_when_manifest_omits_it(tmp_path):
+    value = {
+        "release_id": "release-1",
+        "repository": "example/service",
+        "service_name": "service",
+        "source": {"sha": "a" * 40},
+        "version": {"tag": "v1.0.0"},
+        "artifact": {"digest": "sha256:" + "b" * 64},
+        "catalog": {
+            "project_id": "project",
+            "region": "region",
+            "deployment": {"image_name": "service", "health_path": "/health"},
+        },
+    }
+    context = release_lifecycle.lifecycle_execution_context(
+        value, "candidate", "fixture-actor"
+    )
+    assert context.configuration_hash == local_release.digest(
+        value["catalog"]["deployment"]
+    )
+    assert len(context.configuration_hash) == 64
+
+
+def _build_metadata(path, image_id="sha256:" + "1" * 64):
+    local_release.write_json(
+        Path(path),
+        {
+            "containerimage.config.digest": image_id,
+            "containerimage.digest": "sha256:" + "3" * 64,
+            "containerimage.descriptor": {
+                "digest": "sha256:" + "3" * 64,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            },
+        },
+    )
+
+
+def _synthetic_build_worker(manifest_path, state_dir, ready, start, builds, results):
+    ready.put("ready")
+    start.wait(30)
+
+    def synthetic_runner(args, **_kwargs):
+        if args[:3] == ["docker", "buildx", "build"]:
+            with builds.get_lock():
+                builds.value += 1
+            _build_metadata(args[args.index("--metadata-file") + 1])
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            args, 0, stdout="sha256:" + "1" * 64 + "\n", stderr=""
+        )
+
+    try:
+        result = local_release.build_local(
+            Path(manifest_path),
+            state_dir=Path(state_dir),
+            execute=True,
+            runner=synthetic_runner,
+        )
+        results.put(result["action"])
+    except Exception as exc:  # pragma: no cover - asserted by parent
+        results.put(f"ERROR: {exc}")
+
+
+def _interrupted_build_worker(manifest_path, state_dir):
+    def interrupted(args, **_kwargs):
+        assert args[:3] == ["docker", "buildx", "build"]
+        _build_metadata(args[args.index("--metadata-file") + 1])
+        os._exit(17)
+
+    local_release.build_local(
+        manifest_path, state_dir=state_dir, execute=True, runner=interrupted
+    )
+
+
+def _reconcile_worker(manifest_path, state_dir, results):
+    try:
+        result = local_release.reconcile_local_build(
+            manifest_path,
+            state_dir=state_dir,
+            inspector=lambda record: {
+                "reuse_key": record["reuse_key"],
+                "image_id": "sha256:" + "1" * 64,
+            },
+        )
+        results.put((result["action"], result["artifact"]["digest"]))
+    except Exception as exc:
+        results.put(("ERROR", str(exc)))
+
+
+@pytest.fixture()
+def digest_build(tmp_path):
+    manifest = {
+        "schema_version": local_release.SCHEMA_VERSION,
+        "repository": "example/service",
+        "service_name": "service",
+        "source": {"sha": "a" * 40},
+        "version": {"tag": "v1.0.0"},
+        "quality": {"status": "PASSED"},
+        "artifact": {
+            "reuse_key": "b" * 64,
+            "local_image": "local/service:v1.0.0",
+            "context": str(tmp_path),
+        },
+    }
+    path = tmp_path / "manifest.json"
+    local_release.write_json(path, manifest)
+    return path, tmp_path / "state"
+
+
+def test_interrupted_build_recovered_by_two_processes(digest_build):
+    manifest_path, state_dir = digest_build
+    context = multiprocessing.get_context("spawn")
+    builder = context.Process(target=_interrupted_build_worker, args=digest_build)
+    builder.start()
+    builder.join(20)
+    assert builder.exitcode == 17
+    results = context.Queue()
+    processes = [
+        context.Process(target=_reconcile_worker, args=(*digest_build, results))
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(20)
+        assert process.exitcode == 0
+    assert sorted([results.get(timeout=5), results.get(timeout=5)]) == [
+        ("reconciled", "sha256:" + "3" * 64),
+        ("reused", "sha256:" + "3" * 64),
+    ]
+    assert (
+        local_release.read_json(manifest_path)["artifact"]["digest"]
+        == "sha256:" + "3" * 64
+    )
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "missing",
+        "malformed",
+        "not-object",
+        "no-digest",
+        "invalid-digest",
+        "config",
+        "same-id",
+        "descriptor",
+        "oci-index",
+        "docker-list",
+    ],
+)
+def test_build_metadata_failures_never_succeed_and_can_reconcile(digest_build, fault):
+    manifest_path, state_dir = digest_build
+    metadata_path = None
+
+    def runner(args, **_kwargs):
+        nonlocal metadata_path
+        if args[:3] == ["docker", "buildx", "build"]:
+            metadata_path = Path(args[args.index("--metadata-file") + 1])
+            if fault != "missing":
+                _build_metadata(metadata_path)
+                metadata = local_release.read_json(metadata_path)
+                if fault == "malformed":
+                    metadata_path.write_text("{", encoding="utf-8")
+                else:
+                    if fault == "not-object":
+                        metadata = []
+                    elif fault == "no-digest":
+                        del metadata["containerimage.digest"]
+                    elif fault == "invalid-digest":
+                        metadata["containerimage.digest"] = "sha256:bad"
+                    elif fault == "config":
+                        metadata["containerimage.config.digest"] = "sha256:" + "2" * 64
+                    elif fault == "same-id":
+                        metadata["containerimage.digest"] = "sha256:" + "1" * 64
+                    elif fault == "descriptor":
+                        metadata["containerimage.descriptor"]["digest"] = (
+                            "sha256:" + "2" * 64
+                        )
+                    elif fault in {"oci-index", "docker-list"}:
+                        metadata["containerimage.descriptor"]["mediaType"] = (
+                            "application/vnd.oci.image.index.v1+json"
+                            if fault == "oci-index"
+                            else "application/vnd.docker.distribution.manifest.list.v2+json"
+                        )
+                    local_release.write_json(metadata_path, metadata)
+        return subprocess.CompletedProcess(args, 0, stdout="sha256:" + "1" * 64)
+
+    with pytest.raises(local_release.ReleaseError):
+        local_release.build_local(
+            manifest_path, state_dir=state_dir, execute=True, runner=runner
+        )
+    assert not local_release.read_json(manifest_path)["artifact"].get("digest")
+    record_path = local_release._artifact_record_path(state_dir, "b" * 64)
+    assert local_release.read_json(record_path)["status"] == "UNKNOWN"
+    with pytest.raises(local_release.ReleaseError, match="reconcile-build"):
+        local_release.build_local(
+            manifest_path, state_dir=state_dir, execute=True, runner=runner
+        )
+
+    def inspector(record):
+        return {
+            "reuse_key": record["reuse_key"],
+            "image_id": "sha256:" + "1" * 64,
+        }
+
+    with pytest.raises(local_release.ReleaseError):
+        local_release.reconcile_local_build(
+            manifest_path, state_dir=state_dir, inspector=inspector
+        )
+    _build_metadata(metadata_path)
+    result = local_release.reconcile_local_build(
+        manifest_path, state_dir=state_dir, inspector=inspector
+    )
+    assert result["artifact"]["digest"] == "sha256:" + "3" * 64
+
+
+@pytest.mark.parametrize("field", ["build_identity", "reuse_key", "image"])
+def test_reconcile_rejects_wrong_identity(digest_build, field):
+    manifest_path, state_dir = digest_build
+    manifest = local_release.read_json(manifest_path)
+    record = {
+        "status": "AVAILABLE",
+        "reuse_key": "b" * 64,
+        "image": manifest["artifact"]["local_image"],
+        "build_identity": local_release._build_identity(manifest),
+    }
+    record[field] = "different"
+    local_release.write_json(
+        local_release._artifact_record_path(state_dir, "b" * 64), record
+    )
+    with pytest.raises(local_release.ReleaseError, match="identity"):
+        local_release.reconcile_local_build(
+            manifest_path,
+            state_dir=state_dir,
+            inspector=lambda _: pytest.fail("must not inspect"),
+        )
+
+
+@pytest.mark.parametrize(
+    "fault", ["missing-digest", "digest", "metadata", "identity", "image"]
+)
+def test_reuse_rejects_incomplete_or_mismatched_record(digest_build, fault):
+    manifest_path, state_dir = digest_build
+    manifest = local_release.read_json(manifest_path)
+    metadata_path = state_dir / "metadata.json"
+    _build_metadata(metadata_path)
+    record = {
+        "status": "AVAILABLE",
+        "reuse_key": "b" * 64,
+        "image": manifest["artifact"]["local_image"],
+        "build_identity": local_release._build_identity(manifest),
+        "image_id": "sha256:" + "1" * 64,
+        "digest": "sha256:" + "3" * 64,
+        "metadata_path": str(metadata_path),
+    }
+    if fault == "missing-digest":
+        del record["digest"]
+    elif fault == "digest":
+        record["digest"] = "sha256:" + "4" * 64
+    elif fault == "metadata":
+        record["metadata_path"] = str(state_dir / "absent.json")
+    elif fault == "identity":
+        del record["build_identity"]
+    else:
+        record["image"] = "different"
+    local_release.write_json(
+        local_release._artifact_record_path(state_dir, "b" * 64), record
+    )
+    with pytest.raises(local_release.ReleaseError):
+        local_release.build_local(manifest_path, state_dir=state_dir, execute=False)
+    assert not local_release.read_json(manifest_path)["artifact"].get("digest")
+
+
+def test_reconcile_available_repairs_manifest_using_metadata(digest_build, monkeypatch):
+    manifest_path, state_dir = digest_build
+    manifest = local_release.read_json(manifest_path)
+    metadata_path = state_dir / "metadata.json"
+    _build_metadata(metadata_path)
+    record = {
+        "status": "AVAILABLE",
+        "reuse_key": "b" * 64,
+        "image": manifest["artifact"]["local_image"],
+        "build_identity": local_release._build_identity(manifest),
+        "metadata_path": str(metadata_path),
+    }
+    local_release.write_json(
+        local_release._artifact_record_path(state_dir, "b" * 64), record
+    )
+    calls = []
+
+    def inspect(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="sha256:" + "1" * 64)
+
+    monkeypatch.setattr(local_release, "run", inspect)
+    assert (
+        local_release.reconcile_local_build(manifest_path, state_dir=state_dir)[
+            "action"
+        ]
+        == "reconciled"
+    )
+    local_release.write_json(manifest_path, manifest)
+    assert (
+        local_release.reconcile_local_build(manifest_path, state_dir=state_dir)[
+            "action"
+        ]
+        == "reused"
+    )
+    assert (
+        local_release.read_json(manifest_path)["artifact"]["digest"]
+        == "sha256:" + "3" * 64
+    )
+    assert len(calls) == 1
+    assert calls[0][:3] == ["docker", "image", "inspect"]
+
+
+@pytest.mark.parametrize(
+    "change", ["source", "version", "quality", "configuration", "build_args"]
+)
+def test_same_reuse_key_does_not_allow_different_build_identity(digest_build, change):
+    manifest_path, state_dir = digest_build
+    manifest = local_release.read_json(manifest_path)
+    record = {
+        "status": "BUILDING",
+        "reuse_key": "b" * 64,
+        "image": manifest["artifact"]["local_image"],
+        "build_identity": local_release._build_identity(manifest),
+    }
+    local_release.write_json(
+        local_release._artifact_record_path(state_dir, "b" * 64), record
+    )
+    if change == "source":
+        manifest["source"]["sha"] = "c" * 40
+    elif change == "version":
+        manifest["version"]["tag"] = "v1.0.1"
+    elif change == "quality":
+        manifest["quality"]["status"] = "FAILED"
+    elif change == "configuration":
+        manifest["catalog"] = {"deployment": {"region": "different"}}
+    else:
+        manifest["artifact"]["inputs"] = {"build_args": {"APP_VERSION": "different"}}
+    local_release.write_json(manifest_path, manifest)
+    with pytest.raises(local_release.ReleaseError, match="identity"):
+        local_release.build_local(
+            manifest_path,
+            state_dir=state_dir,
+            execute=True,
+            runner=lambda *_a, **_k: pytest.fail("must not build"),
+        )
+    with pytest.raises(local_release.ReleaseError, match="identity"):
+        local_release.reconcile_local_build(
+            manifest_path,
+            state_dir=state_dir,
+            inspector=lambda _: pytest.fail("must not inspect"),
+        )
 
 
 def git(repo: Path, *args: str) -> str:
@@ -590,8 +1000,13 @@ def test_local_release_quality_runner_and_local_build_doubles(
     available = {
         "reuse_key": prepared["manifest"]["artifact"]["reuse_key"],
         "status": "AVAILABLE",
-        "image": "cgm-local/reused",
+        "image": prepared["manifest"]["artifact"]["local_image"],
+        "image_id": "sha256:" + "1" * 64,
+        "digest": "sha256:" + "3" * 64,
+        "metadata_path": str(tmp_path / "reused-metadata.json"),
+        "build_identity": local_release._build_identity(prepared["manifest"]),
     }
+    _build_metadata(available["metadata_path"])
     local_release.write_json(
         local_release.state_paths(state_dir / "build")["artifacts"] / "available.json",
         available,
@@ -612,8 +1027,9 @@ def test_local_release_quality_runner_and_local_build_doubles(
         calls.append(args)
         if args[1:3] == ["image", "inspect"]:
             return subprocess.CompletedProcess(
-                args, 0, stdout="sha256:image-id\n", stderr=""
+                args, 0, stdout="sha256:" + "1" * 64 + "\n", stderr=""
             )
+        _build_metadata(args[args.index("--metadata-file") + 1])
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     monkeypatch.setattr(local_release, "run", fake_docker)
@@ -621,8 +1037,110 @@ def test_local_release_quality_runner_and_local_build_doubles(
         manifest_path, state_dir=state_dir / "built", execute=True
     )
     assert built["action"] == "built"
+    assert built["artifact"]["digest"] == "sha256:" + "3" * 64
     assert built["artifact"]["remote_published"] is False
     assert any("--load" in call for call in calls)
+    assert any("--provenance=false" in call for call in calls)
+
+
+def test_two_build_processes_share_one_deterministic_artifact(
+    conventional_repo, tmp_path
+):
+    repo, base_sha = conventional_repo
+    state_dir = tmp_path / "process-state"
+    prepared = local_release.prepare(
+        ROOT, "eng-platform-api", repo, state_dir=state_dir, base_sha=base_sha
+    )
+    manifest_path = tmp_path / "process-manifest.json"
+    value = prepared["manifest"]
+    value["quality"]["status"] = "PASSED"
+    local_release.write_json(manifest_path, value)
+
+    context = multiprocessing.get_context("spawn")
+    ready = context.Queue()
+    start = context.Event()
+    results = context.Queue()
+    builds = context.Value("i", 0)
+
+    processes = [
+        context.Process(
+            target=_synthetic_build_worker,
+            args=(manifest_path, state_dir, ready, start, builds, results),
+        )
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    assert [ready.get(timeout=10), ready.get(timeout=10)] == ["ready", "ready"]
+    start.set()
+    for process in processes:
+        process.join(timeout=30)
+        assert process.exitcode == 0
+
+    actions = sorted([results.get(timeout=10), results.get(timeout=10)])
+    assert actions == ["built", "reused"]
+    assert builds.value == 1
+    artifact_path = local_release._artifact_record_path(
+        state_dir, value["artifact"]["reuse_key"]
+    )
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert artifact["status"] == "AVAILABLE"
+    assert artifact["digest"] == "sha256:" + "3" * 64
+    assert (
+        local_release.read_json(manifest_path)["artifact"]["digest"]
+        == artifact["digest"]
+    )
+    assert artifact["artifact_id"] == f"artifact-{value['artifact']['reuse_key']}"
+
+
+def test_reconcile_build_promotes_observed_image_without_rebuild(tmp_path):
+    value = {
+        "schema_version": local_release.SCHEMA_VERSION,
+        "release_id": "release-build-reconcile",
+        "service_name": "example",
+        "repository": "diegomad14/example",
+        "source": {"sha": "a" * 40, "base_sha": "b" * 40},
+        "version": {"tag": "v1.0.0"},
+        "quality": {"status": "PASSED"},
+        "artifact": {
+            "reuse_key": "c" * 64,
+            "local_image": "local/example:v1.0.0",
+            "context": str(tmp_path),
+        },
+    }
+    manifest_path = tmp_path / "manifest.json"
+    local_release.write_json(manifest_path, value)
+    state_dir = tmp_path / "state"
+    record_path = local_release._artifact_record_path(
+        state_dir, value["artifact"]["reuse_key"]
+    )
+    metadata_path = tmp_path / "metadata.json"
+    _build_metadata(metadata_path, "sha256:" + "2" * 64)
+    local_release.write_json(
+        record_path,
+        {
+            "status": "BUILDING",
+            "reuse_key": value["artifact"]["reuse_key"],
+            "image": value["artifact"]["local_image"],
+            "build_identity": local_release._build_identity(value),
+            "metadata_path": str(metadata_path),
+        },
+    )
+
+    result = local_release.reconcile_local_build(
+        manifest_path,
+        state_dir=state_dir,
+        inspector=lambda record: {
+            "reuse_key": record["reuse_key"],
+            "image_id": "sha256:" + "2" * 64,
+        },
+    )
+
+    assert result["action"] == "reconciled"
+    assert result["artifact"]["status"] == "AVAILABLE"
+    updated = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert updated["artifact"]["image_id"] == "sha256:" + "2" * 64
+    assert updated["artifact"]["digest"] == "sha256:" + "3" * 64
 
 
 def test_local_release_cli_dispatch_and_resume_paths(

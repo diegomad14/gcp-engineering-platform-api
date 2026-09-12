@@ -1,10 +1,12 @@
 # Release local y trazable
 
-Estado: fases 0–5 están implementadas como contratos revisables y dry-run;
-ninguna fase se declara cerrada. El contrato reutilizable de exclusión y
-autorización ya está implementado, pero las mutaciones remotas siguen
-bloqueadas por falta de integración aceptada con Actions y activación remota.
-El lifecycle está documentado en `docs/release/local-lifecycle.md`, 2026-09-09.
+Estado de la continuación del 2026-09-12: releases individuales implementados,
+validación final y despliegue pendientes. El servidor controla la activación
+por servicio, apagada por defecto. El CLI usa una sesión autorizada y conserva
+autorización, reserva, intención y resultado durables. Para servicios adoptados
+se bloquea Actions desde la plataforma; no se exige coordinar API y Web.
+El flujo y responsabilidades actuales están en [local-lifecycle.md](local-lifecycle.md).
+La evidencia histórica no acredita el código modificado posteriormente.
 
 El motor vive en `scripts/release/local_release.py` y solo usa la biblioteca
 estándar de Python para preparar una release local reproducible. El wrapper
@@ -79,6 +81,14 @@ El último comando solo planea el build. Para ejecutarlo localmente se añade
 construye explícitamente para `linux/amd64`, pero no autoriza publicación
 remota.
 
+La reclamación del build se hace bajo el lock local y usa una identidad
+determinista (repositorio, SHA, Dockerfile, contexto, dependencias, argumentos,
+arquitectura, plataforma e imágenes base). Dos procesos concurrentes no
+generan dos artefactos: uno construye y el otro reutiliza el registro
+`<reuse_key>.json`. Los estados `BUILDING` y `UNKNOWN` requieren
+`reconcile-build`; esa reconciliación solo inspecciona la imagen local y no
+reconstruye ni publica.
+
 Un árbol sucio se rechaza para plan, calidad y preparación. `prepare
 --allow-dirty` existe únicamente para inspección local no publicable y deja
 `source.publishable: false` en el manifiesto.
@@ -114,6 +124,12 @@ Por defecto se usa `~/.local/state/cgm-release`; se puede cambiar con
 | `artifacts/` | evidencia de imágenes locales disponibles |
 | `release.lock` | exclusión mutua local; no sustituye una exclusión compartida |
 
+Cuando se ejecuta con fixture, cada mutación controlada añade en el registro de
+ejecución su `control_intents`, lease, identidad de autorización y resultado.
+Una desconexión deja `UNKNOWN`; `resume` expone el estado durable y
+`reconcile_register_release` hace una consulta GET de solo lectura para
+confirmar la identidad exacta sin repetir el POST.
+
 El esquema del manifiesto está en
 `schemas/local-release-manifest.schema.json`. Los estados remotos no se
 simulan: la fase 1 solo registra `remote_effects: []` y deja las etapas
@@ -124,15 +140,16 @@ posteriores en `pending`.
 La publicación de tag/release de GitHub, el push de Artifact Registry, el
 registro en Engineering Platform, el candidate Cloud Run, la promoción y el
 rollback están implementados como comandos separados y guardados en
-`local-lifecycle.md`; todos quedan en dry-run. El modo live además exige un
+`local-lifecycle.md`; el recorrido controlado solo se habilita para fixtures
+explícitos y el CLI normal queda en dry-run. El modo live además exige un
 handshake CLI/Actions aceptado, una autorización previa ligada a identidad y
 una aprobación explícita; mientras esa integración no exista, el motor falla
 cerrado. El adaptador ejecutable está en
 `scripts/release/execution_control.py` y solo habla con el control plane; no
-emite autorizaciones ni ejecuta proveedores. Para SanPlat se debe conservar la ventana corporativa completa:
-captura de estado, preparación, autorización, maintenance/pause, drain,
-migraciones aplicables, promoción de la pareja exacta, validación funcional real
-y reanudación de lo que estaba activo.
+emite autorizaciones ni ejecuta proveedores. El CLI no ofrece una operación
+conjunta SanPlat: todos los candidate/promote/rollback son individuales; los
+historiales conjuntos heredados solo se pueden leer y un estado incierto impide
+la reanudación automática.
 
 El runner local bajo `scripts/ops/local-release-runner/` es una contingencia
 para Actions bloqueado y no se reemplaza ni se confunde con este motor

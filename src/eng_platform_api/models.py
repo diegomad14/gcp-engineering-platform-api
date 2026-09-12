@@ -35,6 +35,8 @@ class ServiceDeploymentConfig(BaseModel):
     artifact_repository: str = "cgm-sanplat-repo"
     build_context: str = "."
     health_path: str = "/"
+    api_base_url: str = ""
+    api_candidate_base_url: str = ""
 
 
 class FinOpsLabels(BaseModel):
@@ -118,6 +120,7 @@ class ReleaseItem(BaseModel):
     version: str
     status: str  # candidate, promoted, rolled_back
     release_id: str = ""
+    release_group_id: str = ""
     source_sha: str = ""
     artifact_digest: str = ""
     revision: str = ""
@@ -133,6 +136,7 @@ class ReleaseCreateRequest(BaseModel):
     version: str
     status: str = "candidate"  # "candidate" | "promoted" | "rolled_back"
     release_id: str = ""
+    release_group_id: str = ""
     source_sha: str = ""
     artifact_digest: str = ""
     services: list[ServiceRevision] = Field(min_length=1)
@@ -242,6 +246,10 @@ class ReleaseExecutionContext(BaseModel):
 
     release_id: str = Field(min_length=1, max_length=128)
     repository: str = Field(min_length=1, max_length=256)
+    # Legacy mock callers may omit this field, but the consumed capability
+    # supplies and persists the catalog service before a lease is granted.
+    service_name: str = Field(default="", max_length=128)
+    release_group_id: Literal[""] = ""
     source_sha: str = Field(
         min_length=40, max_length=64, pattern=r"^[0-9a-fA-F]{40,64}$"
     )
@@ -275,6 +283,45 @@ class ReleaseExecutionAuthorizationConsumeResponse(BaseModel):
     accepted: bool = True
     jti: str
     actor_id: str
+    expires_at: int
+
+
+class ReleaseExecutionAuthorizationIssueRequest(BaseModel):
+    """A deployer's request for one server-validated CLI capability.
+
+    ``actor_id`` is deliberately absent: the API derives it from the OAuth/IAP
+    identity on the request and places that value in the signed capability.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    release_id: str = Field(min_length=1, max_length=128)
+    repository: str = Field(min_length=1, max_length=256)
+    service_name: str = Field(min_length=1, max_length=128)
+    source_sha: str = Field(
+        min_length=40, max_length=64, pattern=r"^[0-9a-fA-F]{40,64}$"
+    )
+    tag: str = Field(min_length=1, max_length=128)
+    artifact_digest: str = Field(default="", max_length=71)
+    target: str = Field(min_length=1, max_length=256)
+    operation: ExecutionOperation
+    configuration_hash: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-fA-F]{64}$"
+    )
+
+    @model_validator(mode="after")
+    def validate_artifact_digest(self) -> "ReleaseExecutionAuthorizationIssueRequest":
+        if self.artifact_digest and not re.fullmatch(
+            r"sha256:[0-9a-fA-F]{64}", self.artifact_digest
+        ):
+            raise ValueError("artifact_digest must be a sha256 digest")
+        return self
+
+
+class ReleaseExecutionAuthorizationIssueResponse(BaseModel):
+    """Short-lived capability. Clients must keep ``token`` out of logs."""
+
+    token: str
     expires_at: int
 
 
@@ -339,6 +386,7 @@ class ExecutionLeaseReconcileRequest(BaseModel):
     scope_key: str = Field(min_length=1, max_length=256)
     owner_id: str = Field(min_length=1, max_length=256)
     generation: int = Field(ge=1)
+    version: int = Field(default=1, ge=1)
     reconciliation_id: str = Field(min_length=1, max_length=128)
     observation: ExecutionReconciliationObservation
     observation_digest: str = Field(
@@ -360,6 +408,7 @@ class ExecutionIntentCreateRequest(ReleaseExecutionContext):
     owner_id: str = Field(min_length=1, max_length=256)
     lease_id: str = Field(min_length=1, max_length=128)
     lease_generation: int = Field(ge=1)
+    lease_version: int = Field(default=1, ge=1)
     authorization_jti: str = Field(min_length=1, max_length=128)
 
     @model_validator(mode="after")
@@ -373,6 +422,8 @@ class ExecutionIntentCreateRequest(ReleaseExecutionContext):
 class ExecutionIntent(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # Response-only grant: only the transaction that creates the intent sets it.
+    created: bool = False
     intent_id: str
     idempotency_key: str
     status: ExecutionIntentStatus
@@ -384,6 +435,7 @@ class ExecutionIntent(BaseModel):
     owner_id: str
     lease_id: str
     lease_generation: int = Field(ge=1)
+    lease_version: int = Field(default=1, ge=1)
     authorization_jti: str
     effect_digest: str
     intent_fingerprint: str
@@ -402,6 +454,7 @@ class ExecutionIntentResultRequest(BaseModel):
     owner_id: str = Field(min_length=1, max_length=256)
     lease_id: str = Field(min_length=1, max_length=128)
     lease_generation: int = Field(ge=1)
+    lease_version: int = Field(default=1, ge=1)
     status: ExecutionResultStatus
     result_digest: str = Field(default="", max_length=64)
     error_code: str = Field(default="", max_length=128)
@@ -421,6 +474,11 @@ class ExecutionIntentReconcileRequest(BaseModel):
     intent_id: str = Field(min_length=1, max_length=256)
     reconciliation_id: str = Field(min_length=1, max_length=128)
     outcome: ExecutionResultStatus
+    scope_key: str = Field(min_length=1, max_length=256)
+    owner_id: str = Field(min_length=1, max_length=256)
+    lease_id: str = Field(min_length=1, max_length=128)
+    lease_generation: int = Field(ge=1)
+    lease_version: int = Field(default=1, ge=1)
     observation_digest: str = Field(
         min_length=64, max_length=64, pattern=r"^[0-9a-fA-F]{64}$"
     )

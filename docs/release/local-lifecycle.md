@@ -1,243 +1,133 @@
-# Ciclo local completo: fases 2 a 5
+# Releases individuales: control remoto, ejecución local
 
-Este documento describe la continuación de la fase 1. El CLI sigue siendo
-local por defecto: `publish`, `candidate`, `promote`, `rollback`, `register`,
-`sanplat` y `adopt` generan un plan y guardan un intento local. Una mutación
-requeriría simultáneamente `--execute`, `--confirm-remote-effects`, exclusión
-compartida y autorización previa; promoción y rollback requieren además
-`PROMOTE_PROD` o `ROLLBACK_PROD`. Ninguna fase 0–5 se considera cerrada. Como
-los dos adaptadores aún no están configurados, el modo live falla cerrado.
+## Estado de esta implementación
 
-## Controles que siguen pendientes
+El comando conjunto `sanplat` y su adaptador ejecutable fueron retirados.
+API y Web usan el mismo ciclo individual que eng-platform, con manifiesto,
+identidad e historial propios. Los registros históricos de agrupación se
+conservan: una ejecución conjunta antigua requiere revisión manual y nunca se
+convierte ni se reanuda automáticamente.
 
-`release_lifecycle.live_control_plan()` deja explícitos los dos cruces que no
-se deben inferir del lock local:
+El código incorpora controles productivos, pero **su presencia no acredita un
+despliegue**. El gate del commit final, Firestore Emulator, candidato real,
+promoción y comprobación productiva deben constar en la evidencia de entrega.
+Las cifras históricas no validan cambios posteriores.
 
-- CLI/CLI: el contrato de lease durable ya está implementado sobre el estado
-  local bloqueado o Firestore configurado; la verificación contra dos hosts aún
-  no está aceptada.
-- CLI/Actions: falta un handshake que coordine esa lease con la concurrencia,
-  dispatch y estado de los workflows protegidos.
+## Responsabilidades
 
-El adaptador local consume una autorización firmada por Engineering Platform y
-la liga a actor, `release_id`, repositorio, SHA, tag, digest, destino,
-operación y configuración. La autorización no puede emitirse desde el CLI, una
-opción local, un manifiesto ni un token de calidad. Los endpoints de control
-solo guardan estado: no contienen callbacks que ejecuten efectos externos.
+| Componente | Responsabilidad |
+|---|---|
+| GitHub | Código, commit revisado, versiones y checks protegidos |
+| eng-platform | Identidad OAuth, autorización por operación, adopción, reserva, intención y resultado |
+| Motor local | Calidad, Docker Buildx y ejecución de efectos autorizados |
+| Firestore | Autorizaciones consumidas y control compartido entre procesos/hosts |
+| Artifact Registry | Imagen identificada por digest |
+| Cloud Run | Candidato sin tráfico y revisión que sirve producción |
 
-Las claves de exclusión son explícitas: `publication:<repository>:<policy>`
-para reservar versión/publicación y `deployment:<service>:<environment-or-group>`
-para reservar un destino canónico. La adquisición, renovación y liberación
-validan propietario, generación y versión; una lease vencida queda sin takeover
-automático. Solo una observación reconciliada `NOT_STARTED` permite un nuevo
-propietario; `COMPLETE` e `INDETERMINATE` no reenvían el efecto. La intención se
-registra antes de actuar y `UNKNOWN` exige reconciliación, sin reintento
-automático.
+Cloud Build no participa en este flujo. No se retira globalmente ni se cambian
+sus permisos. El arranque de la plataforma usa el release vigente, con sus
+gates y autorizaciones; no depende de capacidades aún no desplegadas.
 
-La implementación conserva las protecciones actuales de Actions y el camino de
-autorización del control plane. Los comandos genéricos de candidate, promote y
-rollback rechazan manifiestos SanPlat; solo un adaptador SanPlat revisado y una
-ventana corporativa pueden desbloquear esa coordinación. La activación remota
-del lifecycle permanece deshabilitada y no existe un bypass del CLI.
-
-La API expone el contrato interno en:
-
-- `POST /api/internal/release-execution/authorizations/consume`
-- `POST /api/internal/release-execution/leases/{acquire,renew,release,reconcile}`
-- `POST /api/internal/release-execution/intents`
-- `POST /api/internal/release-execution/intents/{result,reconcile}`
-
-El store local usa `ENG_PLATFORM_RELEASE_CONTROL_STORE_PATH` y bloqueo de
-archivo; es una persistencia durable de un solo host para desarrollo, no una
-prueba de exclusión multi-host. Para producción se debe configurar la
-colección existente mediante `ENG_PLATFORM_RELEASE_CONTROL_FIRESTORE_COLLECTION`
-y conservar el consumo durable de autorizaciones en Firestore.
-
-## Integración local del control — comando dedicado
-
-La integración local reproducible se ejecuta fuera del lifecycle normal con
-`scripts/release/firestore-control-integration`. El comando inicia únicamente
-el emulador oficial mediante `gcloud emulators firestore start` en loopback,
-levanta dos procesos uvicorn de esta API y ejecuta dos clientes independientes
-del adaptador común. Usa un proyecto sintético y colecciones con namespace
-aislado; no modifica el release normal ni habilita proveedores.
-
-Requiere el SDK `google-cloud-firestore` del entorno de desarrollo, el
-componente `cloud-firestore-emulator` y Java 21 o superior. El comando falla
-cerrado si `gcloud`, el emulador o Java no están disponibles, si el host no es
-loopback o si el árbol no está limpio. Nunca sustituye Firestore por JSON,
-TestClient o dobles de transporte/transacciones.
-
-```bash
-OPENJDK_HOME="$(brew --prefix openjdk)/libexec/openjdk.jdk/Contents/Home"
-JAVA_HOME="$OPENJDK_HOME" \
-PATH="$OPENJDK_HOME/bin:/private/tmp/eng-platform-audit-venv.jnvwf7/bin:$PATH" \
-PYTHON_BIN=/private/tmp/eng-platform-audit-venv.jnvwf7/bin/python \
-scripts/release/firestore-control-integration \
-  --evidence-dir /ruta/a/evidencia-firestore-local
+```mermaid
+flowchart TD
+    G["GitHub: commit y versión"] --> Q["Gate oss-v2 por servicio y SHA"]
+    Q --> B["Buildx local: construir una vez"]
+    B --> P["eng-platform: autorizar operación y reservar destino"]
+    P <--> F["Firestore: intención, resultado y conciliación"]
+    P --> A["Artifact Registry: imagen por digest"]
+    A --> C["Cloud Run: candidato individual sin tráfico"]
+    C --> V["Validar candidato e identidad"]
+    V --> U["Nueva autorización: promover revisión exacta"]
+    U --> H["Verificar salud, tráfico y registro durable"]
+    H --> L["Liberar reserva"]
+    H --> R["Fallo confirmado: recuperar revisión anterior"]
+    H --> I["Resultado incierto: conciliar antes de continuar"]
 ```
 
-La suite verifica consumo concurrente de un ticket, competencia de dos
-releases por el mismo servicio/entorno, recursos independientes, claims
-alterados y expirados, pérdida de respuesta, reinicio de API/cliente,
-propietarios obsoletos, expiración, `UNKNOWN`, reconciliación
-`INDETERMINATE`/`NOT_STARTED` y el bloqueo de activación remota/SanPlat. Los
-logs y JSON saneados son evidencia local de integración; no demuestran
-Firestore productivo, multi-host real, Actions, proveedores ni SanPlat.
+Este ciclo se ejecuta separadamente para API, Web o cualquier servicio adoptado.
+No pausa colas, planificadores, dependencias ni otros servicios.
 
-Las rutas del lifecycle también tienen una colección de fixtures loopback en
-`tests/test_release_lifecycle_local_integration.py`. Conserva el transporte
-`urllib` y los subprocesses reales del módulo, pero dirige las llamadas a un
-`ThreadingHTTPServer` y ejecutables sintéticos en un directorio temporal.
-Acredita `register` confirmado, HTTP 503 y respuesta incierta después de
-registrar la intención, candidate con fallo parcial y dry-run sin HTTP ni
-subprocess. Es evidencia `LOCAL_FIXTURE`, no prueba de GitHub, Artifact
-Registry, Cloud Run o SanPlat.
+## Activación y credenciales
 
-El lifecycle exige que cualquier evidencia `PASSED` contenga el reporte
-normalizado existente, su digest, identidad exacta de servicio/repositorio/SHA,
-base y política, checks no incompletos y al menos un check `PASSED`. El gate
-canónico sigue siendo la autoridad y conserva `oss-v2`, diferencial mínimo 80%
-y TTL de 168 horas. La reconciliación de `UNKNOWN` compara además la revisión y
-el digest esperado; una respuesta positiva genérica no habilita continuación.
+El servidor exige `ENG_PLATFORM_LOCAL_RELEASE_ENABLED=true` y que el servicio
+esté incluido en `ENG_PLATFORM_LOCAL_RELEASE_SERVICES` (lista separada por comas).
+Ambos están deshabilitados/vacíos por defecto. En producción requiere además:
 
-El plan SanPlat conserva la pareja, SHA/tag/digest/revisión y el orden de
-ventana, pero marca como bloqueo la ausencia de `API_BASE_URL` explícito en el
-manifiesto Web, las identidades candidatas discordantes, el adaptador revisado,
-la autorización común y la ventana corporativa. No ejecuta ningún paso live.
+- `ENG_PLATFORM_GCP_PROJECT_ID`.
+- `ENG_PLATFORM_RELEASE_CONTROL_FIRESTORE_COLLECTION`.
+- `ENG_PLATFORM_RELEASE_AUTH_FIRESTORE_COLLECTION`.
+- Clave de firma de autorizaciones y lista de operadores permitidos.
+- Ausencia de despliegues anteriores pendientes para el servicio.
 
-## Fase 2 — Publicación idempotente
+Los servicios adoptados no aceptan nuevos dispatches, reintentos ni consumo de
+tickets Actions desde la plataforma, incluso si la ejecución local se apaga
+temporalmente. La adopción no cancela un workflow ya despachado: antes de
+activarla hay que comprobar su terminación. No se modifican branch protections
+ni se omiten gates.
 
-```bash
-./scripts/release/local-release publish \
-  --manifest ~/.local/state/cgm-release/manifests/<release-id>.json \
-  --json
-```
+El CLI usa `ENG_PLATFORM_API_URL` y `ENG_PLATFORM_AUTH_HEADERS_FILE`, archivo
+privado del usuario (sin permisos para grupo/otros) que contiene únicamente
+cabeceras de su sesión autorizada. No pasar cookies o tokens como argumentos,
+ni incluirlos en manifiestos, diarios, reportes o Git. El cliente obtiene el
+actor desde la sesión; solicita la capacidad a eng-platform y la mantiene en
+memoria. Las peticiones con credenciales no siguen redirecciones.
 
-El plan usa un único publicador (`git` + `docker` + `gh`) y, antes de repetir
-un efecto, reconcilia:
+La bandera del CLI no salta controles del servidor. Los adaptadores inyectados
+y transportes sintéticos son para pruebas locales; no acreditan acceso real.
 
-1. digest existente en Artifact Registry;
-2. tag remoto y su SHA completo;
-3. GitHub Release asociada al tag.
+## Ciclo
 
-El modo live no debe hacer push de `main`: publica solo el tag exacto y usa
-`gh release create --verify-tag`. Si una respuesta se pierde, el siguiente
-intento consulta primero el estado real. La creación real queda condicionada a
-una aprobación independiente porque puede activar otros workflows del
-repositorio. El plan también deja una auditoría de solo lectura para `push`,
-`create`, `release`, `deployment`, `deployment_status` y `workflow_run`; usar
-`gh` no suprime los efectos encadenados de GitHub Actions.
+Los comandos `publish`, `candidate`, `register`, `promote` y `rollback`
+generan planes sin efectos por defecto. Para ejecutar requieren `--execute`
+y `--confirm-remote-effects`; promoción y recuperación requieren además
+`--confirm PROMOTE_PROD` o `--confirm ROLLBACK_PROD`.
 
-## Fase 3 — Candidate, registro, promoción y rollback
+1. Fijar catálogo, repositorio, commit limpio, versión y configuración.
+2. Ejecutar calidad canónica `oss-v2`, global según catálogo y diferencial 80%.
+3. Construir una vez con Buildx para `linux/amd64`; conservar digest verificable.
+4. Publicar imagen y versión bajo autorización y reserva de publicación.
+5. Crear candidato individual por digest, sin tráfico, bajo reserva de destino.
+6. Validar identidad y salud; registrar con su intención durable exacta.
+7. Autorizar y promover esa revisión, sin reconstrucción.
+8. Verificar tráfico, salud e historial y liberar la reserva.
 
-```bash
-./scripts/release/local-release candidate \
-  --manifest ~/.local/state/cgm-release/manifests/<release-id>.json \
-  --json
+La reserva de destino usa proyecto/región/servicio. Dos destinos distintos
+pueden avanzar simultáneamente. La publicación usa repositorio/política de
+versionado para evitar colisiones de tags.
 
-./scripts/release/local-release register \
-  --manifest ~/.local/state/cgm-release/manifests/<release-id>.json \
-  --status candidate \
-  --platform-api-url "$ENG_PLATFORM_API_URL" \
-  --json
+`rollback --target-revision <revision>` exige una revisión conocida y verificada.
+Solo cambia tráfico: no reconstruye ni revierte datos o migraciones.
+El registro local exige sesión, intención vigente y payload exacto; el servidor
+rechaza cambios de actor, release, SHA, digest, revisión o fase no autorizados.
 
-./scripts/release/local-release promote \
-  --manifest ~/.local/state/cgm-release/manifests/<release-id>.json \
-  --confirm PROMOTE_PROD \
-  --json
+## Fallos y reanudación
 
-./scripts/release/local-release rollback \
-  --manifest ~/.local/state/cgm-release/manifests/<release-id>.json \
-  --target-revision <known-good-revision> \
-  --confirm ROLLBACK_PROD \
-  --json
-```
+Cada efecto requiere autorización consumida, reserva vigente e intención
+durable antes de ejecutarse. Un intent existente nunca concede otra ejecución.
+Si se pierde una respuesta, se conserva `UNKNOWN`; no se repite el efecto ni se
+toma el bloqueo por vencimiento como prueba de que no ocurrió.
 
-El candidate se despliega directamente con `gcloud run deploy --image
-<image>@sha256:<digest> --no-traffic`; no usa `--source`, Cloud Build ni
-Actions. La promoción verifica `Ready=True`, captura el tráfico actual y mueve
-100% únicamente a la revisión candidate registrada. Si la conexión se pierde
-después del cambio, el intento queda `UNKNOWN` y se exige reconciliación; no se
-re-promueve automáticamente.
+`resume --release-id <id> --reconcile` consulta observaciones y el control
+durable. No despliega, no promueve y no reconstruye automáticamente.
+`reconcile-build` inspecciona una construcción local incierta sin repetirla.
 
-El registro envía `release_id`, `source_sha` y `artifact_digest` a
-`POST /api/releases/`. El control plane conserva esos campos y hace idempotente
-el mismo release por servicio. Un registro local no tiene `github_run_url`: la
-UI lo debe tratar como `Manual/untracked` hasta que exista una representación
-oficial de la ejecución local.
+## Validación y arranque productivo
 
-Rollback solo cambia tráfico a una revisión conocida y saludable. No crea tags,
-no reconstruye la imagen y no revierte migraciones ni mensajes.
+`scripts/release/firestore-control-integration` inicia el emulador oficial y
+dos API locales con proyecto, colecciones y credenciales sintéticos. Exige un
+snapshot limpio y registra el SHA. No sustituye Firestore por JSON ni valida
+producción. Requiere gcloud, Firestore Emulator y Java 21 o superior.
 
-## Fase 4 — Coordinación SanPlat
+Antes del despliegue:
 
-```bash
-./scripts/release/local-release sanplat \
-  --api-manifest ~/.local/state/cgm-release/manifests/<api-release-id>.json \
-  --web-manifest ~/.local/state/cgm-release/manifests/<web-release-id>.json \
-  --release-group-id <corporate-window-id> \
-  --auxiliary-service cgm-bot-api \
-  --json
-```
+1. Completar suite, gate del SHA final y emulador; revisar independientemente.
+2. Confirmar revisión/digest/configuración productivos y recuperación.
+3. Desplegar control compatible mediante el flujo vigente con motor apagado.
+4. Validar autenticación, autorización y persistencia reales con candidato.
+5. Adoptar solo eng-platform-api y completar el release individual real.
+6. Registrar commit, versión del motor, digest, revisión, salud, intención,
+   resultado y reserva liberada. Conciliar cualquier resultado incierto.
 
-El plan conserva los dos `release_id`, los dos digests/revisiones y los
-servicios auxiliares sin cambios. El orden es obligatorio:
-
-`prepare → authorize → capture-state → maintenance → pause-deliveries → drain
-→ migrations (si aplica) → promote-pair → validate-functional → resume`.
-
-La ejecución live está bloqueada hasta registrar un adaptador revisado y una
-ventana corporativa concreta. Esto evita hacer una pausa parcial o promover una
-pareja sin validar Microsoft/SanPlat, persistencia y rechazo anónimo. La fuente
-operativa es [[release_process]] y la política de acceso es
-[[acceso-corporativo-sanplat]]. La configuración Web debe declarar `API_BASE_URL`
-para la revisión candidate y no puede adoptar accidentalmente la URL candidate
-como default productivo.
-
-## Fase 5 — Adopción
-
-```bash
-./scripts/release/local-release adopt \
-  --service eng-platform-api \
-  --repo-path /ruta/al/checkout \
-  --json
-```
-
-El Service Factory también genera `.cgm/local-release.yaml` desde
-`templates/service-factory/local-release.yaml.tpl`. El contrato fija `oss-v2`,
-80% diferencial, 168 horas de vigencia, `linux/amd64`, un publicador único y
-confirmación explícita para efectos remotos.
-
-Durante la transición, los checks protegidos de Actions siguen siendo
-autoridad. Retirar semantic-release, cambiar disparadores, modificar branch
-protection o añadir una acción de UI requiere un cambio independiente aprobado.
-La adopción no deshabilita gates para declarar independencia.
-
-## Reanudación y estados
-
-Todos los comandos guardan registros bajo `CGM_RELEASE_STATE_DIR` (por defecto
-`~/.local/state/cgm-release`). Cada efecto se registra como intención antes de
-ejecutarse y como `CONFIRMED`, `FAILED` o `UNKNOWN` después. `resume` permite
-identificar la primera etapa local segura y devuelve el comando siguiente sin
-mutar nada. Después de una desconexión puede consultar los sistemas reales en
-modo solo lectura:
-
-```bash
-./scripts/release/local-release resume \
-  --release-id <release-id> \
-  --reconcile \
-  --json
-```
-
-Un estado `UNKNOWN` siempre exige esa reconciliación antes de repetir. Si el
-resultado no es concluyente, el motor conserva el estado y detiene la
-continuación; no reconstruye, no crea otro tag y no vuelve a promover por
-defecto.
-
-## Medición pendiente
-
-Todavía no se declara una mejora absoluta de tiempo. Antes del primer uso
-productivo se deben medir por separado preparación, calidad, build frío, build
-caliente, reutilización, upload, GitHub, candidate, ventana corporativa y
-validación. Los `timeout` de workflows no son duraciones observadas.
+No declarar terminado por pasar fixtures o activar una bandera. Si falta una
+sesión autorizada o una autorización excepcional, detener el tramo productivo
+y solicitarla; nunca usar un procedimiento de emergencia automáticamente.

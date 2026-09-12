@@ -2,8 +2,8 @@
 """Guarded lifecycle operations for the local-first release engine.
 
 The module extends phase 1 with phase 2 publication, phase 3 direct
-candidate/promote/rollback operations, a phase 4 SanPlat coordination contract,
-and a phase 5 adoption plan. Every remote effect requires both ``--execute``
+candidate/promote/rollback operations and an individual adoption plan.
+Every remote effect requires both ``--execute``
 and an explicit confirmation flag. Without them the module only calculates and
 records a plan.
 """
@@ -20,23 +20,42 @@ import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 try:  # Works both as a package import and when local_release.py is a script.
     from . import local_release
 except ImportError:  # pragma: no cover - exercised by the executable wrapper.
     import local_release  # type: ignore[no-redef]
 
+try:
+    from .execution_control import (
+        ExecutionContext,
+        PlatformExecutionControlClient,
+        _require_secure_base_url,
+        authenticated_urlopen,
+        deployment_scope_key,
+        publication_scope_key,
+    )
+    from .lifecycle_control import LifecycleControlSession, effect_digest
+except ImportError:  # pragma: no cover - exercised by the executable wrapper.
+    from execution_control import (  # type: ignore[no-redef]
+        ExecutionContext,
+        PlatformExecutionControlClient,
+        _require_secure_base_url,
+        authenticated_urlopen,
+        deployment_scope_key,
+        publication_scope_key,
+    )
+    from lifecycle_control import LifecycleControlSession, effect_digest  # type: ignore[no-redef]
+
 
 REMOTE_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 REVISION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,62}$")
 RELEASE_STATUSES = {"candidate", "promoted", "rolled_back"}
-SANPLAT_SERVICES = frozenset({"cgm-sanplat-api", "cgm-sanplat-web"})
 LIVE_REMOTE_OPERATIONS = frozenset(
     {"publish", "candidate", "register", "promote", "rollback"}
 )
-# This round delivers the reusable control adapter, not operational activation.
-REMOTE_ACTIVATION_ENABLED = False
 
 
 class LifecycleError(local_release.ReleaseError):
@@ -86,6 +105,14 @@ def _runtime(manifest: dict[str, Any]) -> dict[str, Any]:
 
 def _require_remote_identity(manifest: dict[str, Any]) -> None:
     source = _source(manifest)
+    if source.get("repository") and source.get("repository") != manifest.get(
+        "repository"
+    ):
+        raise LifecycleError(
+            "Manifest source repository differs from release repository"
+        )
+    if source.get("reviewed_sha") != source.get("sha"):
+        raise LifecycleError("Manifest reviewed SHA differs from source SHA")
     if source.get("dirty") or not source.get("publishable", False):
         raise LifecycleError("Remote operations require a clean, publishable SHA")
     quality = manifest.get("quality") or {}
@@ -125,6 +152,190 @@ def _service_name(manifest: dict[str, Any]) -> str:
     return name
 
 
+def lifecycle_execution_context(
+    manifest: dict[str, Any], operation: str, actor_id: str, *, target: str = ""
+) -> ExecutionContext:
+    """Build the immutable control-plane context for one manifest operation."""
+    source = _source(manifest)
+    version = manifest.get("version") or {}
+    artifact = _artifact(manifest)
+    project, region = _project_region(manifest)
+    target = str(
+        target
+        or (manifest.get("execution_control") or {}).get("target", "")
+        or f"{project}/{region}/{_service_name(manifest)}"
+    )
+    configuration_hash = str(
+        (manifest.get("execution_control") or {}).get("configuration_hash", "")
+    )
+    if not configuration_hash:
+        configuration_hash = local_release.digest(_deployment(manifest))
+    if operation == "publish":
+        target = str(
+            (manifest.get("execution_control") or {}).get(
+                "target", f"{manifest.get('repository', '')}:oss-v2"
+            )
+        )
+    return ExecutionContext(
+        release_id=str(manifest["release_id"]),
+        repository=str(manifest["repository"]),
+        service_name=_service_name(manifest),
+        release_group_id="",
+        source_sha=str(source.get("sha", "")),
+        tag=str(version.get("tag", "")),
+        operation=operation,
+        actor_id=actor_id,
+        artifact_digest=str(artifact.get("digest", "")),
+        target=target,
+        configuration_hash=configuration_hash,
+    )
+
+
+def _control_scope(manifest: dict[str, Any], operation: str) -> tuple[str, str]:
+    if operation == "publish":
+        return "publication", publication_scope_key(
+            str(manifest["repository"]), "oss-v2"
+        )
+    context = lifecycle_execution_context(manifest, operation, "control-owner")
+    return "deployment", deployment_scope_key(context.target)
+
+
+def _open_lifecycle_control(
+    manifest: dict[str, Any],
+    operation: str,
+    *,
+    execution_control: LifecycleControlSession | None,
+    control_client: PlatformExecutionControlClient | None,
+    authorization_token: str,
+    actor_id: str,
+    owner_id: str,
+    local_fixture: bool,
+    target: str = "",
+) -> LifecycleControlSession | None:
+    if execution_control is not None:
+        if not local_fixture:
+            raise LifecycleError(
+                "Injected lifecycle control requires explicit local fixture mode"
+            )
+        expected = lifecycle_execution_context(
+            manifest,
+            operation,
+            actor_id or execution_control.context.actor_id,
+            target=target,
+        )
+        if execution_control.context != expected:
+            raise LifecycleError(
+                "Injected control context does not match lifecycle identity"
+            )
+        return execution_control
+    if control_client is None:
+        _require_live_controls(manifest, operation)
+        return None
+    context = lifecycle_execution_context(manifest, operation, actor_id, target=target)
+    scope, scope_key = _control_scope(manifest, operation)
+    return LifecycleControlSession.open(
+        control_client,
+        context,
+        token=authorization_token,
+        owner_id=owner_id,
+        scope=scope,
+        scope_key=scope_key,
+    )
+
+
+def _open_control_or_record(
+    manifest: dict[str, Any],
+    operation: str,
+    execution: dict[str, Any],
+    execution_path: Path,
+    **kwargs: Any,
+) -> LifecycleControlSession | None:
+    """Persist a failed attempt when control acquisition is rejected."""
+    try:
+        return _open_lifecycle_control(manifest, operation, **kwargs)
+    except Exception as exc:
+        execution["status"] = "FAILED"
+        execution["error"] = str(exc)
+        event(
+            execution,
+            stage=operation,
+            intent="require authorization and durable lifecycle lease",
+            result="FAILED",
+            remote_effect=False,
+            detail=str(exc),
+        )
+        save_execution(execution_path, execution)
+        raise
+
+
+def _attach_control(
+    execution: dict[str, Any],
+    execution_path: Path,
+    control: LifecycleControlSession | None,
+) -> None:
+    if control is not None:
+        execution["control"] = control.metadata()
+        save_execution(execution_path, execution)
+
+
+def _controlled_effect(
+    control: LifecycleControlSession | None,
+    execution: dict[str, Any],
+    execution_path: Path,
+    *,
+    stage: str,
+    intent: str,
+    effect_key: str,
+    command: list[str],
+    callback: Any,
+) -> Any:
+    if control is not None:
+        return control.run_effect(
+            execution=execution,
+            stage=stage,
+            intent=intent,
+            effect_key=effect_key,
+            effect=callback,
+            emit=event,
+            persist=lambda: save_execution(execution_path, execution),
+            command=command,
+        )
+    event(
+        execution,
+        stage=stage,
+        intent=intent,
+        result="INTENT_RECORDED",
+        remote_effect=True,
+        command=command,
+    )
+    return callback()
+
+
+def _finish_control(
+    execution: dict[str, Any],
+    execution_path: Path,
+    control: LifecycleControlSession | None,
+    *,
+    final_status: str,
+) -> None:
+    if control is None:
+        return
+    released = control.finish(final_status=final_status)
+    if released is not None:
+        execution.setdefault("control_events", []).append(
+            {"stage": "release", "result": "CONFIRMED", "status": released.status}
+        )
+        event(
+            execution,
+            stage="release",
+            intent="release lifecycle lease after terminal result",
+            result="CONFIRMED",
+            remote_effect=False,
+            detail=f"lease_id={released.lease_id}",
+        )
+        save_execution(execution_path, execution)
+
+
 def live_control_plan(manifest: dict[str, Any], operation: str) -> dict[str, Any]:
     """Describe controls required before any local remote mutation.
 
@@ -143,12 +354,6 @@ def live_control_plan(manifest: dict[str, Any], operation: str) -> dict[str, Any
         for item in inventory.get("files", [])
         if isinstance(item, dict) and item.get("release")
     ]
-    service_name = str(manifest.get("service_name", ""))
-    sanplat_generic = service_name in SANPLAT_SERVICES and operation in {
-        "candidate",
-        "promote",
-        "rollback",
-    }
     return {
         "status": "BLOCKED",
         "operation": operation,
@@ -180,14 +385,9 @@ def live_control_plan(manifest: dict[str, Any], operation: str) -> dict[str, Any
             "external_effects": [],
         },
         "remote_activation": {
-            "enabled": REMOTE_ACTIVATION_ENABLED,
+            "enabled": False,
+            "authority": "Engineering Platform authenticated per-service authorization",
             "cli_override_supported": False,
-        },
-        "sanplat_generic_bypass": {
-            "status": "BLOCKED" if sanplat_generic else "NOT_APPLICABLE",
-            "service": service_name,
-            "operation": operation,
-            "adapter_required": sanplat_generic,
         },
         "reason": (
             "No reviewed local shared-exclusion and authorization adapter is "
@@ -200,16 +400,6 @@ def _require_live_controls(manifest: dict[str, Any], operation: str) -> None:
     """Fail closed until local execution can coordinate with platform controls."""
     if operation not in LIVE_REMOTE_OPERATIONS:
         raise LifecycleError(f"Unsupported live operation: {operation}")
-    service_name = _service_name(manifest)
-    if service_name in SANPLAT_SERVICES and operation in {
-        "candidate",
-        "promote",
-        "rollback",
-    }:
-        raise LifecycleError(
-            "SanPlat generic lifecycle commands are blocked; use the reviewed "
-            "SanPlat adapter and corporate-window record"
-        )
     raise LifecycleError(
         f"Live {operation} is blocked: remote activation is disabled; shared "
         "CLI/CLI and CLI/Actions exclusion plus prior platform authorization "
@@ -547,17 +737,41 @@ def publish(
     state_dir: Path,
     execute: bool,
     confirm_remote_effects: bool,
+    execution_control: LifecycleControlSession | None = None,
+    control_client: PlatformExecutionControlClient | None = None,
+    authorization_token: str = "",
+    actor_id: str = "",
+    owner_id: str = "",
+    local_fixture: bool = False,
 ) -> dict[str, Any]:
     manifest = load_manifest(manifest_path)
     plan = publication_plan(manifest)
     _require_confirmation(execute, confirm_remote_effects)
     if execute:
-        _require_live_controls(manifest, "publish")
+        if execution_control is None and control_client is None:
+            _require_live_controls(manifest, "publish")
         _require_remote_identity(manifest)
     execution, execution_path = begin_execution(
         manifest, state_dir, "publish", dry_run=not execute
     )
     execution["manifest_path"] = str(manifest_path.resolve())
+    control = (
+        _open_control_or_record(
+            manifest,
+            "publish",
+            execution,
+            execution_path,
+            execution_control=execution_control,
+            control_client=control_client,
+            authorization_token=authorization_token,
+            actor_id=actor_id,
+            owner_id=owner_id,
+            local_fixture=local_fixture,
+        )
+        if execute
+        else None
+    )
+    _attach_control(execution, execution_path, control)
     if not execute:
         event(
             execution,
@@ -577,12 +791,10 @@ def publish(
     if not image:
         raise LifecycleError("Manifest has no image reference to publish")
     try:
+        expected_digest = _require_digest(manifest)
         remote_digest = _remote_artifact_digest(image)
         if remote_digest:
-            expected = str(artifact.get("digest", ""))
-            if expected and remote_digest != (
-                expected if expected.startswith("sha256:") else f"sha256:{expected}"
-            ):
+            if remote_digest != expected_digest:
                 raise LifecycleError(
                     "Artifact Registry tag already points to another digest"
                 )
@@ -600,27 +812,33 @@ def publish(
             local_image = str(artifact.get("local_image", ""))
             if not local_image:
                 raise LifecycleError("Manifest has no local image to upload")
-            event(
+            _controlled_effect(
+                control,
                 execution,
+                execution_path,
                 stage="publish-artifact",
                 intent="tag local image for Artifact Registry",
-                result="INTENT_RECORDED",
-                remote_effect=True,
+                effect_key="artifact-tag",
                 command=["docker", "tag", local_image, image],
+                callback=lambda: _run_command(
+                    ["docker", "tag", local_image, image], timeout=120
+                ),
             )
-            _run_command(["docker", "tag", local_image, image], timeout=120)
-            event(
+            _controlled_effect(
+                control,
                 execution,
+                execution_path,
                 stage="publish-artifact",
                 intent="push image to Artifact Registry",
-                result="INTENT_RECORDED",
-                remote_effect=True,
+                effect_key="artifact-push",
                 command=["docker", "push", image],
+                callback=lambda: _run_command(["docker", "push", image], timeout=1800),
             )
-            _run_command(["docker", "push", image], timeout=1800)
             remote_digest = _remote_artifact_digest(image)
             if not remote_digest:
                 raise LifecycleError("Image push completed without a verifiable digest")
+            if remote_digest != expected_digest:
+                raise LifecycleError("Published image differs from the expected digest")
             artifact["digest"] = remote_digest
             artifact["remote_published"] = True
             event(
@@ -656,31 +874,41 @@ def publish(
                 )
             if not local_tag:
                 notes = str((manifest.get("version") or {}).get("notes", "")).strip()
-                _run_command(
-                    [
-                        "git",
-                        "tag",
-                        "-a",
-                        tag,
-                        source_sha,
-                        "-m",
-                        notes or f"Release {tag}",
-                    ],
-                    cwd=repo,
-                    timeout=60,
+                _controlled_effect(
+                    control,
+                    execution,
+                    execution_path,
+                    stage="publish-git",
+                    intent="create exact local release tag",
+                    effect_key="git-tag",
+                    command=["git", "tag", "-a", tag, source_sha],
+                    callback=lambda: _run_command(
+                        [
+                            "git",
+                            "tag",
+                            "-a",
+                            tag,
+                            source_sha,
+                            "-m",
+                            notes or f"Release {tag}",
+                        ],
+                        cwd=repo,
+                        timeout=60,
+                    ),
                 )
-            event(
+            _controlled_effect(
+                control,
                 execution,
+                execution_path,
                 stage="publish-git",
                 intent="push exact tag to origin",
-                result="INTENT_RECORDED",
-                remote_effect=True,
+                effect_key="git-push",
                 command=["git", "push", "origin", f"refs/tags/{tag}:refs/tags/{tag}"],
-            )
-            _run_command(
-                ["git", "push", "origin", f"refs/tags/{tag}:refs/tags/{tag}"],
-                cwd=repo,
-                timeout=180,
+                callback=lambda: _run_command(
+                    ["git", "push", "origin", f"refs/tags/{tag}:refs/tags/{tag}"],
+                    cwd=repo,
+                    timeout=180,
+                ),
             )
             if _remote_tag_target(repo, tag) != source_sha:
                 raise LifecycleError(
@@ -717,15 +945,16 @@ def publish(
                     "--notes-file",
                     notes_file.name,
                 ]
-                event(
+                _controlled_effect(
+                    control,
                     execution,
+                    execution_path,
                     stage="publish-github",
                     intent="create GitHub Release after exact tag verification",
-                    result="INTENT_RECORDED",
-                    remote_effect=True,
+                    effect_key="github-release",
                     command=command,
+                    callback=lambda: _run_command(command, timeout=180),
                 )
-                _run_command(command, timeout=180)
             release = _release_view(repository, tag)
             if release is None:
                 raise LifecycleError("GitHub Release was not visible after creation")
@@ -739,12 +968,20 @@ def publish(
         )
         _mark_phase(manifest, "phase-2")
         _write_manifest(manifest_path, manifest)
+        _finish_control(execution, execution_path, control, final_status="CONFIRMED")
         execution["status"] = "SUCCEEDED"
         execution["current_stage"] = "publish-github"
     except Exception as exc:
         if _artifact(manifest).get("remote_published"):
             _mark_phase(manifest, "phase-2")
             _write_manifest(manifest_path, manifest)
+        if control is not None and not control.unknown:
+            try:
+                _finish_control(
+                    execution, execution_path, control, final_status="FAILED"
+                )
+            except Exception as control_exc:
+                execution.setdefault("control_errors", []).append(str(control_exc))
         execution["status"] = (
             "UNKNOWN"
             if execution.get("remote_effects") or execution.get("events")
@@ -768,6 +1005,200 @@ def publish(
         "execution": execution,
         "execution_path": str(execution_path),
     }
+
+
+def _provider_identity(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Immutable provider identity; never derive ownership from service latest."""
+    return {
+        "repository": manifest["repository"],
+        "source_sha": _source(manifest)["sha"],
+        "release_id": manifest["release_id"],
+        "service": _service_name(manifest),
+        "project_region": list(_project_region(manifest)),
+        "digest": _require_digest(manifest),
+        "configuration": local_release.digest(
+            {
+                "catalog": manifest.get("catalog"),
+                "configuration_hash": (manifest.get("execution_control") or {}).get(
+                    "configuration_hash"
+                ),
+                "base_sha": _source(manifest).get("base_sha"),
+                "reuse_key": _artifact(manifest).get("reuse_key"),
+            }
+        ),
+    }
+
+
+def _provider_labels(identity: dict[str, Any]) -> dict[str, str]:
+    return {
+        "cgm-repository": local_release.digest(identity["repository"])[:63],
+        "cgm-sha": identity["source_sha"],
+        "cgm-release": local_release.digest(identity["release_id"])[:63],
+        "cgm-config": identity["configuration"][:63],
+    }
+
+
+def _candidate_identity(manifest: dict[str, Any]) -> dict[str, Any]:
+    identity = _provider_identity(manifest)
+    suffix = "cgm-" + local_release.digest(identity)[:20]
+    revision = f"{identity['service']}-{suffix}"
+    if not REVISION_RE.fullmatch(revision):
+        raise LifecycleError("Service name is too long for a deterministic revision")
+    return {**identity, "revision": revision}
+
+
+def _describe_provider_revision(identity: dict[str, Any]) -> dict[str, Any]:
+    project, region = identity["project_region"]
+    return _json_command(
+        [
+            "gcloud",
+            "run",
+            "revisions",
+            "describe",
+            identity["revision"],
+            "--project",
+            project,
+            "--region",
+            region,
+            "--format=json",
+        ]
+    )
+
+
+def _verify_provider_revision(value: dict[str, Any], identity: dict[str, Any]) -> None:
+    metadata = value.get("metadata") or {}
+    labels = metadata.get("labels") or {}
+    if metadata.get("name") != identity["revision"]:
+        raise LifecycleError("Provider revision identity mismatch")
+    if labels.get("serving.knative.dev/service") != identity["service"]:
+        raise LifecycleError("Provider service identity mismatch")
+    if any(
+        labels.get(key) != expected
+        for key, expected in _provider_labels(identity).items()
+    ):
+        raise LifecycleError("Provider repository/SHA/config/release labels mismatch")
+    if _revision_digest(value) != identity["digest"]:
+        raise LifecycleError("Provider revision digest mismatch")
+    if not _revision_ready(value):
+        raise LifecycleError("Provider revision is not Ready")
+
+
+def _known_revision(
+    manifest: dict[str, Any], revision: str, state_dir: Path | None = None
+) -> dict[str, Any]:
+    record = (_runtime(manifest).get("known_revisions") or {}).get(revision)
+    if record is None and state_dir is not None:
+        matches = []
+        for path in local_release.state_paths(state_dir)["manifests"].glob("*.json"):
+            try:
+                previous = load_manifest(path)
+                production = _runtime(previous).get("production") or {}
+                if (
+                    previous.get("repository") != manifest["repository"]
+                    or _service_name(previous) != _service_name(manifest)
+                    or _project_region(previous) != _project_region(manifest)
+                    or production.get("revision") != revision
+                    or production.get("digest") != _require_digest(previous)
+                ):
+                    continue
+                identity = {**_provider_identity(previous), "revision": revision}
+                matches.append(identity)
+            except (LifecycleError, KeyError, TypeError):
+                continue
+        unique = {local_release.digest(value): value for value in matches}
+        if len(unique) > 1:
+            raise LifecycleError(
+                "Previous revision has conflicting local identity records"
+            )
+        if unique:
+            record = next(iter(unique.values()))
+            _runtime(manifest).setdefault("known_revisions", {})[revision] = record
+    if not isinstance(record, dict) or record.get("revision") != revision:
+        raise LifecycleError("Revision has no prior known identity record")
+    if any(
+        record.get(key) != expected
+        for key, expected in {
+            "repository": manifest["repository"],
+            "service": _service_name(manifest),
+            "project_region": list(_project_region(manifest)),
+        }.items()
+    ):
+        raise LifecycleError(
+            "Known revision belongs to another repository or destination"
+        )
+    if (
+        not record.get("release_id")
+        or not re.fullmatch(r"[0-9a-f]{40}", str(record.get("source_sha", "")))
+        or not REMOTE_DIGEST_RE.fullmatch(str(record.get("digest", "")))
+        or not SHA256_RE.fullmatch(str(record.get("configuration", "")))
+    ):
+        raise LifecycleError("Known revision identity is incomplete")
+    return record
+
+
+def reconcile_candidate_deploy(
+    manifest_path: Path,
+    *,
+    control_client: PlatformExecutionControlClient,
+    execution_path: Path,
+    intent_id: str,
+    reconciliation_id: str,
+) -> dict[str, Any]:
+    """Observe a lost deploy response without deploying or assigning traffic."""
+    manifest = load_manifest(manifest_path)
+    identity = _candidate_identity(manifest)
+    if _runtime(manifest).get("candidate_deployment") != identity:
+        raise LifecycleError("Candidate has no matching persisted deployment identity")
+    intent = control_client.get_intent(intent_id)
+    if intent is None:
+        raise LifecycleError("Candidate deploy intent was not found")
+    # The intent must belong to this exact deploy, not another release/effect.
+    command = candidate_plan(manifest)["commands"][0]["argv"]
+    execution = local_release.read_json(execution_path)
+    metadata = execution.get("control") or {}
+    context = metadata.get("context") or {}
+    expected_context = lifecycle_execution_context(
+        manifest, "candidate", context.get("actor_id", "")
+    )
+    expected_effect = effect_digest(
+        {
+            "context": expected_context.as_payload(),
+            "scope_key": _control_scope(manifest, "candidate")[1],
+            "stage": "candidate-deploy",
+            "effect_key": "candidate-deploy",
+            "command": command,
+        }
+    )
+    matches = [
+        item
+        for item in execution.get("control_intents", [])
+        if item.get("intent_id") == intent_id
+        and item.get("stage") == "candidate-deploy"
+        and item.get("effect_digest") == expected_effect
+    ]
+    if (
+        context != expected_context.as_payload()
+        or intent.context != expected_context.as_payload()
+        or intent.effect_digest != expected_effect
+        or len(matches) != 1
+        or intent.scope_key != metadata.get("scope_key")
+        or intent.owner_id != metadata.get("owner_id")
+        or intent.lease_id != (metadata.get("lease") or {}).get("lease_id")
+        or intent.lease_generation != (metadata.get("lease") or {}).get("generation")
+    ):
+        raise LifecycleError("Candidate deploy intent identity mismatch")
+    observation = _describe_provider_revision(identity)
+    _verify_provider_revision(observation, identity)
+    reconciled = reconcile_control_intent(
+        control_client,
+        intent_id,
+        reconciliation_id=reconciliation_id,
+        outcome="CONFIRMED",
+        observation_digest=local_release.digest(observation),
+    )
+    _runtime(manifest)["candidate_deploy_reconciled"] = identity
+    _write_manifest(manifest_path, manifest)
+    return {"status": "CONFIRMED", "identity": identity, "intent": reconciled}
 
 
 def candidate_plan(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -794,6 +1225,15 @@ def candidate_plan(manifest: dict[str, Any]) -> dict[str, Any]:
                     "--image",
                     image,
                     "--no-traffic",
+                    "--revision-suffix",
+                    _candidate_identity(manifest)["revision"][len(service) + 1 :],
+                    "--labels",
+                    ",".join(
+                        f"{key}={value}"
+                        for key, value in _provider_labels(
+                            _provider_identity(manifest)
+                        ).items()
+                    ),
                     "--quiet",
                 ],
                 effect="Cloud Run candidate revision",
@@ -867,7 +1307,9 @@ def _probe(url: str, path: str, *, expected: set[int] = {200}) -> dict[str, Any]
     return {"url": target, "status": status, "body_prefix": body}
 
 
-def _candidate_url(service_value: dict[str, Any], candidate_tag: str) -> str:
+def _candidate_url(
+    service_value: dict[str, Any], candidate_tag: str, revision: str = ""
+) -> str:
     traffic = (service_value.get("status") or {}).get("traffic") or []
     for item in traffic:
         if (
@@ -875,6 +1317,8 @@ def _candidate_url(service_value: dict[str, Any], candidate_tag: str) -> str:
             and item.get("tag") == candidate_tag
             and item.get("url")
         ):
+            if revision and item.get("revisionName") != revision:
+                raise LifecycleError("Candidate URL tag points to another revision")
             return str(item["url"])
     raise LifecycleError("Cloud Run did not return a URL for the candidate tag")
 
@@ -885,18 +1329,42 @@ def candidate(
     state_dir: Path,
     execute: bool,
     confirm_remote_effects: bool,
+    execution_control: LifecycleControlSession | None = None,
+    control_client: PlatformExecutionControlClient | None = None,
+    authorization_token: str = "",
+    actor_id: str = "",
+    owner_id: str = "",
+    local_fixture: bool = False,
 ) -> dict[str, Any]:
     manifest = load_manifest(manifest_path)
     plan = candidate_plan(manifest)
     _require_confirmation(execute, confirm_remote_effects)
     if execute:
-        _require_live_controls(manifest, "candidate")
+        if execution_control is None and control_client is None:
+            _require_live_controls(manifest, "candidate")
         _require_remote_identity(manifest)
         _require_digest(manifest)
     execution, execution_path = begin_execution(
         manifest, state_dir, "candidate", dry_run=not execute
     )
     execution["manifest_path"] = str(manifest_path.resolve())
+    control = (
+        _open_control_or_record(
+            manifest,
+            "candidate",
+            execution,
+            execution_path,
+            execution_control=execution_control,
+            control_client=control_client,
+            authorization_token=authorization_token,
+            actor_id=actor_id,
+            owner_id=owner_id,
+            local_fixture=local_fixture,
+        )
+        if execute
+        else None
+    )
+    _attach_control(execution, execution_path, control)
     if not execute:
         event(
             execution,
@@ -912,71 +1380,30 @@ def candidate(
         }
     project, region = _project_region(manifest)
     service = _service_name(manifest)
-    image = _image_with_digest(manifest)
     try:
-        deploy_command = [
-            "gcloud",
-            "run",
-            "deploy",
-            service,
-            "--project",
-            project,
-            "--region",
-            region,
-            "--image",
-            image,
-            "--no-traffic",
-            "--quiet",
-        ]
-        event(
-            execution,
-            stage="candidate-deploy",
-            intent="deploy exact digest with no traffic",
-            result="INTENT_RECORDED",
-            remote_effect=True,
-            command=deploy_command,
-        )
-        _run_command(deploy_command, timeout=1800)
-        service_value = _json_command(
-            [
-                "gcloud",
-                "run",
-                "services",
-                "describe",
-                service,
-                "--project",
-                project,
-                "--region",
-                region,
-                "--format=json",
-            ]
-        )
-        revision = str(
-            (service_value.get("status") or {}).get("latestCreatedRevisionName", "")
-        )
-        if not REVISION_RE.fullmatch(revision):
-            raise LifecycleError("Cloud Run did not return a valid candidate revision")
-        revision_value = _json_command(
-            [
-                "gcloud",
-                "run",
-                "revisions",
-                "describe",
-                revision,
-                "--project",
-                project,
-                "--region",
-                region,
-                "--format=json",
-            ]
-        )
-        revision_digest = str(
-            (revision_value.get("status") or {}).get("imageDigest", "")
-        )
-        if revision_digest != _require_digest(manifest):
-            raise LifecycleError(
-                "Candidate revision image digest differs from the published digest"
+        identity = _candidate_identity(manifest)
+        runtime = _runtime(manifest)
+        prior = runtime.get("candidate_deployment")
+        if prior is not None and prior != identity:
+            raise LifecycleError("Persisted candidate deployment identity mismatch")
+        runtime["candidate_deployment"] = identity
+        _write_manifest(manifest_path, manifest)
+        deploy_command = plan["commands"][0]["argv"]
+        if prior is None:
+            _controlled_effect(
+                control,
+                execution,
+                execution_path,
+                stage="candidate-deploy",
+                intent="deploy exact digest with no traffic",
+                effect_key="candidate-deploy",
+                command=deploy_command,
+                callback=lambda: _run_command(deploy_command, timeout=1800),
             )
+        revision = identity["revision"]
+        revision_value = _describe_provider_revision(identity)
+        _verify_provider_revision(revision_value, identity)
+        revision_digest = identity["digest"]
         candidate_tag = _candidate_tag(manifest)
         traffic_command = [
             "gcloud",
@@ -992,15 +1419,16 @@ def candidate(
             f"{candidate_tag}={revision}",
             "--quiet",
         ]
-        event(
+        _controlled_effect(
+            control,
             execution,
+            execution_path,
             stage="candidate-tag",
             intent="tag exact zero-traffic candidate",
-            result="INTENT_RECORDED",
-            remote_effect=True,
+            effect_key="candidate-tag",
             command=traffic_command,
+            callback=lambda: _run_command(traffic_command, timeout=300),
         )
-        _run_command(traffic_command, timeout=300)
         service_value = _json_command(
             [
                 "gcloud",
@@ -1015,7 +1443,7 @@ def candidate(
                 "--format=json",
             ]
         )
-        url = _candidate_url(service_value, candidate_tag)
+        url = _candidate_url(service_value, candidate_tag, revision)
         probe = _probe(url, str(_deployment(manifest).get("health_path", "/")))
         runtime = _runtime(manifest)
         runtime["candidate"] = {
@@ -1026,6 +1454,7 @@ def candidate(
             "probe": probe,
             "created_at": local_release.iso(local_release.utc_now()),
         }
+        runtime.setdefault("known_revisions", {})[revision] = identity
         event(
             execution,
             stage="candidate-validate",
@@ -1036,11 +1465,19 @@ def candidate(
         )
         _mark_phase(manifest, "phase-3")
         _write_manifest(manifest_path, manifest)
+        _finish_control(execution, execution_path, control, final_status="CONFIRMED")
         execution["status"] = "SUCCEEDED"
     except Exception as exc:
         if execution.get("remote_effects"):
             _mark_phase(manifest, "phase-3")
             _write_manifest(manifest_path, manifest)
+        if control is not None and not control.unknown:
+            try:
+                _finish_control(
+                    execution, execution_path, control, final_status="FAILED"
+                )
+            except Exception as control_exc:
+                execution.setdefault("control_errors", []).append(str(control_exc))
         execution["status"] = (
             "UNKNOWN"
             if execution.get("remote_effects") or execution.get("events")
@@ -1154,12 +1591,19 @@ def promote(
     execute: bool,
     confirm_remote_effects: bool,
     confirmation: str,
+    execution_control: LifecycleControlSession | None = None,
+    control_client: PlatformExecutionControlClient | None = None,
+    authorization_token: str = "",
+    actor_id: str = "",
+    owner_id: str = "",
+    local_fixture: bool = False,
 ) -> dict[str, Any]:
     manifest = load_manifest(manifest_path)
     plan = promote_plan(manifest)
     _require_confirmation(execute, confirm_remote_effects)
     if execute:
-        _require_live_controls(manifest, "promote")
+        if execution_control is None and control_client is None:
+            _require_live_controls(manifest, "promote")
         if confirmation != "PROMOTE_PROD":
             raise LifecycleError("Promotion requires --confirm PROMOTE_PROD")
         _require_remote_identity(manifest)
@@ -1175,6 +1619,23 @@ def promote(
         manifest, state_dir, "promote", dry_run=not execute
     )
     execution["manifest_path"] = str(manifest_path.resolve())
+    control = (
+        _open_control_or_record(
+            manifest,
+            "promote",
+            execution,
+            execution_path,
+            execution_control=execution_control,
+            control_client=control_client,
+            authorization_token=authorization_token,
+            actor_id=actor_id,
+            owner_id=owner_id,
+            local_fixture=local_fixture,
+        )
+        if execute
+        else None
+    )
+    _attach_control(execution, execution_path, control)
     if not execute:
         event(
             execution,
@@ -1211,8 +1672,10 @@ def promote(
                 "--format=json",
             ]
         )
-        if not _revision_ready(revision_value):
-            raise LifecycleError("Candidate revision is not Ready")
+        identity = _candidate_identity(manifest)
+        if revision != identity["revision"]:
+            raise LifecycleError("Candidate revision identity mismatch")
+        _verify_provider_revision(revision_value, identity)
         service_value = _json_command(
             [
                 "gcloud",
@@ -1231,11 +1694,17 @@ def promote(
         previous_revision = _active_revision(traffic)
         if not previous_revision:
             raise LifecycleError("Unable to capture an active production revision")
+        previous_identity = _known_revision(manifest, previous_revision, state_dir)
+        _verify_provider_revision(
+            _describe_provider_revision(previous_identity), previous_identity
+        )
         _runtime(manifest)["promotion"] = {
             "previous_traffic": traffic,
             "previous_revision": previous_revision,
+            "previous_identity": previous_identity,
             "captured_at": local_release.iso(local_release.utc_now()),
         }
+        _write_manifest(manifest_path, manifest)
         event(
             execution,
             stage="snapshot",
@@ -1258,15 +1727,16 @@ def promote(
             f"{revision}=100",
             "--quiet",
         ]
-        event(
+        _controlled_effect(
+            control,
             execution,
+            execution_path,
             stage="promote",
             intent="move production traffic to exact candidate revision",
-            result="INTENT_RECORDED",
-            remote_effect=True,
+            effect_key="promote-traffic",
             command=command,
+            callback=lambda: _run_command(command, timeout=600),
         )
-        _run_command(command, timeout=600)
         after = _json_command(
             [
                 "gcloud",
@@ -1309,11 +1779,19 @@ def promote(
         )
         _mark_phase(manifest, "phase-3")
         _write_manifest(manifest_path, manifest)
+        _finish_control(execution, execution_path, control, final_status="CONFIRMED")
         execution["status"] = "SUCCEEDED"
     except Exception as exc:
         if execution.get("remote_effects"):
             _mark_phase(manifest, "phase-3")
             _write_manifest(manifest_path, manifest)
+        if control is not None and not control.unknown:
+            try:
+                _finish_control(
+                    execution, execution_path, control, final_status="FAILED"
+                )
+            except Exception as control_exc:
+                execution.setdefault("control_errors", []).append(str(control_exc))
         execution["status"] = (
             "UNKNOWN"
             if execution.get("remote_effects") or execution.get("events")
@@ -1412,12 +1890,19 @@ def rollback(
     execute: bool,
     confirm_remote_effects: bool,
     confirmation: str,
+    execution_control: LifecycleControlSession | None = None,
+    control_client: PlatformExecutionControlClient | None = None,
+    authorization_token: str = "",
+    actor_id: str = "",
+    owner_id: str = "",
+    local_fixture: bool = False,
 ) -> dict[str, Any]:
     manifest = load_manifest(manifest_path)
     plan = rollback_plan(manifest, target_revision)
     _require_confirmation(execute, confirm_remote_effects)
     if execute:
-        _require_live_controls(manifest, "rollback")
+        if execution_control is None and control_client is None:
+            _require_live_controls(manifest, "rollback")
         if confirmation != "ROLLBACK_PROD":
             raise LifecycleError("Rollback requires --confirm ROLLBACK_PROD")
         target = target_revision or str(
@@ -1429,6 +1914,23 @@ def rollback(
         manifest, state_dir, "rollback", dry_run=not execute
     )
     execution["manifest_path"] = str(manifest_path.resolve())
+    control = (
+        _open_control_or_record(
+            manifest,
+            "rollback",
+            execution,
+            execution_path,
+            execution_control=execution_control,
+            control_client=control_client,
+            authorization_token=authorization_token,
+            actor_id=actor_id,
+            owner_id=owner_id,
+            local_fixture=local_fixture,
+        )
+        if execute
+        else None
+    )
+    _attach_control(execution, execution_path, control)
     if not execute:
         event(
             execution,
@@ -1450,6 +1952,7 @@ def rollback(
     project, region = _project_region(manifest)
     service = _service_name(manifest)
     try:
+        identity = _known_revision(manifest, target, state_dir)
         revision_value = _json_command(
             [
                 "gcloud",
@@ -1464,8 +1967,7 @@ def rollback(
                 "--format=json",
             ]
         )
-        if not _revision_ready(revision_value):
-            raise LifecycleError("Rollback target revision is not Ready")
+        _verify_provider_revision(revision_value, identity)
         command = [
             "gcloud",
             "run",
@@ -1480,15 +1982,16 @@ def rollback(
             f"{target}=100",
             "--quiet",
         ]
-        event(
+        _controlled_effect(
+            control,
             execution,
+            execution_path,
             stage="rollback",
             intent="restore traffic to explicit known-good revision",
-            result="INTENT_RECORDED",
-            remote_effect=True,
+            effect_key="rollback-traffic",
             command=command,
+            callback=lambda: _run_command(command, timeout=600),
         )
-        _run_command(command, timeout=600)
         after = _json_command(
             [
                 "gcloud",
@@ -1514,6 +2017,8 @@ def rollback(
             else None
         )
         _runtime(manifest)["rollback"] = {
+            "digest": identity["digest"],
+            "identity": identity,
             "target_revision": target,
             "url": url,
             "probe": probe,
@@ -1529,11 +2034,19 @@ def rollback(
         )
         _mark_phase(manifest, "phase-3")
         _write_manifest(manifest_path, manifest)
+        _finish_control(execution, execution_path, control, final_status="CONFIRMED")
         execution["status"] = "SUCCEEDED"
     except Exception as exc:
         if execution.get("remote_effects"):
             _mark_phase(manifest, "phase-3")
             _write_manifest(manifest_path, manifest)
+        if control is not None and not control.unknown:
+            try:
+                _finish_control(
+                    execution, execution_path, control, final_status="FAILED"
+                )
+            except Exception as control_exc:
+                execution.setdefault("control_errors", []).append(str(control_exc))
         execution["status"] = (
             "UNKNOWN"
             if execution.get("remote_effects") or execution.get("events")
@@ -1580,6 +2093,7 @@ def release_payload(
     }[status]
     return {
         "release_id": manifest["release_id"],
+        "release_group_id": "",
         "repository": manifest["repository"],
         "source_sha": _source(manifest)["sha"],
         "artifact_digest": _artifact(manifest).get("digest", ""),
@@ -1598,6 +2112,191 @@ def release_payload(
     }
 
 
+def _post_registration(request: urllib.request.Request) -> tuple[str, int]:
+    try:
+        with authenticated_urlopen(request, timeout=30) as response:
+            body = response.read().decode("utf-8")
+            try:
+                value = json.loads(body)
+            except json.JSONDecodeError as exc:
+                raise LifecycleError(
+                    "Engineering Platform returned invalid registration JSON"
+                ) from exc
+            if not isinstance(value, (dict, list)) or not value:
+                raise LifecycleError(
+                    "Engineering Platform returned invalid registration data"
+                )
+            payload = json.loads(request.data or b"{}")
+            if isinstance(value, list):
+                expected_rows = [
+                    {**payload, **service} for service in payload["services"]
+                ]
+                fields = (
+                    "release_id",
+                    "release_group_id",
+                    "repository",
+                    "source_sha",
+                    "artifact_digest",
+                    "version",
+                    "status",
+                    "service_name",
+                    "revision",
+                    "action",
+                )
+                if len(value) != len(expected_rows) or any(
+                    not any(
+                        isinstance(row, dict)
+                        and all(
+                            row.get(key, "") == expected.get(key, "") for key in fields
+                        )
+                        for row in value
+                    )
+                    for expected in expected_rows
+                ):
+                    raise LifecycleError(
+                        "Engineering Platform registration identity mismatch"
+                    )
+            elif value.get("id") != payload.get("release_id"):
+                raise LifecycleError(
+                    "Engineering Platform registration receipt mismatch"
+                )
+            return body, int(response.status)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise LifecycleError(
+            f"Engineering Platform registration failed with HTTP {exc.code}: {body[:200]}"
+        ) from exc
+    except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as exc:
+        raise LifecycleError(
+            "Engineering Platform registration response was lost; reconcile before retrying"
+        ) from exc
+
+
+def _get_registration_observation(
+    platform_api_url: str, service_name: str
+) -> tuple[dict[str, Any], int]:
+    endpoint = (
+        _require_secure_base_url(platform_api_url)
+        + f"/api/releases/{quote(service_name, safe='')}/latest"
+    )
+    request = urllib.request.Request(
+        endpoint,
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = response.read().decode("utf-8")
+            status = int(response.status)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return {}, 404
+        raise LifecycleError(
+            f"Engineering Platform reconciliation failed with HTTP {exc.code}"
+        ) from exc
+    except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as exc:
+        raise LifecycleError(
+            "Engineering Platform reconciliation endpoint was unavailable"
+        ) from exc
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise LifecycleError(
+            "Engineering Platform reconciliation returned invalid JSON"
+        ) from exc
+    if not isinstance(value, dict):
+        raise LifecycleError(
+            "Engineering Platform reconciliation returned invalid data"
+        )
+    return value, status
+
+
+def reconcile_register_release(
+    manifest_path: Path,
+    *,
+    platform_api_url: str,
+    control_client: PlatformExecutionControlClient,
+    intent_id: str,
+    status: str,
+    revision: str,
+    reconciliation_id: str,
+) -> dict[str, Any]:
+    """Reconcile a lost register response using the exact release identity."""
+    manifest = load_manifest(manifest_path)
+    expected = release_payload(manifest, status=status, revision=revision)
+    durable = control_client.get_intent(intent_id)
+    if durable is None:
+        raise LifecycleError("Registration intent does not exist")
+    context = lifecycle_execution_context(
+        manifest, "register", str(durable.context.get("actor_id", ""))
+    )
+    endpoint = _require_secure_base_url(platform_api_url) + "/api/releases/"
+    expected_effect = effect_digest(
+        {
+            "context": context.as_payload(),
+            "scope_key": durable.scope_key,
+            "stage": "register",
+            "effect_key": f"platform-registration:{status}",
+            "command": ["POST", endpoint, local_release.digest(expected)],
+        }
+    )
+    if (
+        durable.context != context.as_payload()
+        or durable.effect_digest != expected_effect
+    ):
+        raise LifecycleError(
+            "Registration reconciliation identity differs from durable intent"
+        )
+    observation, response_status = _get_registration_observation(
+        platform_api_url, _service_name(manifest)
+    )
+    observed_services = observation.get("services") or []
+    observed_service = (
+        observed_services[0]
+        if isinstance(observed_services, list) and observed_services
+        else observation
+    )
+    if not isinstance(observed_service, dict):
+        observed_service = {}
+    exact = response_status == 200 and all(
+        observation_value == expected_value
+        for observation_value, expected_value in (
+            (observation.get("release_id"), expected["release_id"]),
+            (observation.get("repository"), expected["repository"]),
+            (observation.get("source_sha"), expected["source_sha"]),
+            (observation.get("artifact_digest"), expected["artifact_digest"]),
+            (observation.get("version"), expected["version"]),
+            (observation.get("status"), expected["status"]),
+            (observed_service.get("revision"), expected["services"][0]["revision"]),
+        )
+    )
+    outcome = "CONFIRMED" if exact else "UNKNOWN"
+    reconciled = reconcile_control_intent(
+        control_client,
+        intent_id,
+        reconciliation_id=reconciliation_id,
+        outcome=outcome,
+        observation_digest=local_release.digest(
+            {"status": response_status, "body": observation}
+        ),
+    )
+    if exact:
+        runtime = _runtime(manifest)
+        runtime["platform_registration"] = {
+            "status": status,
+            "response": observation,
+            "registered_at": local_release.iso(local_release.utc_now()),
+        }
+        _mark_phase(manifest, "phase-3")
+        _write_manifest(manifest_path, manifest)
+    return {
+        "status": outcome,
+        "response_status": response_status,
+        "observation": observation,
+        "intent": reconciled,
+    }
+
+
 def register_release(
     manifest_path: Path,
     *,
@@ -1608,6 +2307,12 @@ def register_release(
     token: str,
     execute: bool,
     confirm_remote_effects: bool,
+    execution_control: LifecycleControlSession | None = None,
+    control_client: PlatformExecutionControlClient | None = None,
+    authorization_token: str = "",
+    actor_id: str = "",
+    owner_id: str = "",
+    local_fixture: bool = False,
 ) -> dict[str, Any]:
     manifest = load_manifest(manifest_path)
     payload = release_payload(manifest, status=status, revision=revision)
@@ -1617,12 +2322,31 @@ def register_release(
             raise LifecycleError(
                 "Registration requires --platform-api-url or ENG_PLATFORM_API_URL"
             )
-        _require_live_controls(manifest, "register")
+        _require_secure_base_url(platform_api_url)
+        if execution_control is None and control_client is None:
+            _require_live_controls(manifest, "register")
         _require_remote_identity(manifest)
     execution, execution_path = begin_execution(
         manifest, state_dir, "register", dry_run=not execute
     )
     execution["manifest_path"] = str(manifest_path.resolve())
+    control = (
+        _open_control_or_record(
+            manifest,
+            "register",
+            execution,
+            execution_path,
+            execution_control=execution_control,
+            control_client=control_client,
+            authorization_token=authorization_token,
+            actor_id=actor_id,
+            owner_id=owner_id,
+            local_fixture=local_fixture,
+        )
+        if execute
+        else None
+    )
+    _attach_control(execution, execution_path, control)
     plan = {
         "phase": "phase-3",
         "stage": "register",
@@ -1642,8 +2366,10 @@ def register_release(
             "execution": execution,
             "execution_path": str(execution_path),
         }
-    endpoint = platform_api_url.rstrip("/") + "/api/releases/"
+    endpoint = _require_secure_base_url(platform_api_url) + "/api/releases/"
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if control_client is not None and not local_fixture:
+        headers.update(control_client.authenticated_headers(platform_api_url))
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(
@@ -1652,24 +2378,25 @@ def register_release(
         headers=headers,
         method="POST",
     )
+
+    def post_with_intent() -> tuple[str, int]:
+        if control is not None:
+            request.add_header(
+                "X-Release-Intent", execution["control_intents"][-1]["intent_id"]
+            )
+        return _post_registration(request)
+
     try:
-        event(
+        body, response_status = _controlled_effect(
+            control,
             execution,
+            execution_path,
             stage="register",
             intent="register exact release identity in Engineering Platform",
-            result="INTENT_RECORDED",
-            remote_effect=True,
-            detail=endpoint,
+            effect_key=f"platform-registration:{status}",
+            command=["POST", endpoint, local_release.digest(payload)],
+            callback=post_with_intent,
         )
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                body = response.read().decode("utf-8")
-                response_status = int(response.status)
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise LifecycleError(
-                f"Engineering Platform registration failed with HTTP {exc.code}"
-            ) from exc
         try:
             value = json.loads(body)
         except json.JSONDecodeError as exc:
@@ -1691,11 +2418,19 @@ def register_release(
         }
         _mark_phase(manifest, "phase-3")
         _write_manifest(manifest_path, manifest)
+        _finish_control(execution, execution_path, control, final_status="CONFIRMED")
         execution["status"] = "SUCCEEDED"
     except Exception as exc:
         if execution.get("remote_effects"):
             _mark_phase(manifest, "phase-3")
             _write_manifest(manifest_path, manifest)
+        if control is not None and not control.unknown:
+            try:
+                _finish_control(
+                    execution, execution_path, control, final_status="FAILED"
+                )
+            except Exception as control_exc:
+                execution.setdefault("control_errors", []).append(str(control_exc))
         execution["status"] = (
             "UNKNOWN"
             if execution.get("remote_effects") or execution.get("events")
@@ -1719,221 +2454,6 @@ def register_release(
         "execution": execution,
         "execution_path": str(execution_path),
     }
-
-
-def sanplat_plan(
-    api_manifest: dict[str, Any],
-    web_manifest: dict[str, Any],
-    *,
-    release_group_id: str,
-    auxiliary_services: list[str],
-) -> dict[str, Any]:
-    api_candidate = _runtime(api_manifest).get("candidate") or {}
-    web_candidate = _runtime(web_manifest).get("candidate") or {}
-    missing = []
-    identity_mismatches = []
-    for label, current in (
-        ("api", (api_manifest, api_candidate)),
-        ("web", (web_manifest, web_candidate)),
-    ):
-        manifest, state = current
-        expected_digest = str((_artifact(manifest)).get("digest", ""))
-        expected_tag = _candidate_tag(manifest)
-        if not state.get("revision") or not state.get("digest"):
-            missing.append(f"{label} candidate revision/digest")
-        if state.get("digest") != expected_digest:
-            identity_mismatches.append(f"{label} candidate digest")
-        if state.get("tag") and state.get("tag") != expected_tag:
-            identity_mismatches.append(f"{label} candidate tag")
-    web_deployment = (web_manifest.get("catalog") or {}).get("deployment") or {}
-    frontend_api_base_url = str(
-        web_deployment.get("api_base_url")
-        or (web_manifest.get("frontend") or {}).get("api_base_url", "")
-    )
-    web_candidate_url = str(web_candidate.get("url", ""))
-    if not frontend_api_base_url:
-        missing.append("web API_BASE_URL")
-    elif web_candidate_url and frontend_api_base_url == web_candidate_url:
-        identity_mismatches.append("web API_BASE_URL points to candidate URL")
-    group_id = (
-        release_group_id
-        or f"pair-{api_manifest['release_id'][:12]}-{web_manifest['release_id'][:12]}"
-    )
-    return {
-        "phase": "phase-4",
-        "stage": "sanplat-coordinated-window",
-        "release_group_id": group_id,
-        "services": {
-            "api": {
-                "service_name": api_manifest["service_name"],
-                "release_id": api_manifest["release_id"],
-                "revision": api_candidate.get("revision", ""),
-                "digest": api_candidate.get("digest", ""),
-            },
-            "web": {
-                "service_name": web_manifest["service_name"],
-                "release_id": web_manifest["release_id"],
-                "revision": web_candidate.get("revision", ""),
-                "digest": web_candidate.get("digest", ""),
-            },
-            "unchanged_auxiliary": auxiliary_services,
-        },
-        "identity": {
-            "api_source_sha": str((_source(api_manifest)).get("sha", "")),
-            "web_source_sha": str((_source(web_manifest)).get("sha", "")),
-            "api_tag": str((api_manifest.get("version") or {}).get("tag", "")),
-            "web_tag": str((web_manifest.get("version") or {}).get("tag", "")),
-            "api_digest": str((_artifact(api_manifest)).get("digest", "")),
-            "web_digest": str((_artifact(web_manifest)).get("digest", "")),
-        },
-        "ordered_steps": [
-            {"name": "prepare", "effect": "none", "required": True},
-            {
-                "name": "authorize",
-                "effect": "corporate authorization",
-                "required": True,
-            },
-            {
-                "name": "capture-state",
-                "effect": "read Cloud Run, jobs, queues and schedulers",
-                "required": True,
-            },
-            {
-                "name": "maintenance",
-                "effect": "maintenance health 200 / business 503",
-                "required": True,
-            },
-            {
-                "name": "pause-deliveries",
-                "effect": "pause new deliveries",
-                "required": True,
-            },
-            {
-                "name": "drain",
-                "effect": "wait for active work and leases",
-                "required": True,
-            },
-            {
-                "name": "migrations",
-                "effect": "only compatible/applicable migrations",
-                "required": False,
-            },
-            {
-                "name": "promote-pair",
-                "effect": "activate exact API/Web revisions",
-                "required": True,
-            },
-            {
-                "name": "validate-functional",
-                "effect": "Microsoft/SanPlat, persistence and anonymous rejection",
-                "required": True,
-            },
-            {
-                "name": "resume",
-                "effect": "resume only resources previously enabled",
-                "required": True,
-            },
-        ],
-        "gates": {
-            "release_group_id_preserved": bool(release_group_id),
-            "exact_pair_required": True,
-            "missing_candidate_evidence": missing,
-            "candidate_identity_exact": not identity_mismatches,
-            "candidate_identity_mismatches": identity_mismatches,
-            "corporate_window_required": True,
-            "adapter_configured": False,
-            "frontend_api_base_url_declared": bool(frontend_api_base_url),
-            "candidate_url_must_not_become_web_default": bool(
-                frontend_api_base_url and frontend_api_base_url != web_candidate_url
-            ),
-            "execution": "blocked until a reviewed SanPlat adapter and window record are supplied",
-        },
-        "execution_control": {
-            "status": "BLOCKED",
-            "shared_exclusion": {
-                "cli_cli": {"status": "BLOCKED", "configured": False},
-                "cli_actions": {"status": "BLOCKED", "configured": False},
-            },
-            "prior_authorization": {"status": "BLOCKED", "configured": False},
-            "adapter": {"status": "BLOCKED", "configured": False},
-            "reason": "SanPlat requires the reviewed adapter and corporate-window record before any mutation",
-        },
-        "frontend_config": {
-            "api_base_url": frontend_api_base_url,
-            "source": "manifest Web deployment API_BASE_URL; absence is a blocking gap",
-            "candidate_validation": "candidate Web configuration must point to the intended API, never to an accidental candidate URL",
-        },
-        "remote_mutations": [
-            "SanPlat maintenance/pause/drain",
-            "Cloud Run paired promotion",
-            "functional validation",
-            "resume",
-        ],
-    }
-
-
-def sanplat(
-    api_manifest_path: Path,
-    web_manifest_path: Path,
-    *,
-    state_dir: Path,
-    release_group_id: str,
-    auxiliary_services: list[str],
-    execute: bool,
-    confirm_remote_effects: bool,
-) -> dict[str, Any]:
-    api_manifest = load_manifest(api_manifest_path)
-    web_manifest = load_manifest(web_manifest_path)
-    if (
-        api_manifest.get("service_name") != "cgm-sanplat-api"
-        or web_manifest.get("service_name") != "cgm-sanplat-web"
-    ):
-        raise LifecycleError(
-            "SanPlat coordination requires cgm-sanplat-api and cgm-sanplat-web manifests"
-        )
-    plan = sanplat_plan(
-        api_manifest,
-        web_manifest,
-        release_group_id=release_group_id,
-        auxiliary_services=auxiliary_services,
-    )
-    _require_confirmation(execute, confirm_remote_effects)
-    execution, execution_path = begin_execution(
-        api_manifest, state_dir, "sanplat", dry_run=not execute
-    )
-    execution["related_release_ids"] = [
-        api_manifest["release_id"],
-        web_manifest["release_id"],
-    ]
-    execution["manifest_paths"] = [
-        str(api_manifest_path.resolve()),
-        str(web_manifest_path.resolve()),
-    ]
-    if not execute:
-        event(
-            execution,
-            stage="sanplat",
-            intent="record paired corporate-window plan without remote effects",
-            result="PLANNED",
-        )
-        save_execution(execution_path, execution)
-        return {
-            "plan": plan,
-            "execution": execution,
-            "execution_path": str(execution_path),
-        }
-    message = "SanPlat execution is intentionally gated: supply a reviewed adapter and corporate-window record before any mutation"
-    execution["status"] = "FAILED"
-    execution["error"] = message
-    event(
-        execution,
-        stage="authorize",
-        intent="require reviewed SanPlat adapter and corporate window",
-        result="FAILED",
-        detail=message,
-    )
-    save_execution(execution_path, execution)
-    raise LifecycleError(message)
 
 
 def adoption_plan(
@@ -1995,7 +2515,10 @@ def _execution_records(state_dir: Path, release_id: str) -> list[dict[str, Any]]
             value = local_release.read_json(path)
         except local_release.ReleaseError:
             continue
-        if value.get("release_id") == release_id:
+        if value.get("release_id") == release_id or (
+            value.get("phase") == "sanplat"
+            and release_id in value.get("related_release_ids", [])
+        ):
             records.append(value)
     return sorted(
         records,
@@ -2177,6 +2700,70 @@ def _unknown_operation(execution: dict[str, Any]) -> str:
     return ""
 
 
+def _control_state(
+    execution: dict[str, Any], control_client: PlatformExecutionControlClient
+) -> dict[str, Any]:
+    """Read durable lease/intent state for a previously persisted execution."""
+    control_metadata = execution.get("control") or {}
+    scope_key = str(control_metadata.get("scope_key", ""))
+    lease = control_client.get_lease(scope_key) if scope_key else None
+    intents: list[dict[str, Any]] = []
+    for reference in execution.get("control_intents") or []:
+        intent_id = (
+            str(reference.get("intent_id", "")) if isinstance(reference, dict) else ""
+        )
+        if not intent_id:
+            continue
+        intent = control_client.get_intent(intent_id)
+        intents.append(
+            {
+                "intent_id": intent_id,
+                "status": intent.status if intent else "NOT_FOUND",
+                "reconciliation_required": (
+                    intent.reconciliation_required if intent else True
+                ),
+            }
+        )
+    return {
+        "lease": (
+            {
+                "lease_id": lease.lease_id,
+                "status": lease.status,
+                "generation": lease.generation,
+                "version": lease.version,
+                "takeover_allowed": lease.takeover_allowed,
+            }
+            if lease
+            else None
+        ),
+        "intents": intents,
+    }
+
+
+def reconcile_control_intent(
+    control_client: PlatformExecutionControlClient,
+    intent_id: str,
+    *,
+    reconciliation_id: str,
+    outcome: str,
+    observation_digest: str,
+):
+    """Resolve one durable UNKNOWN intent after independent observation."""
+    intent = control_client.get_intent(intent_id)
+    if intent is None:
+        raise LifecycleError(f"Control intent was not found: {intent_id}")
+    lease = control_client.get_lease(intent.scope_key)
+    if lease is None:
+        raise LifecycleError(f"Control lease was not found: {intent.scope_key}")
+    return control_client.reconcile_intent(
+        intent,
+        reconciliation_id=reconciliation_id,
+        outcome=outcome,
+        observation_digest=observation_digest,
+        lease=lease,
+    )
+
+
 def _reconciliation_proves_unknown_effect(
     manifest: dict[str, Any], operation: str, remote_state: dict[str, Any]
 ) -> bool:
@@ -2221,17 +2808,37 @@ def _reconciliation_proves_unknown_effect(
 
 
 def resume(
-    state_dir: Path, release_id: str, *, reconcile: bool = False
+    state_dir: Path,
+    release_id: str,
+    *,
+    reconcile: bool = False,
+    control_client: PlatformExecutionControlClient | None = None,
 ) -> dict[str, Any]:
     """Summarize the first safe continuation point without performing mutations."""
     manifest_path, manifest = _manifest_for_release(state_dir, release_id)
     executions = _execution_records(state_dir, release_id)
     latest = executions[-1] if executions else None
+    if any(record.get("phase") == "sanplat" for record in executions):
+        return {
+            "release_id": release_id,
+            "manifest_path": str(manifest_path),
+            "remote_query_performed": False,
+            "latest_execution": latest,
+            "first_pending_stage": "manual-review",
+            "safe_to_continue": False,
+            "unknown_effect_requires_reconciliation": True,
+            "note": "Legacy SanPlat lifecycle state is uncertain and remains blocked for manual review.",
+        }
     unknown = bool(
         latest and (latest.get("status") == "UNKNOWN" or latest.get("unknown_effects"))
     )
     unknown_operation = _unknown_operation(latest or {}) if unknown else ""
     remote_state = _reconcile_read_only(manifest) if reconcile else {}
+    control_state = (
+        _control_state(latest, control_client)
+        if latest and control_client is not None
+        else {}
+    )
     remote_query_performed = reconcile
     reconciliation_status = "NOT_REQUESTED"
     if reconcile:
@@ -2281,6 +2888,7 @@ def resume(
         "remote_query_performed": remote_query_performed,
         "reconciliation_status": reconciliation_status,
         "remote_state": remote_state,
+        "control_state": control_state,
         "safe_to_continue": safe_to_continue,
         "note": "resume reports the next safe command; it never mutates remote state automatically",
     }

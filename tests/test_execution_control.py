@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -30,12 +32,18 @@ from eng_platform_api.services import (
     release_authorization,
     release_authorization_store,
 )
+from eng_platform_api.routers import release_execution as execution_router
+from eng_platform_api.models import ReleaseExecutionAuthorizationIssueRequest
 from scripts.release.execution_control import (
     ExecutionContext,
     ExecutionControlError,
     PlatformExecutionControlClient,
 )
 from scripts.release import release_lifecycle
+from scripts.release.lifecycle_control import (
+    LifecycleControlSession,
+    LifecycleControlError,
+)
 
 
 SHA = "a" * 40
@@ -51,6 +59,8 @@ def isolated_control_store(monkeypatch, tmp_path):
     monkeypatch.setattr(store, "_COLLECTION", "")
     monkeypatch.setattr(release_authorization_store, "_mock_entries", {})
     monkeypatch.setattr(config, "mock_mode", True)
+    monkeypatch.setattr(config.release_execution, "remote_activation_enabled", True)
+    monkeypatch.setattr(config.release_execution, "allowed_services", ("example",))
     monkeypatch.setattr(config.auth, "allowed_logins", ("diegomad14",))
     key = Ed25519PrivateKey.generate()
     private_pem = key.private_bytes(
@@ -77,6 +87,7 @@ def _context(**overrides) -> ExecutionContext:
         "tag": "v1.2.3",
         "operation": "candidate",
         "actor_id": "diegomad14",
+        "service_name": "example",
         "artifact_digest": DIGEST,
         "target": "example/prod",
         "configuration_hash": "f" * 64,
@@ -122,6 +133,80 @@ def _transport(api_client):
     return send
 
 
+def test_capability_issue_derives_actor_from_authenticated_identity(
+    api_client, monkeypatch
+):
+    """The issuance payload has no actor field and the signed claim is server-derived."""
+    monkeypatch.setattr(
+        "eng_platform_api.routers.release_execution._validate_capability",
+        lambda _payload: None,
+    )
+    response = api_client.post(
+        "/api/internal/release-execution/authorizations/issue",
+        json={
+            "release_id": "release-local-001",
+            "repository": "diegomad14/example",
+            "service_name": "example",
+            "source_sha": SHA,
+            "tag": "v1.2.3",
+            "artifact_digest": DIGEST,
+            "target": "project/region/example",
+            "operation": "candidate",
+            "configuration_hash": "f" * 64,
+        },
+    )
+    assert response.status_code == 200
+    claims = release_authorization.verify(
+        response.json()["token"], {}, audience=release_authorization.LOCAL_AUDIENCE
+    )
+    assert claims["requested_by"] == "diegomad14"
+    assert claims["capability_issued"] is True
+
+
+def test_publish_capability_uses_repository_oss_v2_destination(monkeypatch):
+    service = SimpleNamespace(
+        repository="diegomad14/example",
+        project_id="project",
+        region="region",
+        service_name="example",
+        deployment_ready=True,
+        release_policy="oss-v2",
+        quality=SimpleNamespace(policy_version="oss-v2"),
+    )
+    report = SimpleNamespace(
+        repository=service.repository,
+        commit_sha=SHA,
+        policy_version="oss-v2",
+        quality_gate_status="PASSED",
+    )
+    monkeypatch.setattr(execution_router.catalog, "get_service", lambda _name: service)
+    monkeypatch.setattr(
+        execution_router, "get_quality_report", lambda *_args, **_kwargs: report
+    )
+    execution_router._validate_capability(
+        ReleaseExecutionAuthorizationIssueRequest(
+            release_id="release-local-001",
+            repository=service.repository,
+            service_name=service.service_name,
+            source_sha=SHA,
+            tag="v1.2.3",
+            artifact_digest=DIGEST,
+            target=f"{service.repository}:oss-v2",
+            operation="publish",
+            configuration_hash="f" * 64,
+        )
+    )
+
+
+def test_control_consumption_rejects_payload_actor_not_owned_by_session(api_client):
+    context, token = _issue_local_authorization(_context())
+    response = api_client.post(
+        "/api/internal/release-execution/authorizations/consume",
+        json={"token": token, **context.as_payload(), "actor_id": "other-user"},
+    )
+    assert response.status_code == 403
+
+
 def _authorized_record(context: ExecutionContext, jti: str) -> None:
     release_authorization_store._mock_entries[jti] = {
         "authorization_mode": "local-cli",
@@ -129,6 +214,8 @@ def _authorized_record(context: ExecutionContext, jti: str) -> None:
         "requested_by": context.actor_id,
         "release_id": context.release_id,
         "repository": context.repository,
+        "service_name": "example",
+        "release_group_id": "",
         "source_sha": context.source_sha,
         "tag": context.tag,
         "artifact_digest": context.artifact_digest,
@@ -152,6 +239,173 @@ def _lease_request(context: ExecutionContext, **overrides):
     return ExecutionLeaseAcquireRequest(**values)
 
 
+def test_lifecycle_replayed_intent_never_grants_a_second_effect(api_client):
+    context, token = _issue_local_authorization(_context())
+    client = PlatformExecutionControlClient("", transport=_transport(api_client))
+    first = LifecycleControlSession.open(
+        client,
+        context,
+        token=token,
+        owner_id="same-owner",
+        scope="deployment",
+        scope_key="deployment:example:prod",
+    )
+    second = replace(first)
+    entered, finish = threading.Event(), threading.Event()
+    effects = []
+
+    def effect():
+        effects.append("effect")
+        entered.set()
+        assert finish.wait(10)
+        return "done"
+
+    def execute(session):
+        return session.run_effect(
+            execution={},
+            stage="candidate",
+            intent="deploy",
+            effect_key="deploy",
+            effect=effect,
+            emit=lambda *_a, **_k: None,
+            persist=lambda: None,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        running = pool.submit(execute, first)
+        try:
+            assert entered.wait(10)
+            with pytest.raises(LifecycleControlError, match="already exists"):
+                execute(second)
+        finally:
+            finish.set()
+        assert running.result() == "done"
+    with pytest.raises(LifecycleControlError, match="already exists"):
+        execute(replace(first))
+    assert effects == ["effect"]
+    first.finish(final_status="CONFIRMED")
+    with pytest.raises(LifecycleControlError, match="closed"):
+        execute(first)
+
+
+def test_other_resource_and_released_owner_cannot_record_intent_result():
+    context = _context()
+    _authorized_record(context, "auth-1")
+    lease = store.acquire_lease(_lease_request(context))
+    _authorized_record(context, "auth-other")
+    other = store.acquire_lease(
+        _lease_request(
+            context, scope_key="deployment:other:prod", authorization_jti="auth-other"
+        )
+    )
+    intent = store.create_intent(
+        ExecutionIntentCreateRequest(
+            **context.as_payload(),
+            idempotency_key="bound-result",
+            effect_digest=EFFECT_DIGEST,
+            scope=lease.scope,
+            scope_key=lease.scope_key,
+            owner_id=lease.owner_id,
+            lease_id=lease.lease_id,
+            lease_generation=lease.generation,
+            authorization_jti="auth-1",
+        )
+    )
+
+    def result_for(owner):
+        return ExecutionIntentResultRequest(
+            intent_id=intent.intent_id,
+            scope_key=owner.scope_key,
+            owner_id=owner.owner_id,
+            lease_id=owner.lease_id,
+            lease_generation=owner.generation,
+            lease_version=owner.version,
+            status="UNKNOWN",
+        )
+
+    with pytest.raises(store.StaleOwner):
+        store.record_intent_result(result_for(other))
+    store.release_lease(
+        ExecutionLeaseReleaseRequest(
+            lease_id=lease.lease_id,
+            scope_key=lease.scope_key,
+            owner_id=lease.owner_id,
+            generation=lease.generation,
+            version=lease.version,
+            final_status="FAILED",
+        )
+    )
+    with pytest.raises(store.StaleOwner):
+        store.record_intent_result(result_for(lease))
+    assert store.get_intent(intent.intent_id).status == "INTENDED"
+
+
+def test_reconcile_rejects_lease_version_before_renewal():
+    context = _context()
+    _authorized_record(context, "auth-1")
+    lease = store.acquire_lease(_lease_request(context))
+    store.renew_lease(
+        ExecutionLeaseRenewRequest(
+            lease_id=lease.lease_id,
+            scope_key=lease.scope_key,
+            owner_id=lease.owner_id,
+            generation=lease.generation,
+            version=lease.version,
+        )
+    )
+    with pytest.raises(store.StaleOwner):
+        store.reconcile_lease(
+            ExecutionLeaseReconcileRequest(
+                lease_id=lease.lease_id,
+                scope_key=lease.scope_key,
+                owner_id=lease.owner_id,
+                generation=lease.generation,
+                version=lease.version,
+                reconciliation_id="stale-version",
+                observation="NOT_STARTED",
+                observation_digest=OBSERVATION_DIGEST,
+            )
+        )
+
+
+def test_renewed_owner_can_reconcile_intent_created_before_renewal(api_client):
+    context, token = _issue_local_authorization(_context())
+    client = PlatformExecutionControlClient("", transport=_transport(api_client))
+    session = LifecycleControlSession.open(
+        client,
+        context,
+        token=token,
+        owner_id="owner",
+        scope="deployment",
+        scope_key="deployment:example:prod",
+    )
+    intent = client.create_intent(
+        context,
+        idempotency_key="renewed-intent",
+        effect_digest=EFFECT_DIGEST,
+        lease=session.lease,
+        authorization_jti=session.authorization_jti,
+    )
+    renewed = client.renew_lease(session.lease, ttl_seconds=60)
+    client.record_result(intent, lease=renewed, status="UNKNOWN")
+    with pytest.raises(ExecutionControlError, match="409"):
+        client.reconcile_intent(
+            intent,
+            reconciliation_id="stale",
+            outcome="CONFIRMED",
+            observation_digest=OBSERVATION_DIGEST,
+        )
+    reconciled = client.reconcile_intent(
+        intent,
+        lease=renewed,
+        reconciliation_id="renewed",
+        outcome="CONFIRMED",
+        observation_digest=OBSERVATION_DIGEST,
+    )
+    assert reconciled.status == "CONFIRMED"
+    assert store.get_lease(renewed.scope_key).status == "RELEASED"
+
+
 def test_two_independent_clients_share_lease_and_intent_contract(api_client):
     context, token = _issue_local_authorization(_context())
     cli = PlatformExecutionControlClient("", transport=_transport(api_client))
@@ -166,6 +420,8 @@ def test_two_independent_clients_share_lease_and_intent_contract(api_client):
         authorization_jti=consumed["jti"],
         ttl_seconds=60,
     )
+    assert store.get_lease(lease.scope_key).context.service_name == "example"
+    assert store.get_lease(lease.scope_key).context.release_group_id == ""
     with pytest.raises(ExecutionControlError, match="409"):
         actions.acquire_lease(
             context,
@@ -191,6 +447,10 @@ def test_two_independent_clients_share_lease_and_intent_contract(api_client):
         authorization_jti=consumed["jti"],
     )
     assert same_intent.intent_id == intent.intent_id
+    assert intent.created is True
+    assert same_intent.created is False
+    assert intent.context["service_name"] == "example"
+    assert intent.context["release_group_id"] == ""
     with pytest.raises(ExecutionControlError, match="409"):
         actions.create_intent(
             context,
@@ -686,7 +946,7 @@ def test_firestore_client_selection_and_http_client_failures(monkeypatch):
     assert store._firestore_collection() is fake_collection
     monkeypatch.setattr(store, "_COLLECTION", "")
 
-    client = PlatformExecutionControlClient("")
+    client = PlatformExecutionControlClient("", auth_headers={})
     with pytest.raises(ExecutionControlError, match="URL"):
         client._post("/path", {})
 
@@ -706,16 +966,19 @@ def test_firestore_client_selection_and_http_client_failures(monkeypatch):
         def read(self):
             return json.dumps({"ok": True}).encode()
 
-    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
-    assert PlatformExecutionControlClient("http://control")._post("/path", {}) == {
-        "ok": True
-    }
+    monkeypatch.setattr(
+        "scripts.release.execution_control.authenticated_urlopen",
+        lambda *_args, **_kwargs: Response(),
+    )
+    assert PlatformExecutionControlClient("https://control", auth_headers={})._post(
+        "/path", {}
+    ) == {"ok": True}
 
 
 def test_http_client_reports_rejection_invalid_json_and_unavailable(monkeypatch):
     from urllib.error import HTTPError
 
-    client = PlatformExecutionControlClient("http://control")
+    client = PlatformExecutionControlClient("https://control", auth_headers={})
 
     def rejected(*_args, **_kwargs):
         raise HTTPError(
@@ -726,7 +989,9 @@ def test_http_client_reports_rejection_invalid_json_and_unavailable(monkeypatch)
             mock.Mock(read=lambda: b'{"detail":"scope busy"}'),
         )
 
-    monkeypatch.setattr("urllib.request.urlopen", rejected)
+    monkeypatch.setattr(
+        "scripts.release.execution_control.authenticated_urlopen", rejected
+    )
     with pytest.raises(ExecutionControlError, match="409"):
         client._post("/path", {})
 
@@ -741,13 +1006,15 @@ def test_http_client_reports_rejection_invalid_json_and_unavailable(monkeypatch)
             return b"not-json"
 
     monkeypatch.setattr(
-        "urllib.request.urlopen", lambda *_args, **_kwargs: InvalidResponse()
+        "scripts.release.execution_control.authenticated_urlopen",
+        lambda *_args, **_kwargs: InvalidResponse(),
     )
     with pytest.raises(ExecutionControlError, match="invalid JSON"):
         client._post("/path", {})
 
     monkeypatch.setattr(
-        "urllib.request.urlopen", mock.Mock(side_effect=OSError("offline"))
+        "scripts.release.execution_control.authenticated_urlopen",
+        mock.Mock(side_effect=OSError("offline")),
     )
     with pytest.raises(ExecutionControlError, match="unavailable"):
         client._post("/path", {})
@@ -762,8 +1029,9 @@ def test_lifecycle_exposes_contract_but_keeps_remote_activation_closed():
     assert plan["remote_activation"] == {
         "enabled": False,
         "cli_override_supported": False,
+        "authority": "Engineering Platform authenticated per-service authorization",
     }
-    assert release_lifecycle.REMOTE_ACTIVATION_ENABLED is False
+    assert not hasattr(release_lifecycle, "REMOTE_ACTIVATION_ENABLED")
 
 
 def test_reconcile_intent_unknown_is_not_a_retry():
@@ -798,6 +1066,11 @@ def test_reconcile_intent_unknown_is_not_a_retry():
             intent_id=unknown.intent_id,
             reconciliation_id="observation-1",
             outcome="UNKNOWN",
+            scope_key=lease.scope_key,
+            owner_id=lease.owner_id,
+            lease_id=lease.lease_id,
+            lease_generation=lease.generation,
+            lease_version=lease.version,
             observation_digest=OBSERVATION_DIGEST,
         )
     )

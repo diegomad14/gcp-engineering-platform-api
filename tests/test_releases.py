@@ -13,7 +13,10 @@ tmp_store = Path(tempfile.mkdtemp(prefix="releases_test_")) / "releases.json"
 
 
 @pytest.fixture(autouse=True)
-def _isolated_store():
+def _isolated_store(monkeypatch):
+    from eng_platform_api.config import config
+
+    monkeypatch.setattr(config, "mock_mode", True)
     with mock.patch(
         "eng_platform_api.services.releases_store._DEFAULT_STORE_PATH",
         tmp_store,
@@ -43,28 +46,38 @@ def _payload(**overrides):
                 "revision": "cgm-sanplat-api-00173-5cs",
                 "action": "deployed",
             },
-            {
-                "service_name": "cgm-sanplat-web",
-                "revision": "cgm-sanplat-web-00088-bx5",
-                "action": "deployed",
-            },
         ],
         "github_run_url": "https://github.com/diegomad14/parametrizacion-correos-cgm/actions/runs/123",
         **overrides,
     }
 
 
-def test_register_creates_one_row_per_service(client):
+def test_register_creates_one_single_service_row(client):
     response = client.post("/api/releases", json=_payload())
     assert response.status_code == 201
     rows = response.json()
-    assert len(rows) == 2
-    assert {row["service_name"] for row in rows} == {
-        "cgm-sanplat-api",
-        "cgm-sanplat-web",
-    }
+    assert len(rows) == 1
+    assert rows[0]["service_name"] == "cgm-sanplat-api"
     assert all(row["repository"] == _payload()["repository"] for row in rows)
+    assert all(row["release_group_id"] == "" for row in rows)
     assert all("services" not in row for row in rows)
+
+
+def test_register_rejects_new_grouped_or_multi_service_release(client):
+    grouped = _payload(release_id="new-local-release", release_group_id="window-1")
+    assert client.post("/api/releases", json=grouped).status_code == 409
+    multi = _payload(
+        release_id="new-local-release",
+        services=[
+            *_payload()["services"],
+            {
+                "service_name": "cgm-sanplat-web",
+                "revision": "cgm-sanplat-web-00088-bx5",
+                "action": "deployed",
+            },
+        ],
+    )
+    assert client.post("/api/releases", json=multi).status_code == 409
 
 
 def test_register_is_idempotent_by_release_identity(client):
@@ -79,7 +92,7 @@ def test_register_is_idempotent_by_release_identity(client):
     assert first.status_code == 201
     assert second.status_code == 201
     assert second.json() == first.json()
-    assert client.get("/api/releases").json()["total_releases"] == 2
+    assert client.get("/api/releases").json()["total_releases"] == 1
 
 
 def test_register_rejects_reused_identity_with_different_sha(client):
@@ -93,18 +106,49 @@ def test_register_rejects_reused_identity_with_different_sha(client):
     assert conflict.status_code == 409
 
 
-def test_register_rejects_partial_release_identity(client):
-    service = _payload()["services"][0]
+def test_register_phase_transition_and_revision_conflict(client):
+    payload = _payload(release_id="phase-release")
+    assert client.post("/api/releases", json=payload).status_code == 201
+    changed = {
+        **payload,
+        "services": [
+            {**s, "revision": s["revision"] + "x"} for s in payload["services"]
+        ],
+    }
+    assert client.post("/api/releases", json=changed).status_code == 409
+    promoted = {
+        **payload,
+        "status": "promoted",
+        "services": [{**s, "action": "promoted"} for s in payload["services"]],
+    }
+    wrong_revision = {**promoted, "services": changed["services"]}
+    assert client.post("/api/releases", json=wrong_revision).status_code == 409
+    response = client.post("/api/releases", json=promoted)
+    assert response.status_code == 201
+    assert all(row["status"] == "promoted" for row in response.json())
+    assert client.post("/api/releases", json=promoted).json() == response.json()
+    assert client.post("/api/releases", json=payload).status_code == 409
     assert (
-        client.post(
-            "/api/releases",
-            json=_payload(release_id="release-123", services=[service]),
-        ).status_code
-        == 201
+        client.get("/api/releases/cgm-sanplat-api/latest").json()["status"]
+        == "promoted"
     )
 
-    conflict = client.post("/api/releases", json=_payload(release_id="release-123"))
 
+def test_register_rejects_multi_service_release_identity(client):
+    conflict = client.post(
+        "/api/releases",
+        json=_payload(
+            release_id="release-123",
+            services=[
+                *_payload()["services"],
+                {
+                    "service_name": "cgm-sanplat-web",
+                    "revision": "web",
+                    "action": "deployed",
+                },
+            ],
+        ),
+    )
     assert conflict.status_code == 409
 
 
@@ -155,13 +199,21 @@ def test_list_and_filter_releases_by_service(client):
 def test_release_counter_counts_service_rows(client):
     client.post("/api/releases", json=_payload())
     response = client.get("/api/releases")
-    assert response.json()["total_releases"] == 2
-    assert len(response.json()["recent"]) == 2
+    assert response.json()["total_releases"] == 1
+    assert len(response.json()["recent"]) == 1
 
 
 def test_latest_release_is_per_service(client):
-    client.post("/api/releases", json=_payload(version="v0.9.5"))
-    client.post("/api/releases", json=_payload(version="v0.9.6", status="promoted"))
+    web = {"service_name": "cgm-sanplat-web", "revision": "web-1", "action": "deployed"}
+    client.post("/api/releases", json=_payload(version="v0.9.5", services=[web]))
+    client.post(
+        "/api/releases",
+        json=_payload(
+            version="v0.9.6",
+            status="promoted",
+            services=[{**web, "action": "promoted"}],
+        ),
+    )
     response = client.get("/api/releases/cgm-sanplat-web/latest")
     assert response.status_code == 200
     assert response.json()["version"] == "v0.9.6"

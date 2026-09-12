@@ -33,10 +33,11 @@ from ..models import (
 from ..config import config
 from . import deployment_store, release_authorization_store
 
+_fcntl: Any = None
 try:
-    import fcntl
+    import fcntl as _fcntl
 except ImportError:  # pragma: no cover - the supported local hosts are POSIX.
-    fcntl = None
+    pass
 
 
 _DEFAULT_STORE_PATH = Path(
@@ -49,6 +50,8 @@ _lock = threading.RLock()
 _CONTEXT_FIELDS = (
     "release_id",
     "repository",
+    "service_name",
+    "release_group_id",
     "source_sha",
     "tag",
     "artifact_digest",
@@ -160,12 +163,12 @@ def _file_lock(path: Path):
     lock_path = path.with_name(f".{path.name}.lock")
     handle = lock_path.open("a+", encoding="utf-8")
     try:
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        if _fcntl is not None:
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
         yield
     finally:
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        if _fcntl is not None:
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
         handle.close()
 
 
@@ -200,7 +203,10 @@ def _firestore_transaction(collection: Any, callback: Callable[[Any], Any]) -> A
     client = getattr(collection, "_client", None) or deployment_store.firestore_client(
         _project_id()
     )
-    transaction = client.transaction()
+    # The emulator and Firestore can transiently contend on the shared lease
+    # document. Keep the operation atomic while allowing the SDK to retry the
+    # transaction long enough for one competing owner to commit.
+    transaction = client.transaction(max_attempts=20)
     return firestore.transactional(callback)(transaction)
 
 
@@ -324,7 +330,7 @@ def _reconcile_lease_in_state(
     current = state["leases"].get(request.scope_key)
     if not current or any(
         current.get(key) != getattr(request, key)
-        for key in ("lease_id", "owner_id", "generation")
+        for key in ("lease_id", "owner_id", "generation", "version")
     ):
         raise StaleOwner("Lease owner or generation is stale")
     if current.get("status") not in {"HELD", "UNKNOWN", "RECONCILED"}:
@@ -346,6 +352,7 @@ def _assert_intent_lease(
             lease.get("lease_id") != request.lease_id,
             lease.get("owner_id") != request.owner_id,
             lease.get("generation") != request.lease_generation,
+            lease.get("version") != request.lease_version,
         )
     ):
         raise StaleOwner("Intent does not belong to the current lease owner")
@@ -382,6 +389,7 @@ def _create_intent_in_state(
         owner_id=request.owner_id,
         lease_id=request.lease_id,
         lease_generation=request.lease_generation,
+        lease_version=request.lease_version,
         authorization_jti=request.authorization_jti,
         effect_digest=request.effect_digest,
         intent_fingerprint=fingerprint,
@@ -392,7 +400,7 @@ def _create_intent_in_state(
         observation_digest="",
     ).model_dump()
     state["intents"][key] = record
-    return ExecutionIntent(**record), False, True
+    return ExecutionIntent(**record).model_copy(update={"created": True}), False, True
 
 
 def _record_result_in_state(
@@ -401,6 +409,22 @@ def _record_result_in_state(
     current = state["intents"].get(request.intent_id)
     if not current:
         raise ExecutionControlError("Intent was not recorded before the effect")
+    if any(
+        current.get(key) != getattr(request, key)
+        for key in ("scope_key", "owner_id", "lease_id", "lease_generation")
+    ):
+        raise StaleOwner("Result does not belong to the intent lease owner")
+    lease = state["leases"].get(request.scope_key)
+    if not lease or any(
+        (
+            lease.get("lease_id") != request.lease_id,
+            lease.get("owner_id") != request.owner_id,
+            lease.get("generation") != request.lease_generation,
+            lease.get("version") != request.lease_version,
+            lease.get("status") not in {"HELD", "UNKNOWN"},
+        )
+    ):
+        raise StaleOwner("Result does not belong to an active intent lease owner")
     if current.get("status") in {"CONFIRMED", "FAILED", "UNKNOWN"}:
         if all(
             current.get(key, "") == getattr(request, key, "")
@@ -408,15 +432,6 @@ def _record_result_in_state(
         ):
             return ExecutionIntent(**current), False, False
         raise IntentConflict("Intent already has a different terminal result")
-    lease = state["leases"].get(request.scope_key)
-    if not lease or any(
-        (
-            lease.get("lease_id") != request.lease_id,
-            lease.get("owner_id") != request.owner_id,
-            lease.get("generation") != request.lease_generation,
-        )
-    ):
-        raise StaleOwner("Result does not belong to the intent lease owner")
     if request.status != "UNKNOWN" and (
         lease.get("status") != "HELD"
         or _parse_time(str(lease.get("expires_at", ""))) <= _now()
@@ -445,19 +460,39 @@ def _reconcile_intent_in_state(
     current = state["intents"].get(request.intent_id)
     if not current:
         raise ExecutionControlError("Intent does not exist")
+    if any(
+        (
+            current.get("scope_key") != request.scope_key,
+            current.get("owner_id") != request.owner_id,
+            current.get("lease_id") != request.lease_id,
+            current.get("lease_generation") != request.lease_generation,
+        )
+    ):
+        raise StaleOwner("Intent reconciliation belongs to a stale lease owner")
+    lease = state["leases"].get(request.scope_key)
+    if not lease or any(
+        (
+            lease.get("lease_id") != request.lease_id,
+            lease.get("owner_id") != request.owner_id,
+            lease.get("generation") != request.lease_generation,
+            lease.get("version") != request.lease_version,
+        )
+    ):
+        raise StaleOwner("Intent reconciliation cannot mutate a newer lease")
     if current.get("status") in {"CONFIRMED", "FAILED"}:
-        if (
-            current.get("status") == request.outcome
-            and current.get("reconciliation_id") == request.reconciliation_id
-        ):
+        if current.get("status") != request.outcome:
+            raise IntentConflict(
+                "Terminal intent cannot be reconciled to another result"
+            )
+        if lease.get("status") == "RELEASED":
             return ExecutionIntent(**current), False, False
-        raise IntentConflict("Terminal intent cannot be reconciled to another result")
+    if lease.get("status") == "RELEASED":
+        raise StaleOwner("Released lease cannot reconcile an unfinished intent")
     current["status"] = request.outcome
     current["updated_at"] = _iso(_now())
     current["reconciliation_required"] = request.outcome == "UNKNOWN"
     current["reconciliation_id"] = request.reconciliation_id
     current["observation_digest"] = request.observation_digest
-    lease = state["leases"].get(current.get("scope_key", ""))
     lease_changed = False
     if lease and request.outcome in {"CONFIRMED", "FAILED"}:
         lease["status"] = "RELEASED"
@@ -551,6 +586,8 @@ def _require_authorization(request: Any) -> None:
     expected = {
         "release_id": request.release_id,
         "repository": request.repository,
+        "service_name": request.service_name,
+        "release_group_id": request.release_group_id,
         "source_sha": request.source_sha,
         "tag": request.tag,
         "artifact_digest": request.artifact_digest,
@@ -573,6 +610,8 @@ def _require_authorization(request: Any) -> None:
             for key in (
                 "release_id",
                 "repository",
+                "service_name",
+                "release_group_id",
                 "source_sha",
                 "tag",
                 "artifact_digest",
@@ -593,13 +632,39 @@ def _require_authorization(request: Any) -> None:
         )
 
 
+def _bind_capability_context(request: Any) -> Any:
+    """Fill a legacy omitted service only from the consumed JTI record.
+
+    The persisted lease/intent always contains a single catalog service and an
+    empty group. A supplied service can never be replaced silently.
+    """
+    record = release_authorization_store.get(request.authorization_jti)
+    if not record:
+        raise AuthorizationRequired("Platform authorization was not consumed")
+    service_name = str(record.get("service_name", ""))
+    if not service_name:
+        raise AuthorizationRequired("Consumed authorization has no service identity")
+    if request.service_name and request.service_name != service_name:
+        raise AuthorizationRequired("Platform authorization mismatch: service_name")
+    if request.release_group_id != "":
+        raise AuthorizationRequired("Release execution groups are not supported")
+    return request.model_copy(
+        update={"service_name": service_name, "release_group_id": ""}
+    )
+
+
 def acquire_lease(request: ExecutionLeaseAcquireRequest) -> ExecutionLease:
+    request = _bind_capability_context(request)
     _require_authorization(request)
     result = _firestore_lease_mutate(
         request, lambda state: _acquire_in_state(state, request)
     )
     if result is not None:
         return result
+    if not config.mock_mode:
+        raise RuntimeError(
+            "Durable Firestore execution-control store is not configured"
+        )
     return _local_mutate(lambda state: _acquire_in_state(state, request))
 
 
@@ -609,6 +674,10 @@ def renew_lease(request: ExecutionLeaseRenewRequest) -> ExecutionLease:
     )
     if result is not None:
         return result
+    if not config.mock_mode:
+        raise RuntimeError(
+            "Durable Firestore execution-control store is not configured"
+        )
     return _local_mutate(lambda state: _renew_in_state(state, request))
 
 
@@ -618,6 +687,10 @@ def release_lease(request: ExecutionLeaseReleaseRequest) -> ExecutionLease:
     )
     if result is not None:
         return result
+    if not config.mock_mode:
+        raise RuntimeError(
+            "Durable Firestore execution-control store is not configured"
+        )
     return _local_mutate(lambda state: _release_in_state(state, request))
 
 
@@ -627,10 +700,15 @@ def reconcile_lease(request: ExecutionLeaseReconcileRequest) -> ExecutionLease:
     )
     if result is not None:
         return result
+    if not config.mock_mode:
+        raise RuntimeError(
+            "Durable Firestore execution-control store is not configured"
+        )
     return _local_mutate(lambda state: _reconcile_lease_in_state(state, request))
 
 
 def create_intent(request: ExecutionIntentCreateRequest) -> ExecutionIntent:
+    request = _bind_capability_context(request)
     existing = get_intent(request.idempotency_key)
     if existing:
         if existing.intent_fingerprint != _fingerprint(request):
@@ -644,6 +722,10 @@ def create_intent(request: ExecutionIntentCreateRequest) -> ExecutionIntent:
     )
     if result is not None:
         return result
+    if not config.mock_mode:
+        raise RuntimeError(
+            "Durable Firestore execution-control store is not configured"
+        )
     return _local_mutate(
         lambda state: (
             (result := _create_intent_in_state(state, request))[0],
@@ -658,6 +740,10 @@ def record_intent_result(request: ExecutionIntentResultRequest) -> ExecutionInte
     )
     if result is not None:
         return result
+    if not config.mock_mode:
+        raise RuntimeError(
+            "Durable Firestore execution-control store is not configured"
+        )
     return _local_mutate(
         lambda state: (
             (result := _record_result_in_state(state, request))[0],
@@ -672,6 +758,10 @@ def reconcile_intent(request: ExecutionIntentReconcileRequest) -> ExecutionInten
     )
     if result is not None:
         return result
+    if not config.mock_mode:
+        raise RuntimeError(
+            "Durable Firestore execution-control store is not configured"
+        )
     return _local_mutate(
         lambda state: (
             (result := _reconcile_intent_in_state(state, request))[0],
@@ -687,6 +777,10 @@ def get_lease(scope_key: str) -> ExecutionLease | None:
         if not getattr(snapshot, "exists", False):
             return None
         return ExecutionLease(**(snapshot.to_dict() or {}))
+    if not config.mock_mode:
+        raise RuntimeError(
+            "Durable Firestore execution-control store is not configured"
+        )
     record = _local_mutate(lambda state: (state["leases"].get(scope_key), False))
     return ExecutionLease(**record) if record else None
 
@@ -698,5 +792,9 @@ def get_intent(intent_id: str) -> ExecutionIntent | None:
         if not getattr(snapshot, "exists", False):
             return None
         return ExecutionIntent(**(snapshot.to_dict() or {}))
+    if not config.mock_mode:
+        raise RuntimeError(
+            "Durable Firestore execution-control store is not configured"
+        )
     record = _local_mutate(lambda state: (state["intents"].get(intent_id), False))
     return ExecutionIntent(**record) if record else None

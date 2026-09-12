@@ -4,12 +4,13 @@
 This command is intentionally outside the normal release path.  It starts only
 the official local Firestore emulator, two loopback API processes and two
 independent adapter clients.  It never falls back to the JSON backend and it
-never calls a provider, Actions, Cloud Build, gcloud services or SanPlat.
+never calls a provider, Actions, Cloud Build or gcloud services.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import dataclasses
 import hashlib
 import importlib.metadata
@@ -17,29 +18,38 @@ import json
 import multiprocessing as mp
 import os
 import queue
+import secrets
 import signal
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
 import uuid
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from itsdangerous import TimestampSigner
 
 from scripts.release.execution_control import (
     ExecutionContext,
     IntentHandle,
     LeaseHandle,
     PlatformExecutionControlClient,
+)
+from scripts.release.lifecycle_control import (
+    LifecycleControlSession,
+    LifecycleControlError,
 )
 
 
@@ -53,6 +63,44 @@ OBSERVATION_DIGEST = "f" * 64
 
 class IntegrationFailure(RuntimeError):
     """The dedicated integration cannot provide valid emulator evidence."""
+
+
+class _LifecycleRegistrationFixture(BaseHTTPRequestHandler):
+    requests: list[dict[str, Any]] = []
+    entered = threading.Event()
+    proceed = threading.Event()
+    disconnect = False
+
+    def do_POST(self):  # noqa: N802 - stdlib handler API
+        length = int(self.headers.get("Content-Length", "0"))
+        body = json.loads(self.rfile.read(length))
+        type(self).requests.append({"path": self.path, "body": body})
+        type(self).entered.set()
+        if not type(self).proceed.wait(30):
+            raise IntegrationFailure("Registration fixture was not released")
+        if type(self).disconnect:
+            self.connection.shutdown(1)
+            self.connection.close()
+            return
+        response = json.dumps(
+            {"id": body.get("release_id", ""), "fixture": True}
+        ).encode("utf-8")
+        self.send_response(201)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response)))
+        self.end_headers()
+        self.wfile.write(response)
+
+    def log_message(self, *_args):
+        return
+
+    def do_GET(self):  # noqa: N802
+        body = json.dumps(type(self).requests[-1]["body"]).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
 
 def _now_utc() -> str:
@@ -188,6 +236,8 @@ def _context(
     return ExecutionContext(
         release_id=release_id,
         repository="local-integration/synthetic-release",
+        service_name="eng-platform-api",
+        release_group_id="",
         source_sha=source_sha,
         tag=f"v0.0.0-{release_id[-12:]}",
         operation=operation,
@@ -201,7 +251,7 @@ def _context(
 def _issue(context: ExecutionContext, issuer: Any) -> tuple[ExecutionContext, str]:
     token, claims = issuer.issue(
         repository=context.repository,
-        service_name="local-integration",
+        service_name=context.service_name,
         tag=context.tag,
         sha=context.source_sha,
         github_deployment_id=0,
@@ -213,11 +263,48 @@ def _issue(context: ExecutionContext, issuer: Any) -> tuple[ExecutionContext, st
         operation=context.operation,
         audience=issuer.LOCAL_AUDIENCE,
         execution_mode=issuer.LOCAL_EXECUTION_MODE,
-        configuration={"target": context.target, "namespace": context.release_id},
+        configuration_hash=context.configuration_hash,
+        capability_issued=True,
     )
     return dataclasses.replace(
         context, configuration_hash=str(claims["configuration_hash"])
     ), token
+
+
+def _session_headers(session_secret: str, actor_id: str) -> dict[str, str]:
+    """Create an in-memory, emulator-only signed OAuth-session equivalent.
+
+    The random signing key never enters an argument, log, evidence JSON, or
+    repository file.  It is valid only for the loopback child API processes.
+    """
+    encoded = base64.b64encode(
+        json.dumps({"github_login": actor_id}, separators=(",", ":")).encode()
+    )
+    cookie = TimestampSigner(session_secret).sign(encoded).decode("ascii")
+    return {"Cookie": f"session={cookie}"}
+
+
+def _fixture_http_transport(base_url: str, headers: dict[str, str]) -> Any:
+    """Return a fixture transport that still uses authenticated loopback HTTP."""
+
+    def send(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        request = urllib.request.Request(
+            f"{base_url}{path}",
+            data=json.dumps(payload, separators=(",", ":")).encode(),
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                **headers,
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            value = json.loads(response.read().decode())
+        if not isinstance(value, dict):
+            raise IntegrationFailure("Fixture HTTP transport returned non-object JSON")
+        return value
+
+    return send
 
 
 def _worker(
@@ -231,7 +318,15 @@ def _worker(
 ) -> None:
     """Run one real adapter client in an independent process."""
     try:
-        client = PlatformExecutionControlClient(base_url, timeout=20.0)
+        # The official emulator can spend >20s resolving contended locks.
+        # Keep the bounded client wait inside the parent's 45s result budget.
+        client = PlatformExecutionControlClient(
+            base_url,
+            timeout=40.0,
+            # Kept solely in the spawned process memory; never persisted in
+            # the scenario result or evidence.
+            auth_headers=options.get("auth_headers"),
+        )
         context = ExecutionContext(**context_payload)
 
         def wait_barrier() -> None:
@@ -260,6 +355,7 @@ def _worker(
                 {
                     "ok": True,
                     "jti": str(consumed["jti"]),
+                    "actor_id": context.actor_id,
                     "lease": dataclasses.asdict(lease),
                 }
             )
@@ -273,6 +369,7 @@ def _worker(
                 {
                     "ok": True,
                     "jti": str(consumed["jti"]),
+                    "actor_id": context.actor_id,
                     "lease": dataclasses.asdict(lease),
                 }
             )
@@ -430,6 +527,14 @@ def _assert_rejected(result: dict[str, Any], label: str, status: str = "409") ->
 
 def _scenario_record(name: str, details: dict[str, Any]) -> dict[str, Any]:
     return {"name": name, "status": "PASS", "details": details}
+
+
+def _start_registration_fixture() -> tuple[ThreadingHTTPServer, str, threading.Thread]:
+    _LifecycleRegistrationFixture.requests = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _LifecycleRegistrationFixture)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, f"http://127.0.0.1:{server.server_port}", thread
 
 
 def _sanitized_environment() -> dict[str, str]:
@@ -647,6 +752,20 @@ def _run_suite(args: argparse.Namespace) -> dict[str, Any]:
     auth_collection = f"release-auth-{namespace}"
     control_collection = f"release-control-{namespace}"
     key = Ed25519PrivateKey.generate()
+    session_secret = secrets.token_urlsafe(32)
+    session_headers = _session_headers(session_secret, "cli-integration")
+    header_file = tempfile.NamedTemporaryFile(
+        mode="w",
+        prefix="eng-platform-loopback-session-",
+        delete=False,
+        encoding="utf-8",
+    )
+    try:
+        header_file.write(json.dumps(session_headers))
+        header_file.flush()
+        os.fchmod(header_file.fileno(), 0o600)
+    finally:
+        header_file.close()
     private_pem = key.private_bytes(
         serialization.Encoding.PEM,
         serialization.PrivateFormat.PKCS8,
@@ -672,6 +791,10 @@ def _run_suite(args: argparse.Namespace) -> dict[str, Any]:
             "ENG_PLATFORM_RELEASE_SIGNING_PRIVATE_KEY": private_pem,
             "ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY": public_pem,
             "ENG_PLATFORM_ALLOWED_GITHUB_LOGINS": ",".join(sorted(LOCAL_ACTORS)),
+            "ENG_PLATFORM_SESSION_SECRET": session_secret,
+            "ENG_PLATFORM_AUTH_HEADERS_FILE": header_file.name,
+            "ENG_PLATFORM_LOCAL_RELEASE_ENABLED": "true",
+            "ENG_PLATFORM_LOCAL_RELEASE_SERVICES": "eng-platform-api",
         }
     )
     os.environ.update(_safe_child_environment(env, "127.0.0.1:1", project))
@@ -697,6 +820,9 @@ def _run_suite(args: argparse.Namespace) -> dict[str, Any]:
     external_effects = 0
     scenario_start = time.perf_counter()
     summary: dict[str, Any] | None = None
+    registration_fixture, registration_url, registration_thread = (
+        _start_registration_fixture()
+    )
 
     try:
         shared_context, shared_token = _issue(
@@ -763,7 +889,13 @@ def _run_suite(args: argparse.Namespace) -> dict[str, Any]:
                     api2_url,
                     context.as_payload(),
                     token,
-                    {"scope_key": "deployment:service-compete:qa", "ttl_seconds": 60},
+                    {
+                        "scope_key": "deployment:service-compete:qa",
+                        "ttl_seconds": 60,
+                        "auth_headers": _session_headers(
+                            session_secret, context.actor_id
+                        ),
+                    },
                     barrier,
                     result_queue,
                 ),
@@ -832,14 +964,176 @@ def _run_suite(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "release independent",
         )
+        winner_context = (
+            compete_a if winners[0]["actor_id"] == compete_a.actor_id else compete_b
+        )
         _assert_ok(
             _one(
                 _run_client(
-                    "release", api2_url, compete_a, "", {"lease": winners[0]["lease"]}
+                    "release",
+                    api2_url,
+                    winner_context,
+                    "",
+                    {
+                        "lease": winners[0]["lease"],
+                        "auth_headers": _session_headers(
+                            session_secret, winner_context.actor_id
+                        ),
+                    },
                 ),
                 "release compete",
             ),
             "release compete",
+        )
+
+        lifecycle_target = "synthetic-project/synthetic-region/local-integration"
+        lifecycle_context = _context(
+            f"{namespace}-lifecycle",
+            lifecycle_target,
+            "cli-integration",
+            operation="register",
+        )
+        lifecycle_context, lifecycle_token = _issue(
+            lifecycle_context, release_authorization
+        )
+        lifecycle_manifest = {
+            "schema_version": 1,
+            "release_id": lifecycle_context.release_id,
+            "service_name": lifecycle_context.service_name,
+            "repository": lifecycle_context.repository,
+            "catalog": {
+                "project_id": "synthetic-project",
+                "region": "synthetic-region",
+                "deployment": {"health_path": "/health"},
+            },
+            "source": {
+                "path": str(_repo_root()),
+                "sha": lifecycle_context.source_sha,
+                "reviewed_sha": lifecycle_context.source_sha,
+                "base_sha": BASE_SHA,
+                "dirty": False,
+                "publishable": True,
+                "repository": lifecycle_context.repository,
+            },
+            "version": {"tag": lifecycle_context.tag},
+            "quality": {"policy_id": "oss-v2", "status": "PASSED"},
+            "artifact": {"digest": lifecycle_context.artifact_digest},
+            "execution_control": {
+                "target": lifecycle_target,
+                "configuration_hash": lifecycle_context.configuration_hash,
+            },
+            "runtime": {},
+        }
+        lifecycle_manifest_path = evidence_dir / "lifecycle-manifest.json"
+        lifecycle_manifest_path.write_text(
+            json.dumps(lifecycle_manifest, indent=2) + "\n", encoding="utf-8"
+        )
+        lifecycle_state_dir = evidence_dir / "lifecycle-state"
+        lifecycle_state_dir.mkdir(parents=True, exist_ok=True)
+        lifecycle_state_manifest = (
+            lifecycle_state_dir / "manifests" / f"{lifecycle_context.release_id}.json"
+        )
+        lifecycle_state_manifest.parent.mkdir(parents=True, exist_ok=True)
+        lifecycle_state_manifest.write_text(
+            json.dumps(lifecycle_manifest, indent=2) + "\n", encoding="utf-8"
+        )
+        lifecycle_session = LifecycleControlSession.open(
+            PlatformExecutionControlClient(
+                api1_url,
+                timeout=20.0,
+                # A fixture capability is allowed only behind a fixture
+                # transport.  This transport still reaches the authenticated
+                # loopback API; it is not an in-memory control substitute.
+                transport=_fixture_http_transport(api1_url, session_headers),
+            ),
+            lifecycle_context,
+            token=lifecycle_token,
+            owner_id="lifecycle-fixture-owner",
+            scope="deployment",
+            scope_key=f"deployment:{lifecycle_target}",
+        )
+        competitor = dataclasses.replace(
+            lifecycle_session,
+            client=PlatformExecutionControlClient(api2_url, timeout=20.0),
+        )
+
+        def register_with(session, state):
+            return release_lifecycle.register_release(
+                lifecycle_manifest_path,
+                state_dir=state,
+                status="candidate",
+                revision="local-integration-00001-abc",
+                platform_api_url=registration_url,
+                token="",
+                execute=True,
+                confirm_remote_effects=True,
+                execution_control=session,
+                local_fixture=True,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pending_register = pool.submit(
+                register_with, lifecycle_session, lifecycle_state_dir
+            )
+            try:
+                if not _LifecycleRegistrationFixture.entered.wait(20):
+                    raise IntegrationFailure(
+                        "Lifecycle did not reach registration fixture"
+                    )
+                try:
+                    register_with(
+                        competitor, evidence_dir / "competing-lifecycle-state"
+                    )
+                except LifecycleControlError as exc:
+                    if "already exists" not in str(exc):
+                        raise
+                else:
+                    raise IntegrationFailure(
+                        "Replayed intent granted a duplicate effect"
+                    )
+            finally:
+                _LifecycleRegistrationFixture.proceed.set()
+            lifecycle_result = pending_register.result(timeout=30)
+        if len(_LifecycleRegistrationFixture.requests) != 1:
+            raise IntegrationFailure(
+                "Competing lifecycle clients executed duplicate POSTs"
+            )
+        scenarios.append(
+            _scenario_record(
+                "competing_lifecycle_same_owner_one_effect",
+                {"api_processes": 2, "effects": 1, "replayed_intent_rejected": True},
+            )
+        )
+        if lifecycle_result["execution"]["status"] != "SUCCEEDED":
+            raise IntegrationFailure(
+                f"Lifecycle register no terminó confirmado: {lifecycle_result}"
+            )
+        lifecycle_intent = lifecycle_result["execution"]["control_intents"][0]
+        lifecycle_client = PlatformExecutionControlClient(api1_url, timeout=20.0)
+        durable_intent = lifecycle_client.get_intent(lifecycle_intent["intent_id"])
+        if durable_intent is None or durable_intent.status != "CONFIRMED":
+            raise IntegrationFailure(
+                "El lifecycle no dejó un intent CONFIRMED en Firestore Emulator"
+            )
+        resumed = release_lifecycle.resume(
+            lifecycle_state_dir,
+            lifecycle_context.release_id,
+            control_client=lifecycle_client,
+        )
+        if resumed["control_state"]["intents"][0]["status"] != "CONFIRMED":
+            raise IntegrationFailure(
+                "resume no consultó el intent durable del lifecycle"
+            )
+        scenarios.append(
+            _scenario_record(
+                "lifecycle_register_through_firestore_control",
+                {
+                    "intent_status": durable_intent.status,
+                    "lease_status": resumed["control_state"]["lease"]["status"],
+                    "provider": "loopback-registration-fixture",
+                    "effects": 1,
+                },
+            )
         )
 
         tamper_context, tamper_token = _issue(
@@ -913,7 +1207,89 @@ def _run_suite(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "lost response commit",
         )
+        # Lose a real lifecycle POST response, then restart the actual API
+        # process before observing/reconciling through a new client.
+        _, lost_token = _issue(lifecycle_context, release_authorization)
+        _LifecycleRegistrationFixture.disconnect = True
+        try:
+            release_lifecycle.register_release(
+                lifecycle_manifest_path,
+                state_dir=evidence_dir / "lost-registration",
+                status="promoted",
+                revision="local-integration-00001-abc",
+                platform_api_url=registration_url,
+                token="",
+                execute=True,
+                confirm_remote_effects=True,
+                local_fixture=True,
+                control_client=PlatformExecutionControlClient(api1_url),
+                authorization_token=lost_token,
+                actor_id=lifecycle_context.actor_id,
+                owner_id="lost-register-owner",
+            )
+        except release_lifecycle.LifecycleError:
+            pass
+        else:
+            raise IntegrationFailure("Lost POST response was reported as success")
+        lost_intent_id = (
+            f"{lifecycle_context.release_id}:register:platform-registration:promoted"
+        )
+        unknown = PlatformExecutionControlClient(api2_url).get_intent(lost_intent_id)
+        if unknown is None or unknown.status != "UNKNOWN":
+            raise IntegrationFailure("Lost lifecycle POST did not persist UNKNOWN")
+        requests_before_reconcile = len(_LifecycleRegistrationFixture.requests)
         _stop_process(api1)
+        restart_env = _safe_child_environment(env, emulator_host, project)
+        restart_env.update(
+            {
+                "ENG_PLATFORM_MOCK_MODE": "false",
+                "ENG_PLATFORM_RELEASE_AUTH_FIRESTORE_COLLECTION": auth_collection,
+                "ENG_PLATFORM_RELEASE_CONTROL_FIRESTORE_COLLECTION": control_collection,
+                "ENG_PLATFORM_RELEASE_SIGNING_PRIVATE_KEY": private_pem,
+                "ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY": public_pem,
+                "ENG_PLATFORM_ALLOWED_GITHUB_LOGINS": ",".join(sorted(LOCAL_ACTORS)),
+                "PYTHONPATH": os.pathsep.join(
+                    [str(_repo_root() / "src"), str(_repo_root())]
+                ),
+            }
+        )
+        with (evidence_dir / "api-1-restarted.log").open("w") as restart_log:
+            api1 = subprocess.Popen(
+                api1.args,
+                cwd=_repo_root(),
+                env=restart_env,
+                stdout=restart_log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        _wait_api(api1_url, api1)
+        reconciled_register = release_lifecycle.reconcile_register_release(
+            lifecycle_manifest_path,
+            platform_api_url=registration_url,
+            control_client=PlatformExecutionControlClient(api1_url),
+            intent_id=lost_intent_id,
+            status="promoted",
+            revision="local-integration-00001-abc",
+            reconciliation_id="observed-register-after-restart",
+        )
+        if (
+            reconciled_register["status"] != "CONFIRMED"
+            or len(_LifecycleRegistrationFixture.requests) != requests_before_reconcile
+        ):
+            raise IntegrationFailure(
+                "Lifecycle reconciliation repeated POST or failed identity"
+            )
+        scenarios.append(
+            _scenario_record(
+                "lifecycle_lost_post_restart_and_exact_get_reconciliation",
+                {
+                    "unknown_before_restart": True,
+                    "reconciled": "CONFIRMED",
+                    "repeated_posts": 0,
+                    "api_process_restarted": True,
+                },
+            )
+        )
         replay = _assert_ok(
             _one(
                 _run_client(
@@ -1147,26 +1523,12 @@ def _run_suite(args: argparse.Namespace) -> dict[str, Any]:
             )
         )
 
-        plan = release_lifecycle.live_control_plan(
-            {
-                "service_name": "cgm-sanplat-api",
-                "dependencies": {"workflow_inventory": {}},
-            },
-            "candidate",
-        )
-        if (
-            plan["remote_activation"]["enabled"]
-            or plan["sanplat_generic_bypass"]["status"] != "BLOCKED"
-        ):
-            raise IntegrationFailure(
-                "La activación remota o el bloqueo SanPlat cambiaron"
-            )
         scenarios.append(
             _scenario_record(
-                "remote_activation_and_sanplat_blocked",
+                "explicit_loopback_activation_only",
                 {
-                    "remote_activation": False,
-                    "sanplat": "BLOCKED",
+                    "service": "eng-platform-api",
+                    "activation_env": "local-integration-only",
                     "external_effects": 0,
                 },
             )
@@ -1227,8 +1589,14 @@ def _run_suite(args: argparse.Namespace) -> dict[str, Any]:
         )
         return summary
     finally:
+        _LifecycleRegistrationFixture.proceed.set()
+        registration_fixture.shutdown()
+        registration_thread.join(timeout=5)
+        registration_fixture.server_close()
+        _stop_process(api1)
         _stop_process(api2)
         _stop_process(emulator)
+        Path(header_file.name).unlink(missing_ok=True)
         if summary is not None:
             summary["emulator_warnings"] = _emulator_warning_summary(
                 evidence_dir / "emulator.log"

@@ -12,6 +12,8 @@ deployment:
   artifact_repository: cgm-sanplat-repo
   build_context: .
   health_path: /
+  api_base_url: https://cgm-sanplat-api-546821492326.us-central1.run.app
+  api_candidate_base_url: ""
 finops:
   service: cgm-sanplat-web
   env: prod

@@ -26,12 +26,12 @@ jobs:
           pip install -e ".[dev]"
       - name: Quality gate
         run: |
-          ruff check src tests
-          ruff format --check src tests
+          ruff check src tests scripts/release
+          ruff format --check src tests scripts/release
           mypy src --ignore-missing-imports
           bandit -q -lll -r src
           pip-audit
-          pytest -q --cov=eng_platform_api --cov-report=term-missing --cov-report=xml:coverage.xml --cov-fail-under=70
+          pytest -q --cov=eng_platform_api --cov=scripts.release --cov-report=term-missing --cov-report=xml:coverage.xml --cov-fail-under=70
 
   workflows:
     runs-on: ubuntu-latest
@@ -53,9 +53,9 @@ jobs:
     with:
       service-name: eng-platform-api
       python-version: "3.12"
-      lint-command: ruff check src tests
-      format-command: ruff format --check src tests
-      test-command: python -m pytest -q --cov=eng_platform_api --cov-report=json:quality-reports/coverage.json
+      lint-command: ruff check src tests scripts/release
+      format-command: ruff format --check src tests scripts/release
+      test-command: python -m pytest -q --cov=eng_platform_api --cov=scripts.release --cov-report=json:quality-reports/coverage.json
       profile: python
       working-directory: .
       coverage-threshold: 70

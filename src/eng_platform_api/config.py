@@ -47,6 +47,7 @@ class ReleaseExecutionConfig:
     """Shared execution state; remote activation stays disabled by default."""
 
     remote_activation_enabled: bool = False
+    allowed_services: tuple[str, ...] = ()
     store_path: str = "data/release_execution_control.json"
     firestore_collection: str = ""
 
@@ -143,8 +144,15 @@ def load_config() -> PlatformConfig:
     )
 
     release_execution = ReleaseExecutionConfig(
-        # Activation remains disabled until a separately approved integration.
-        remote_activation_enabled=False,
+        remote_activation_enabled=os.getenv(
+            "ENG_PLATFORM_LOCAL_RELEASE_ENABLED", "false"
+        ).lower()
+        == "true",
+        allowed_services=tuple(
+            value.strip()
+            for value in os.getenv("ENG_PLATFORM_LOCAL_RELEASE_SERVICES", "").split(",")
+            if value.strip()
+        ),
         store_path=os.getenv(
             "ENG_PLATFORM_RELEASE_CONTROL_STORE_PATH",
             "data/release_execution_control.json",

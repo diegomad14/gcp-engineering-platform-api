@@ -1,8 +1,14 @@
 # Inventario del release actual y diseño de la fase local
 
-Fecha de corte: **2026-09-09**. Este inventario documenta el estado observado y
+Fecha del inventario histórico: **2026-09-10**. Este inventario documenta el estado observado y
 los contratos implementados antes de habilitar publicación o despliegue real
 desde el motor local.
+
+La continuación del 2026-09-12 trabaja sobre `d8980592115926e14d4bbaee627aa191ed172fb3`
+con cambios locales preservados, no sobre un checkout limpio ni un nuevo fetch.
+Su snapshot de verificación y el diff completo constan en el paquete de revisión.
+Las tablas de checkouts siguientes son históricas; no representan observaciones
+live ni cambios efectuados a los repositorios originales en esta continuación.
 
 ## Resultado del inventario
 
@@ -17,10 +23,10 @@ mutaciones remotas ni activar un segundo publicador en paralelo.
 | Fuente | Cada servicio se identifica por `service_name`, repositorio y SHA; el catálogo estático tiene seis servicios. | Validar origen contra el catálogo y registrar SHA completo, branch y árbol sucio. |
 | Versión | `cgm-sanplat-api` y `eng-platform-api` conservan semantic-release en workflows de Actions; las versiones de paquetes están fijadas. | Calcular SemVer/notas localmente desde Conventional Commits y bloquear tags locales en SHA distinto. |
 | Calidad | El runner local existente produce reporte normalizado y usa cobertura global; la política canónica `oss-v2` exige además 80% diferencial. | No aceptar ni reutilizar evidencia sin SHA, base, política, toolchain y diferencial exactos. |
-| Build | Los workflows construyen y publican imágenes en Artifact Registry dentro de Actions. | Calcular `reuse_key`; opcionalmente construir con BuildKit local y `--load`. |
+| Build | Los workflows construyen y publican imágenes en Artifact Registry dentro de Actions. | Calcular `reuse_key`; reclamar bajo lock, reutilizar un único artefacto local y reconciliar `BUILDING`/`UNKNOWN` sin reconstrucción ciega. |
 | Publicación | Tags/releases, `docker push`, Deployments y dispatches viven en GitHub/Actions. | Fase 2 preparada con un publicador único, reconciliación y auditoría; live exige confirmación separada. |
 | Candidate/promote | Cloud Run y sus revisiones son gestionados por workflows existentes. | Fase 3 preparada por digest/revisión, sin `--source`; live exige autorización y confirmación. |
-| SanPlat | La operación requiere ventana corporativa y pareja API/Web coordinada. | Fase 4 conserva el orden operativo; ejecución bloqueada sin adaptador revisado y ventana concreta. |
+| SanPlat | La operación conjunta queda fuera del CLI individual. | El comando, adaptador fixture y nuevos grupos fueron retirados; el historial heredado es solo lectura y la activación sigue pendiente de validación productiva. |
 
 Los valores como `timeout=1800` o `--task-timeout=1800s` encontrados en
 workflows son límites configurados, no duraciones observadas. La fase 0 no
@@ -86,7 +92,9 @@ es `oss-v2`.
 - `schemas/local-release-manifest.schema.json`: contrato durable del manifiesto.
 - `docs/release/local-release.md`: guía de uso y límites.
 - `docs/release/local-lifecycle.md`: publicación, candidate, registro,
-  promoción, rollback, SanPlat, adopción y reanudación.
+  promoción, rollback, adopción y reanudación individuales.
+- `scripts/release/lifecycle_control.py`: composición durable de autorización,
+  lease, intent, result/reconcile y release para fixtures explícitos.
 
 El motor separa manifiesto de release y ejecución. Repetir `prepare` para el
 mismo servicio/repositorio/SHA reutiliza la identidad y crea otro registro de
@@ -95,12 +103,11 @@ de base/toolchain bloquean la reutilización.
 
 ## Próximos gates
 
-1. Resolver y probar la fuente de cobertura diferencial `oss-v2` en cada perfil.
-2. Acordar exclusión entre operadores/Actions y habilitar publicación/registro
+1. Acordar exclusión entre operadores/Actions y habilitar publicación/registro
    con una aprobación separada y auditoría de GitHub/Artifact Registry.
-3. Conectar el adapter de Deployments/estados reales para el camino local sin
+2. Conectar el adapter de Deployments/estados reales para el camino local sin
    inventar un run de Actions.
-4. Aportar adaptador SanPlat, configuración `API_BASE_URL` y ventana corporativa
+3. Aportar adaptador SanPlat revisado, autorización real, configuración `API_BASE_URL` y ventana corporativa
    completa antes del piloto coordinado.
-5. Medir el flujo real y retirar rutas duplicadas solo con aprobación
+4. Medir el flujo real y retirar rutas duplicadas solo con aprobación
    administrativa.

@@ -25,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 
 SCHEMA_VERSION = 1
@@ -39,6 +39,7 @@ CONVENTIONAL_RE = re.compile(
     r"^(?P<type>[A-Za-z][A-Za-z0-9-]*)(?:\((?P<scope>[^)]+)\))?(?P<breaking>!)?:\s+(?P<subject>.+)$"
 )
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 REMOTE_RE = re.compile(
     r"(?:github\.com[/:])(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?$"
@@ -1239,11 +1240,135 @@ def run_quality(
     )
 
 
+def _build_identity(manifest: dict[str, Any]) -> dict[str, Any]:
+    artifact = manifest.get("artifact") or {}
+    source = manifest.get("source") or {}
+    inputs = artifact.get("inputs") or {}
+    quality = manifest.get("quality") or {}
+    evidence: dict[str, Any] = {
+        "policy_id": quality.get("policy_id", ""),
+        "status": quality.get("status", ""),
+        "evidence_path": quality.get("evidence_path", ""),
+    }
+    evidence_path = str(quality.get("evidence_path", ""))
+    if evidence_path and Path(evidence_path).is_file():
+        try:
+            evidence_value = read_json(Path(evidence_path))
+        except ReleaseError:
+            evidence_value = {}
+        if isinstance(evidence_value, dict):
+            evidence["report_sha256"] = evidence_value.get("report_sha256", "")
+            evidence["evidence_id"] = evidence_value.get("evidence_id", "")
+    return {
+        "repository": manifest.get("repository", ""),
+        "service_name": manifest.get("service_name", ""),
+        "source_sha": source.get("sha", ""),
+        "base_sha": source.get("base_sha", ""),
+        "version": (manifest.get("version") or {}).get("tag", ""),
+        "recipe_sha256": inputs.get("recipe_sha256", ""),
+        "context_sha256": inputs.get("context_sha256", ""),
+        "architecture": inputs.get("architecture", ""),
+        "platform": inputs.get("platform", ""),
+        "build_args": inputs.get("build_args", {}),
+        "configuration": ((manifest.get("catalog") or {}).get("deployment") or {}),
+        "quality": evidence,
+    }
+
+
+def _update_manifest_artifact(
+    manifest_path: Path, manifest: dict[str, Any], record: dict[str, Any]
+) -> None:
+    artifact = manifest.setdefault("artifact", {})
+    artifact.update(
+        {
+            "status": "AVAILABLE",
+            "image_id": record.get("image_id", ""),
+            "digest": record["digest"],
+            "build_identity": record.get("build_identity", {}),
+            "artifact_path": str(record.get("artifact_path", "")),
+        }
+    )
+    write_json(manifest_path, manifest)
+
+
+def _artifact_record_path(state_dir: Path, key: str) -> Path:
+    return state_paths(state_dir)["artifacts"] / f"{key}.json"
+
+
+def _manifest_digest(record: dict[str, Any], image_id: str) -> str:
+    """Bind BuildKit's manifest digest to the inspected image config, never its ID."""
+    metadata = read_json(Path(record.get("metadata_path") or ""))
+    if not isinstance(metadata, dict):
+        raise ReleaseError("Invalid BuildKit metadata")
+    value = metadata.get("containerimage.digest")
+    config = metadata.get("containerimage.config.digest")
+    if not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+        raise ReleaseError("BuildKit metadata has no valid manifest digest")
+    if (
+        not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)
+        or config != image_id
+        or value == image_id
+    ):
+        raise ReleaseError(
+            "BuildKit metadata config digest differs from image identity"
+        )
+    descriptor = metadata.get("containerimage.descriptor")
+    if descriptor is not None and (
+        not isinstance(descriptor, dict) or descriptor.get("digest") != value
+    ):
+        raise ReleaseError("BuildKit manifest descriptor digest mismatch")
+    # A loaded single image cannot attest preservation of an OCI index on push.
+    if isinstance(descriptor, dict) and descriptor.get("mediaType") not in {
+        None,
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+    }:
+        raise ReleaseError(
+            "BuildKit metadata must describe an image manifest, not an index"
+        )
+    if record.get("digest") and record["digest"] != value:
+        raise ReleaseError("Recorded manifest digest differs from BuildKit metadata")
+    return value
+
+
+def _validate_build_record(record: dict[str, Any], manifest: dict[str, Any]) -> None:
+    if (
+        record.get("reuse_key") != manifest["artifact"]["reuse_key"]
+        or record.get("build_identity") != _build_identity(manifest)
+        or record.get("image") != manifest["artifact"].get("local_image")
+    ):
+        raise ReleaseError("Local build record identity differs from the manifest")
+
+
+def _find_available_artifact(
+    state_dir: Path,
+    key: str,
+    *,
+    expected_identity: dict[str, Any] | None = None,
+) -> tuple[Path, dict[str, Any]] | None:
+    for path in sorted(state_paths(state_dir)["artifacts"].glob("*.json")):
+        value = read_json(path)
+        if value.get("reuse_key") != key or value.get("status") != "AVAILABLE":
+            continue
+        recorded_identity = value.get("build_identity")
+        if expected_identity and recorded_identity != expected_identity:
+            continue
+        if value.get("reuse_key") == key and value.get("status") == "AVAILABLE":
+            if not value.get("digest"):
+                raise ReleaseError(
+                    "Local artifact has no manifest digest; run reconcile-build"
+                )
+            _manifest_digest(value, str(value.get("image_id", "")))
+            return path, value
+    return None
+
+
 def build_local(
     manifest_path: Path,
     *,
     state_dir: Path,
     execute: bool,
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> dict[str, Any]:
     manifest = read_json(manifest_path)
     if (
@@ -1253,14 +1378,32 @@ def build_local(
         raise ReleaseError("Invalid release manifest")
     artifact = manifest.get("artifact", {})
     key = artifact.get("reuse_key")
-    for path in sorted(state_paths(state_dir)["artifacts"].glob("*.json")):
-        value = read_json(path)
-        if value.get("reuse_key") == key and value.get("status") == "AVAILABLE":
+    if not isinstance(key, str) or not SHA256_RE.fullmatch(key):
+        raise ReleaseError("Manifest has no valid immutable build reuse key")
+    build_identity = _build_identity(manifest)
+    command_runner = runner or run
+    with local_lock(state_dir):
+        available = _find_available_artifact(
+            state_dir, key, expected_identity=build_identity
+        )
+        if available:
+            available_path, available_value = available
+            _validate_build_record(available_value, manifest)
+            available_value.setdefault("artifact_path", str(available_path))
+            _update_manifest_artifact(manifest_path, manifest, available_value)
             return {
                 "action": "reused",
-                "artifact": value,
+                "artifact": available_value,
                 "manifest_path": str(manifest_path),
             }
+        artifact_path = _artifact_record_path(state_dir, key)
+        if artifact_path.exists():
+            current = read_json(artifact_path)
+            _validate_build_record(current, manifest)
+            if current.get("status") in {"BUILDING", "UNKNOWN"}:
+                raise ReleaseError(
+                    "Local build is in progress or uncertain; run reconcile-build before retrying"
+                )
     if not execute:
         return {
             "action": "planned",
@@ -1275,54 +1418,185 @@ def build_local(
         )
     context = Path(artifact["context"])
     image = artifact["local_image"]
-    completed = run(
-        [
-            "docker",
-            "buildx",
-            "build",
-            "--load",
-            "--platform",
-            "linux/amd64",
-            "--tag",
-            image,
-            "--build-arg",
-            f"APP_VERSION={manifest['version']['tag']}",
-            "--label",
-            f"org.cgm.release.reuse-key={key}",
-            "--label",
-            f"org.opencontainers.image.revision={manifest['source']['sha']}",
-            "--label",
-            f"org.opencontainers.image.version={manifest['version']['tag']}",
-            str(context),
-        ],
-        check=False,
+    metadata_path = (
+        state_paths(state_dir)["artifacts"]
+        / "metadata"
+        / f"{key}-{uuid.uuid4().hex}.json"
     )
-    if completed.returncode != 0:
-        raise ReleaseError("Local Docker/BuildKit build failed")
-    inspected = run(
-        ["docker", "image", "inspect", image, "--format={{.Id}}"], check=False
-    )
-    if inspected.returncode != 0 or not inspected.stdout.strip():
-        raise ReleaseError("Local image was not found after build")
-    artifact_record = {
+    build_command = [
+        "docker",
+        "buildx",
+        "build",
+        "--load",
+        "--provenance=false",
+        "--metadata-file",
+        str(metadata_path),
+        "--platform",
+        "linux/amd64",
+        "--tag",
+        image,
+        "--build-arg",
+        f"APP_VERSION={manifest['version']['tag']}",
+        "--label",
+        f"org.cgm.release.reuse-key={key}",
+        "--label",
+        f"org.opencontainers.image.revision={manifest['source']['sha']}",
+        "--label",
+        f"org.opencontainers.image.version={manifest['version']['tag']}",
+        str(context),
+    ]
+    building_record = {
         "schema_version": SCHEMA_VERSION,
-        "artifact_id": str(uuid.uuid4()),
-        "status": "AVAILABLE",
+        "artifact_id": f"artifact-{key}",
+        "status": "BUILDING",
         "reuse_key": key,
         "image": image,
-        "image_id": inspected.stdout.strip(),
+        "build_identity": build_identity,
         "repository": manifest["repository"],
         "service_name": manifest["service_name"],
         "source_sha": manifest["source"]["sha"],
+        "base_sha": (manifest.get("source") or {}).get("base_sha", ""),
         "version": manifest["version"]["tag"],
         "created_at": iso(utc_now()),
         "remote_published": False,
+        "metadata_path": str(metadata_path),
     }
-    path = (
-        state_paths(state_dir)["artifacts"] / f"{artifact_record['artifact_id']}.json"
-    )
-    write_json(path, artifact_record)
-    return {"action": "built", "artifact": artifact_record, "artifact_path": str(path)}
+    building_record["artifact_path"] = str(artifact_path)
+    with local_lock(state_dir):
+        available = _find_available_artifact(
+            state_dir, key, expected_identity=build_identity
+        )
+        if available:
+            available_path, available_value = available
+            _validate_build_record(available_value, manifest)
+            available_value.setdefault("artifact_path", str(available_path))
+            _update_manifest_artifact(manifest_path, manifest, available_value)
+            return {
+                "action": "reused",
+                "artifact": available_value,
+                "manifest_path": str(manifest_path),
+            }
+        if artifact_path.exists():
+            current = read_json(artifact_path)
+            _validate_build_record(current, manifest)
+            if current.get("status") in {"BUILDING", "UNKNOWN"}:
+                raise ReleaseError(
+                    "Local build is in progress or uncertain; run reconcile-build before retrying"
+                )
+        write_json(artifact_path, building_record)
+        metadata_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            completed = command_runner(build_command, check=False)
+            if completed.returncode != 0:
+                raise ReleaseError("Local Docker/BuildKit build failed")
+            inspected = command_runner(
+                ["docker", "image", "inspect", image, "--format={{.Id}}"],
+                check=False,
+            )
+            if inspected.returncode != 0 or not inspected.stdout.strip():
+                raise ReleaseError("Local image was not found after build")
+            artifact_record = {
+                **building_record,
+                "status": "AVAILABLE",
+                "image_id": inspected.stdout.strip(),
+                "digest": _manifest_digest(building_record, inspected.stdout.strip()),
+                "completed_at": iso(utc_now()),
+            }
+            write_json(artifact_path, artifact_record)
+            _update_manifest_artifact(manifest_path, manifest, artifact_record)
+        except Exception as exc:
+            building_record.update(
+                {
+                    "status": "UNKNOWN",
+                    "reconciliation_required": True,
+                    "error": str(exc),
+                    "failed_at": iso(utc_now()),
+                }
+            )
+            write_json(artifact_path, building_record)
+            raise
+    return {
+        "action": "built",
+        "artifact": artifact_record,
+        "artifact_path": str(artifact_path),
+    }
+
+
+def reconcile_local_build(
+    manifest_path: Path,
+    *,
+    state_dir: Path,
+    inspector: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Reconcile a durable BUILDING/UNKNOWN record without rebuilding it."""
+    manifest = read_json(manifest_path)
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != SCHEMA_VERSION
+    ):
+        raise ReleaseError("Invalid release manifest")
+    artifact = manifest.get("artifact") or {}
+    key = artifact.get("reuse_key")
+    if not isinstance(key, str) or not SHA256_RE.fullmatch(key):
+        raise ReleaseError("Manifest has no valid immutable build reuse key")
+    path = _artifact_record_path(state_dir, key)
+    with local_lock(state_dir):
+        if not path.exists():
+            raise ReleaseError("No durable local build record exists")
+        record = read_json(path)
+        _validate_build_record(record, manifest)
+        if record.get("status") == "AVAILABLE":
+            if record.get("digest"):
+                _manifest_digest(record, str(record.get("image_id", "")))
+                _update_manifest_artifact(manifest_path, manifest, record)
+                return {
+                    "action": "reused",
+                    "artifact": record,
+                    "artifact_path": str(path),
+                }
+        elif record.get("status") not in {"BUILDING", "UNKNOWN"}:
+            raise ReleaseError("Local build record is not awaiting reconciliation")
+        if inspector is not None:
+            observed = inspector(record)
+            if not isinstance(observed, dict):
+                raise ReleaseError("Local build inspector returned an invalid record")
+            if observed.get("reuse_key") != key:
+                raise ReleaseError(
+                    "Reconciled image reuse key differs from the manifest"
+                )
+            image_id = str(observed.get("image_id", ""))
+        else:
+            image = str(record.get("image", ""))
+            inspected = run(
+                ["docker", "image", "inspect", image, "--format={{.Id}}"],
+                check=False,
+            )
+            image_id = inspected.stdout.strip() if inspected.returncode == 0 else ""
+        if not image_id:
+            record.update(
+                {
+                    "status": "UNKNOWN",
+                    "reconciliation_required": True,
+                    "reconciled_at": iso(utc_now()),
+                }
+            )
+            write_json(path, record)
+            raise ReleaseError(
+                "Local build result is uncertain; image was not observed"
+            )
+        manifest_digest = _manifest_digest(record, image_id)
+        record.update(
+            {
+                "status": "AVAILABLE",
+                "image_id": image_id,
+                "digest": manifest_digest,
+                "reconciled_at": iso(utc_now()),
+                "reconciliation_required": False,
+            }
+        )
+        write_json(path, record)
+        _update_manifest_artifact(manifest_path, manifest, record)
+        return {"action": "reconciled", "artifact": record, "artifact_path": str(path)}
 
 
 def resume(state_dir: Path, release_id: str) -> dict[str, Any]:
@@ -1467,18 +1741,6 @@ def parser() -> argparse.ArgumentParser:
     register_parser.add_argument("--confirm-remote-effects", action="store_true")
     register_parser.add_argument("--json", action="store_true", dest="as_json")
 
-    sanplat_parser = commands.add_parser(
-        "sanplat", help="plan a coordinated SanPlat API/Web corporate window"
-    )
-    sanplat_parser.add_argument("--api-manifest", type=Path, required=True)
-    sanplat_parser.add_argument("--web-manifest", type=Path, required=True)
-    sanplat_parser.add_argument("--state-dir", type=Path, default=default_state_dir())
-    sanplat_parser.add_argument("--release-group-id", default="")
-    sanplat_parser.add_argument("--auxiliary-service", action="append", default=[])
-    sanplat_parser.add_argument("--execute", action="store_true")
-    sanplat_parser.add_argument("--confirm-remote-effects", action="store_true")
-    sanplat_parser.add_argument("--json", action="store_true", dest="as_json")
-
     adoption_parser = commands.add_parser(
         "adopt", help="generate a phase-5 service adoption plan"
     )
@@ -1497,6 +1759,16 @@ def parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--execute", action="store_true")
     build_parser.add_argument("--json", action="store_true", dest="as_json")
 
+    reconcile_build_parser = commands.add_parser(
+        "reconcile-build",
+        help="reconcile an interrupted local build without rebuilding",
+    )
+    reconcile_build_parser.add_argument("--manifest", type=Path, required=True)
+    reconcile_build_parser.add_argument(
+        "--state-dir", type=Path, default=default_state_dir()
+    )
+    reconcile_build_parser.add_argument("--json", action="store_true", dest="as_json")
+
     resume_parser = commands.add_parser(
         "resume", help="read the first safe local pending stage"
     )
@@ -1512,6 +1784,12 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from scripts.release import release_lifecycle as lifecycle
+    from scripts.release.execution_control import (
+        ExecutionControlError,
+        PlatformExecutionControlClient,
+    )
+
     args = parser().parse_args(argv)
     try:
         platform_root = (
@@ -1522,21 +1800,32 @@ def main(argv: list[str] | None = None) -> int:
         state_dir = (
             Path(getattr(args, "state_dir", default_state_dir())).expanduser().resolve()
         )
-        lifecycle = None
+        control_kwargs: dict[str, Any] = {}
         if args.command in {
             "publish",
             "candidate",
             "promote",
             "rollback",
             "register",
-            "sanplat",
-            "adopt",
             "resume",
-        }:
+        } and (getattr(args, "execute", False) or getattr(args, "reconcile", False)):
             try:
-                from . import release_lifecycle as lifecycle
-            except ImportError:
-                import release_lifecycle as lifecycle  # type: ignore[no-redef]
+                control_url = getattr(args, "platform_api_url", "") or os.environ.get(
+                    "ENG_PLATFORM_API_URL", ""
+                )
+                if not control_url:
+                    raise ReleaseError(
+                        "ENG_PLATFORM_API_URL is required for remote execution"
+                    )
+                client = PlatformExecutionControlClient(control_url)
+                control_kwargs = {"control_client": client}
+                if args.command != "resume":
+                    control_kwargs.update(
+                        actor_id=client.authenticated_actor(),
+                        owner_id=str(uuid.uuid4()),
+                    )
+            except ExecutionControlError as exc:
+                raise ReleaseError(str(exc)) from exc
         if args.command == "doctor":
             service = (
                 load_catalog(platform_root, args.service_name)
@@ -1627,6 +1916,7 @@ def main(argv: list[str] | None = None) -> int:
                 state_dir=state_dir,
                 execute=args.execute,
                 confirm_remote_effects=args.confirm_remote_effects,
+                **control_kwargs,
             )
         elif args.command == "candidate":
             value = lifecycle.candidate(
@@ -1634,6 +1924,7 @@ def main(argv: list[str] | None = None) -> int:
                 state_dir=state_dir,
                 execute=args.execute,
                 confirm_remote_effects=args.confirm_remote_effects,
+                **control_kwargs,
             )
         elif args.command == "promote":
             value = lifecycle.promote(
@@ -1642,6 +1933,7 @@ def main(argv: list[str] | None = None) -> int:
                 execute=args.execute,
                 confirm_remote_effects=args.confirm_remote_effects,
                 confirmation=args.confirm,
+                **control_kwargs,
             )
         elif args.command == "rollback":
             value = lifecycle.rollback(
@@ -1651,6 +1943,7 @@ def main(argv: list[str] | None = None) -> int:
                 execute=args.execute,
                 confirm_remote_effects=args.confirm_remote_effects,
                 confirmation=args.confirm,
+                **control_kwargs,
             )
         elif args.command == "register":
             value = lifecycle.register_release(
@@ -1659,19 +1952,10 @@ def main(argv: list[str] | None = None) -> int:
                 status=args.status,
                 revision=args.revision,
                 platform_api_url=args.platform_api_url,
-                token=os.environ.get("ENG_PLATFORM_RELEASE_TOKEN", ""),
+                token="",
                 execute=args.execute,
                 confirm_remote_effects=args.confirm_remote_effects,
-            )
-        elif args.command == "sanplat":
-            value = lifecycle.sanplat(
-                args.api_manifest,
-                args.web_manifest,
-                state_dir=state_dir,
-                release_group_id=args.release_group_id,
-                auxiliary_services=args.auxiliary_service,
-                execute=args.execute,
-                confirm_remote_effects=args.confirm_remote_effects,
+                **control_kwargs,
             )
         elif args.command == "adopt":
             value = lifecycle.adoption_plan(
@@ -1679,18 +1963,22 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "resume":
             value = lifecycle.resume(
-                state_dir, args.release_id, reconcile=args.reconcile
+                state_dir, args.release_id, reconcile=args.reconcile, **control_kwargs
             )
         elif args.command == "build":
             value = build_local(
                 args.manifest.resolve(), state_dir=state_dir, execute=args.execute
             )
+        elif args.command == "reconcile-build":
+            value = reconcile_local_build(args.manifest.resolve(), state_dir=state_dir)
         output(value, args.as_json)
         return 0
-    except ReleaseError as exc:
+    except (ReleaseError, ExecutionControlError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from scripts.release.local_release import main as package_main
+
+    raise SystemExit(package_main())

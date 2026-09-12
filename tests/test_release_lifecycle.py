@@ -137,60 +137,23 @@ def test_register_payload_carries_release_identity_and_digest(tmp_path):
     assert payload["artifact_digest"] == "sha256:" + "b" * 64
     assert payload["triggered_by"] == "local-release"
 
+    value["runtime"]["sanplat"] = {"release_group_id": "window-1"}
+    grouped = release_lifecycle.release_payload(value, status="candidate")
+    assert grouped["release_group_id"] == ""
+
     value["runtime"]["rollback"] = {"target_revision": "eng-platform-api-00010-old"}
     rolled_back = release_lifecycle.release_payload(value, status="rolled_back")
     assert rolled_back["services"][0]["revision"] == "eng-platform-api-00010-old"
 
 
 def test_sanplat_plan_preserves_pair_and_stops_execution_without_adapter(tmp_path):
-    api = manifest(tmp_path, "cgm-sanplat-api")
-    web = manifest(tmp_path, "cgm-sanplat-web")
-    web["release_id"] = "22222222-2222-4222-8222-222222222222"
-    web["repository"] = "diegomad14/cgm-sanplat-web"
-    web["source"]["repository"] = web["repository"]
-
-    plan = release_lifecycle.sanplat_plan(
-        api,
-        web,
-        release_group_id="sanplat-window-20260909",
-        auxiliary_services=["cgm-bot-api"],
+    assert (
+        "sanplat"
+        not in release_lifecycle.local_release.parser()
+        ._subparsers._group_actions[0]
+        .choices
     )
-
-    assert plan["release_group_id"] == "sanplat-window-20260909"
-    assert plan["services"]["unchanged_auxiliary"] == ["cgm-bot-api"]
-    assert [step["name"] for step in plan["ordered_steps"]] == [
-        "prepare",
-        "authorize",
-        "capture-state",
-        "maintenance",
-        "pause-deliveries",
-        "drain",
-        "migrations",
-        "promote-pair",
-        "validate-functional",
-        "resume",
-    ]
-    assert plan["gates"]["adapter_configured"] is False
-    assert plan["gates"]["frontend_api_base_url_declared"] is False
-    assert "web API_BASE_URL" in plan["gates"]["missing_candidate_evidence"]
-    assert plan["gates"]["candidate_identity_exact"] is True
-    assert "API_BASE_URL" in plan["frontend_config"]["source"]
-
-    api_path = write_manifest(tmp_path, api)
-    web_path = write_manifest(tmp_path, web)
-    with pytest.raises(
-        release_lifecycle.LifecycleError,
-        match="SanPlat execution is intentionally gated",
-    ):
-        release_lifecycle.sanplat(
-            api_path,
-            web_path,
-            state_dir=tmp_path / "state",
-            release_group_id="sanplat-window-20260909",
-            auxiliary_services=[],
-            execute=True,
-            confirm_remote_effects=True,
-        )
+    assert not hasattr(release_lifecycle, "sanplat")
 
 
 def test_live_mutations_fail_closed_without_shared_exclusion_or_authorization(tmp_path):
@@ -208,9 +171,7 @@ def test_live_mutations_fail_closed_without_shared_exclusion_or_authorization(tm
     sanplat_value = manifest(tmp_path, "cgm-sanplat-api")
     sanplat_path = tmp_path / "sanplat-generic.json"
     sanplat_path.write_text(json.dumps(sanplat_value), encoding="utf-8")
-    with pytest.raises(
-        release_lifecycle.LifecycleError, match="SanPlat generic lifecycle commands"
-    ):
+    with pytest.raises(release_lifecycle.LifecycleError, match="shared CLI/CLI"):
         release_lifecycle.candidate(
             sanplat_path,
             state_dir=tmp_path / "state",
@@ -374,7 +335,12 @@ def test_lifecycle_identity_helpers_and_local_command_doubles(monkeypatch, tmp_p
         release_lifecycle._candidate_url(
             {
                 "status": {
-                    "traffic": [{"tag": "candidate-v1-2-3", "url": "https://candidate"}]
+                    "traffic": [
+                        {
+                            "tag": "candidate-v1-2-3",
+                            "url": "https://candidate",
+                        }
+                    ]
                 }
             },
             "candidate-v1-2-3",
@@ -639,10 +605,14 @@ def test_publish_execute_records_local_double_effects_and_detects_digest_conflic
 def test_candidate_promote_and_rollback_execute_with_simulated_external_services(
     monkeypatch, tmp_path
 ):
+    from tests.test_release_provider_identity import revision_fixture
+
     value = manifest(tmp_path)
     value["runtime"]["candidate"]["digest"] = value["artifact"]["digest"]
+    identity = release_lifecycle._candidate_identity(value)
+    previous = {**identity, "revision": "eng-platform-api-00011-old"}
+    value["runtime"]["known_revisions"] = {previous["revision"]: previous}
     path = write_manifest(tmp_path, value)
-    digest = value["artifact"]["digest"]
     monkeypatch.setattr(
         release_lifecycle, "_require_live_controls", lambda *_args: None
     )
@@ -654,14 +624,19 @@ def test_candidate_promote_and_rollback_execute_with_simulated_external_services
         "_run_command",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
-    candidate_revision = "eng-platform-api-00013-new"
+    candidate_revision = identity["revision"]
     candidate_json = iter(
         [
-            {"status": {"latestCreatedRevisionName": candidate_revision}},
-            {"status": {"imageDigest": digest}},
+            revision_fixture(identity),
             {
                 "status": {
-                    "traffic": [{"tag": "candidate-v1-2-3", "url": "https://candidate"}]
+                    "traffic": [
+                        {
+                            "tag": "candidate-v1-2-3",
+                            "url": "https://candidate",
+                            "revisionName": candidate_revision,
+                        }
+                    ]
                 }
             },
         ]
@@ -693,12 +668,9 @@ def test_candidate_promote_and_rollback_execute_with_simulated_external_services
     }
     promote_json = iter(
         [
-            {
-                "status": {
-                    "conditions": [{"type": "Ready", "state": "CONDITION_SUCCEEDED"}]
-                }
-            },
+            revision_fixture(identity),
             traffic,
+            revision_fixture(previous),
             {
                 "status": {
                     "traffic": [{"percent": 100, "revisionName": candidate_revision}],
@@ -724,7 +696,7 @@ def test_candidate_promote_and_rollback_execute_with_simulated_external_services
 
     rollback_json = iter(
         [
-            {"status": {"service": "READY"}},
+            revision_fixture(previous),
             {
                 "status": {
                     "traffic": [
@@ -794,8 +766,8 @@ def test_lifecycle_unknown_and_register_local_http_double(monkeypatch, tmp_path)
             return json.dumps({"id": value["release_id"]}).encode("utf-8")
 
     monkeypatch.setattr(
-        release_lifecycle.urllib.request,
-        "urlopen",
+        release_lifecycle,
+        "authenticated_urlopen",
         lambda *_args, **_kwargs: Response(),
     )
     registered = release_lifecycle.register_release(
@@ -820,23 +792,22 @@ def test_lifecycle_unknown_and_register_local_http_double(monkeypatch, tmp_path)
 
 def test_lifecycle_sanplat_dry_run_adoption_and_stage_progression(tmp_path):
     api = manifest(tmp_path, "cgm-sanplat-api")
-    web = manifest(tmp_path, "cgm-sanplat-web")
-    web["release_id"] = "22222222-2222-4222-8222-222222222222"
-    web["repository"] = "diegomad14/cgm-sanplat-web"
-    api_path = write_manifest(tmp_path, api)
-    web_path = write_manifest(tmp_path, web)
-    planned = release_lifecycle.sanplat(
-        api_path,
-        web_path,
-        state_dir=tmp_path / "sanplat-state",
-        release_group_id="",
-        auxiliary_services=[],
-        execute=False,
-        confirm_remote_effects=False,
+    state_dir = tmp_path / "legacy-sanplat-state"
+    manifest_path = state_dir / "manifests" / f"{api['release_id']}.json"
+    release_lifecycle.local_release.write_json(manifest_path, api)
+    execution, execution_path = release_lifecycle.begin_execution(
+        api, state_dir, "sanplat", dry_run=False
     )
-    assert planned["execution"]["status"] == "PLANNED"
-    assert planned["execution"]["remote_effects"] == []
+    execution["status"] = "UNKNOWN"
+    release_lifecycle.save_execution(execution_path, execution)
+    result = release_lifecycle.resume(state_dir, api["release_id"], reconcile=True)
+    assert result["safe_to_continue"] is False
+    assert result["unknown_effect_requires_reconciliation"] is True
+    assert result["first_pending_stage"] == "manual-review"
 
+
+def test_individual_adoption_stage_progression(tmp_path):
+    api_path = tmp_path / "individual.json"
     value = manifest(tmp_path)
     stages = [
         ("quality", {"quality": {"status": "PENDING"}}),
@@ -963,12 +934,10 @@ def test_every_lifecycle_dry_run_has_no_remote_effects(
 
 
 @pytest.mark.parametrize("operation", ["candidate", "promote", "rollback"])
-def test_sanplat_generic_routes_are_all_blocked(monkeypatch, tmp_path, operation):
+def test_individual_service_requires_shared_controls(monkeypatch, tmp_path, operation):
     value = manifest(tmp_path, "cgm-sanplat-api")
     path = write_manifest(tmp_path, value)
-    with pytest.raises(
-        release_lifecycle.LifecycleError, match="SanPlat generic lifecycle commands"
-    ):
+    with pytest.raises(release_lifecycle.LifecycleError, match="shared CLI/CLI"):
         kwargs = {
             "state_dir": tmp_path / f"{operation}-state",
             "execute": True,

@@ -79,6 +79,8 @@ def issue(
     operation: str = "",
     audience: str = AUDIENCE,
     execution_mode: str = "github-actions",
+    configuration_hash: str = "",
+    capability_issued: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     now = int(time.time())
     claims: dict[str, Any] = {
@@ -106,12 +108,20 @@ def issue(
             claims[key] = value
     if target_revision:
         claims["target_revision"] = target_revision
+    if configuration is not None and configuration_hash:
+        raise ReleaseAuthorizationError(
+            "Specify configuration or configuration_hash, not both"
+        )
     if configuration is not None:
         claims["configuration_hash"] = hashlib.sha256(
             json.dumps(configuration, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
+    elif configuration_hash:
+        claims["configuration_hash"] = configuration_hash
     if execution_repository:
         claims["execution_repository"] = execution_repository
+    if capability_issued:
+        claims["capability_issued"] = True
     header = {"alg": "EdDSA", "typ": "JWT", "kid": "release-v1"}
     signing_input = f"{_json_segment(header)}.{_json_segment(claims)}".encode()
     token = f"{signing_input.decode()}.{_b64encode(_private_key().sign(signing_input))}"
