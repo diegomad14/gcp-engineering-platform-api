@@ -1222,7 +1222,10 @@ def _run_suite(args: argparse.Namespace) -> dict[str, Any]:
                 execute=True,
                 confirm_remote_effects=True,
                 local_fixture=True,
-                control_client=PlatformExecutionControlClient(api1_url),
+                control_client=PlatformExecutionControlClient(
+                    api1_url,
+                    transport=_fixture_http_transport(api1_url, session_headers),
+                ),
                 authorization_token=lost_token,
                 actor_id=lifecycle_context.actor_id,
                 owner_id="lost-register-owner",
