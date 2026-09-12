@@ -21,7 +21,12 @@ from ..models import (
     ReleaseTagPage,
 )
 from ..security import require_deployer
-from ..services import catalog, deployment_store, github_deployments
+from ..services import (
+    catalog,
+    deployment_store,
+    github_deployments,
+    local_release_policy,
+)
 from .quality import get_quality_report
 
 router = APIRouter(prefix="/api", tags=["deployments"])
@@ -47,6 +52,10 @@ def _service_or_404(service_name: str):
 
 
 def _require_deployment_ready(service) -> None:
+    try:
+        local_release_policy.require_legacy_allowed(service.service_name)
+    except local_release_policy.LocalReleasePolicyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if service.deployment_ready:
         return
     blockers = (

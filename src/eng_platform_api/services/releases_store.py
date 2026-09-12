@@ -22,6 +22,10 @@ _COLLECTION = os.getenv("ENG_PLATFORM_RELEASES_FIRESTORE_COLLECTION", "")
 _store_lock = threading.RLock()
 
 
+class ReleaseConflict(ValueError):
+    """A release identity was reused with different immutable inputs."""
+
+
 @lru_cache(maxsize=4)
 def _firestore_client(project_id: str):
     from google.cloud import firestore
@@ -34,6 +38,112 @@ def _firestore_collection():
         return None
     project_id = os.getenv("ENG_PLATFORM_GCP_PROJECT_ID", "").strip()
     return _firestore_client(project_id).collection(_COLLECTION)
+
+
+def _advance_release(existing: ReleaseItem, requested: ReleaseItem) -> ReleaseItem:
+    if existing.status == requested.status:
+        if (existing.revision, existing.action) != (
+            requested.revision,
+            requested.action,
+        ):
+            raise ReleaseConflict(
+                "Release phase already has a different revision or action"
+            )
+        return existing
+    transitions = {
+        "candidate": {"promoted", "rolled_back"},
+        "promoted": {"rolled_back"},
+    }
+    if requested.status not in transitions.get(existing.status, set()):
+        raise ReleaseConflict(
+            "Release status cannot move backwards or skip its lifecycle"
+        )
+    if requested.status == "promoted" and existing.revision != requested.revision:
+        raise ReleaseConflict(
+            "Promotion must preserve the registered candidate revision"
+        )
+    return requested
+
+
+def _firestore_create_release(
+    collection: object,
+    items: list[ReleaseItem],
+    payload: ReleaseCreateRequest,
+) -> list[ReleaseItem]:
+    """Reserve every service row for a release identity atomically."""
+    from google.cloud import firestore
+
+    client = getattr(collection, "_client", None)
+    if client is None:
+        raise RuntimeError("Firestore collection has no client")
+    transaction = client.transaction()
+
+    @firestore.transactional
+    def reserve(transaction):
+        existing_rows: dict[str, ReleaseItem] = {}
+        documents = {
+            item.service_name: collection.document(
+                f"{payload.release_id}-{item.service_name}"
+            )
+            for item in items
+        }
+        immutable = (
+            "repository",
+            "version",
+            "release_group_id",
+            "source_sha",
+            "artifact_digest",
+        )
+        for item in items:
+            snapshot = documents[item.service_name].get(transaction=transaction)
+            if not getattr(snapshot, "exists", False):
+                continue
+            record = snapshot.to_dict() or {}
+            if (
+                record.get("release_id", "") != payload.release_id
+                or record.get("service_name", "") != item.service_name
+                or any(
+                    record.get(key, "") != getattr(payload, key) for key in immutable
+                )
+            ):
+                raise ReleaseConflict(
+                    "Release identity already exists with different immutable inputs"
+                )
+            existing_rows[item.service_name] = ReleaseItem(**record)
+
+        if existing_rows:
+            if len(existing_rows) != len(items):
+                raise ReleaseConflict(
+                    "Release identity is missing one of its service rows"
+                )
+            advanced = [
+                _advance_release(existing_rows[item.service_name], item)
+                for item in items
+            ]
+            for item in advanced:
+                if item != existing_rows[item.service_name]:
+                    transaction.set(
+                        documents[item.service_name],
+                        {
+                            **item.model_dump(),
+                            "triggered_by": payload.triggered_by,
+                            "rollback_from_version": payload.rollback_from_version,
+                            "notes": payload.notes,
+                        },
+                    )
+            return advanced
+
+        for item in items:
+            record = {
+                **item.model_dump(),
+                "triggered_by": payload.triggered_by,
+                "rollback_from_version": payload.rollback_from_version,
+                "notes": payload.notes,
+            }
+            transaction.create(documents[item.service_name], record)
+        return items
+
+    return list(reserve(transaction))
 
 
 def _resolve_path() -> Path:
@@ -92,6 +202,10 @@ def _item(
     action: str,
     github_run_url: str,
     created_at: str,
+    release_id: str = "",
+    release_group_id: str = "",
+    source_sha: str = "",
+    artifact_digest: str = "",
 ) -> Optional[ReleaseItem]:
     if not service_name or not repository:
         return None
@@ -101,6 +215,10 @@ def _item(
             repository=repository,
             version=version,
             status=status,
+            release_id=release_id,
+            release_group_id=release_group_id,
+            source_sha=source_sha,
+            artifact_digest=artifact_digest,
             revision=revision,
             action=cast(ReleaseServiceAction, action),
             github_run_url=github_run_url,
@@ -112,6 +230,10 @@ def _item(
             repository=repository,
             version=version,
             status=status,
+            release_id=release_id,
+            release_group_id=release_group_id,
+            source_sha=source_sha,
+            artifact_digest=artifact_digest,
             revision=revision,
             action="missing",
             github_run_url=github_run_url,
@@ -149,6 +271,7 @@ def _legacy_fixed_revision_items(record: dict) -> list[ReleaseItem]:
                 action=action,
                 github_run_url=str(record.get("github_run_url", "")),
                 created_at=str(record.get("created_at", "")),
+                release_group_id=str(record.get("release_group_id", "")),
             )
             if item:
                 items.append(item)
@@ -165,6 +288,10 @@ def release_items_from_record(record: dict) -> list[ReleaseItem]:
             ),
             version=str(record.get("version", "")),
             status=str(record.get("status", "")),
+            release_id=str(record.get("release_id", "")),
+            source_sha=str(record.get("source_sha", "")),
+            release_group_id=str(record.get("release_group_id", "")),
+            artifact_digest=str(record.get("artifact_digest", "")),
             revision=str(record.get("revision", "")),
             action=str(record.get("action", "missing")),
             github_run_url=str(record.get("github_run_url", "")),
@@ -189,6 +316,10 @@ def release_items_from_record(record: dict) -> list[ReleaseItem]:
                 repository=_repository_for_service(service.service_name, record),
                 version=str(record.get("version", "")),
                 status=str(record.get("status", "")),
+                release_id=str(record.get("release_id", "")),
+                source_sha=str(record.get("source_sha", "")),
+                release_group_id=str(record.get("release_group_id", "")),
+                artifact_digest=str(record.get("artifact_digest", "")),
                 revision=service.revision,
                 action=service.action,
                 github_run_url=str(record.get("github_run_url", "")),
@@ -210,6 +341,10 @@ def save_release(payload: ReleaseCreateRequest) -> list[ReleaseItem]:
             repository=payload.repository,
             version=payload.version,
             status=payload.status,
+            release_id=payload.release_id,
+            release_group_id=payload.release_group_id,
+            source_sha=payload.source_sha,
+            artifact_digest=payload.artifact_digest,
             revision=normalized.revision,
             action=normalized.action,
             github_run_url=payload.github_run_url,
@@ -221,20 +356,62 @@ def save_release(payload: ReleaseCreateRequest) -> list[ReleaseItem]:
 
     collection = _firestore_collection()
     if collection is not None:
+        if payload.release_id:
+            return _firestore_create_release(collection, items, payload)
         for item in items:
             doc_id = f"{item.service_name}-{item.created_at}"
-            collection.document(doc_id).set(
-                {
-                    **item.model_dump(),
-                    "triggered_by": payload.triggered_by,
-                    "rollback_from_version": payload.rollback_from_version,
-                    "notes": payload.notes,
-                }
-            )
+            document = collection.document(doc_id)
+            record = {
+                **item.model_dump(),
+                "triggered_by": payload.triggered_by,
+                "rollback_from_version": payload.rollback_from_version,
+                "notes": payload.notes,
+            }
+            document.set(record)
         return items
 
     with _store_lock:
         records = _load()
+        if payload.release_id:
+            existing = [
+                record
+                for record in records
+                if record.get("release_id") == payload.release_id
+            ]
+            if existing:
+                immutable = (
+                    "repository",
+                    "version",
+                    "release_group_id",
+                    "source_sha",
+                    "artifact_digest",
+                )
+                if any(
+                    record.get(key, "") != getattr(payload, key)
+                    for record in existing
+                    for key in immutable
+                ):
+                    raise ReleaseConflict(
+                        "Release identity already exists with different immutable inputs"
+                    )
+                existing_by_service = {
+                    record.get("service_name"): record for record in existing
+                }
+                if all(item.service_name in existing_by_service for item in items):
+                    advanced = [
+                        _advance_release(
+                            ReleaseItem(**existing_by_service[item.service_name]), item
+                        )
+                        for item in items
+                    ]
+                    for item in advanced:
+                        record = existing_by_service[item.service_name]
+                        record.update(item.model_dump())
+                    _save(records)
+                    return advanced
+                raise ReleaseConflict(
+                    "Release identity is missing one of its service rows"
+                )
         records.extend(
             {
                 **item.model_dump(),

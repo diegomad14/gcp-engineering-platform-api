@@ -36,6 +36,10 @@ The platform dispatches this workflow through GitHub Deployments. The legacy
 manual candidate/promote/rollback templates were removed because their
 `workflow_dispatch` interfaces exceeded GitHub's supported input limit.
 
+`service-factory` may also emit `.cgm/local-release.yaml` as a declarative
+local-first preparation contract. It does not grant authorization, change
+triggers or protections, disable Actions, or make remote mutations.
+
 ## Quality Gate
 
 New services should use `github-actions/pr-check.yml`, which calls the open

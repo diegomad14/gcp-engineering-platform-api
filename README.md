@@ -69,6 +69,10 @@ configured bucket. Reports are idempotent by `service_name + commit_sha`.
   `GCP_WIF_PROVIDER` only for read-only CI validation.
 - `ENG_PLATFORM_DEPLOYMENT_FIRESTORE_COLLECTION` enables durable minimal
   metadata; local development falls back to `data/deployments.json`.
+- `ENG_PLATFORM_RELEASE_CONTROL_FIRESTORE_COLLECTION` enables the shared
+  release lease and intent store; local development uses the durable file in
+  `ENG_PLATFORM_RELEASE_CONTROL_STORE_PATH` (default
+  `data/release_execution_control.json`).
 
 The GitHub App installation needs **Actions: read/write**, **Contents: read** and
 **Deployments: read/write**. The API creates one GitHub Deployment per service
@@ -117,6 +121,13 @@ GitHub remains authoritative for tags, workflow state, jobs and logs.
   collection; configure this in production so multi-instance Cloud Run cannot
   replay a release authorization.
 
+Local-release authorization is a separate, short-lived Engineering Platform
+ticket audience. The CLI consumes it through the control-plane endpoint; it
+cannot mint one, use a quality-ingest token, or enable remote activation. The
+shared lease/intention contract does not call external providers, and the
+lifecycle remote-activation gate remains disabled until a separately approved
+CLI/Actions integration exists.
+
 Register the OAuth callback as
 `https://<api-host>/api/auth/callback`. The browser session stores only the
 GitHub login and avatar URL; the OAuth access token is not persisted. Deploy
@@ -130,6 +141,18 @@ CI preserves native checks and publishes detailed Python coverage to the mandato
 executable lines. Reports include tested/base SHA and are validated against the
 catalog before release, candidate and promotion; missing or stale evidence blocks.
 See [quality policy](docs/quality/open-source-quality-gate.md).
+
+## Local-first release preparation
+
+The local release engine is a reviewable pilot contract, not an active
+replacement for the protected GitHub path. It prepares exact-SHA manifests,
+OSS evidence, local BuildKit reuse and dry-run lifecycle plans. Remote
+execution remains blocked until a reviewed shared-exclusion lease and
+platform-issued authorization adapter exist; `--execute` plus confirmation is
+not sufficient. Actions checks, semantic-release, deployment authorization
+and branch protections remain authoritative during the proposed transition.
+
+See [local release](docs/release/local-release.md) and [local lifecycle](docs/release/local-lifecycle.md).
 
 The CLI uses the same Service Factory generator as the API. Install the project
 (`pip install -e .`) and run `python scripts/service_factory.py --help`.

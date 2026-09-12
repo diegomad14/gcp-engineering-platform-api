@@ -44,7 +44,9 @@ def main() -> int:
     spec = fetch_json(base + "/openapi.json")
     paths = spec.get("paths", {})
     if len(paths) < args.min_paths:
-        raise SystemExit(f"OpenAPI path count {len(paths)} below required {args.min_paths}")
+        raise SystemExit(
+            f"OpenAPI path count {len(paths)} below required {args.min_paths}"
+        )
 
     expected = [item for item in args.critical_paths.split() if item]
     missing = [path for path in expected if path not in paths]
@@ -57,4 +59,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
