@@ -64,10 +64,9 @@ def test_register_creates_one_single_service_row(client):
 
 
 def test_register_rejects_new_grouped_or_multi_service_release(client):
-    grouped = _payload(release_id="new-local-release", release_group_id="window-1")
+    grouped = _payload(release_group_id="window-1")
     assert client.post("/api/releases", json=grouped).status_code == 409
     multi = _payload(
-        release_id="new-local-release",
         services=[
             *_payload()["services"],
             {

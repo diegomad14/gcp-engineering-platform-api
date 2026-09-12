@@ -777,6 +777,7 @@ def test_lifecycle_unknown_and_register_local_http_double(monkeypatch, tmp_path)
         revision="eng-platform-api-00013-new",
         platform_api_url="https://local-double.invalid",
         token="simulated-token",
+        local_fixture=True,
         execute=True,
         confirm_remote_effects=True,
     )

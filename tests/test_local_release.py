@@ -1224,3 +1224,11 @@ def test_local_release_cli_dispatch_and_resume_paths(
         == 0
     )
     assert capsys.readouterr().out
+
+
+def test_register_parser_uses_platform_url_environment(monkeypatch):
+    monkeypatch.setenv("ENG_PLATFORM_API_URL", "https://platform.example")
+    args = local_release.parser().parse_args(
+        ["register", "--manifest", "manifest.json"]
+    )
+    assert args.platform_api_url == "https://platform.example"

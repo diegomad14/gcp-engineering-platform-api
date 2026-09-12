@@ -219,6 +219,20 @@ def test_registration_requires_intent(registration):
     assert not registration.saved
 
 
+def test_registration_rejects_anonymous_session(monkeypatch):
+    monkeypatch.setattr(api.config, "mock_mode", False)
+    response = TestClient(app).post(
+        "/api/releases/",
+        json={
+            "release_id": "local-release",
+            "repository": "test/repo",
+            "version": "v1.0.0",
+            "services": [{"service_name": "test-api", "revision": "rev-1"}],
+        },
+    )
+    assert response.status_code == 401
+
+
 def test_registration_accepts_exact_authorized_payload(registration):
     response = registration.client.post(
         "/api/releases/",

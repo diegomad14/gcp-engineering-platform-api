@@ -2314,6 +2314,10 @@ def register_release(
     owner_id: str = "",
     local_fixture: bool = False,
 ) -> dict[str, Any]:
+    if token and not local_fixture:
+        raise LifecycleError(
+            "Direct registration tokens require explicit local fixture mode"
+        )
     manifest = load_manifest(manifest_path)
     payload = release_payload(manifest, status=status, revision=revision)
     _require_confirmation(execute, confirm_remote_effects)

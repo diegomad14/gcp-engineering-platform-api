@@ -41,7 +41,7 @@ def register_release(payload: ReleaseCreateRequest, request: Request):
     controlled = bool(payload.release_id) or any(
         local_release_policy.adopted(item.service_name) for item in payload.services
     )
-    if controlled and (payload.release_group_id or len(payload.services) != 1):
+    if payload.release_group_id or len(payload.services) != 1:
         raise HTTPException(
             status_code=409,
             detail="New release registrations must contain exactly one service and no release group",

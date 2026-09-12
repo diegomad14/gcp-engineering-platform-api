@@ -329,6 +329,7 @@ def test_controlled_register_records_durable_intent_and_resume_reads_it(
         revision="fixture-revision",
         platform_api_url=register_server,
         token="fixture-token",
+        local_fixture=True,
         execute=True,
         confirm_remote_effects=True,
         control_client=control_client,

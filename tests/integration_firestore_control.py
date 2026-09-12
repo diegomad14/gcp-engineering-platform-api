@@ -1503,7 +1503,9 @@ def _run_suite(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "old owner release",
         )
-        _assert_rejected(stale_release, "old owner release")
+        # The previous actor no longer owns the destination, so the router
+        # rejects it before the stale-generation check in the store.
+        _assert_rejected(stale_release, "old owner release", "403")
         _assert_ok(
             _one(
                 _run_client(
