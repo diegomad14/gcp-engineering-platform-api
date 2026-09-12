@@ -129,6 +129,41 @@ def test_adoption_blocks_actions_even_when_local_is_disabled(monkeypatch):
     policy.require_legacy_allowed("other-api")
 
 
+@pytest.mark.parametrize(
+    "state,busy,allowed",
+    [
+        ("active", False, False),
+        ("disabled_manually", True, False),
+        ("disabled_manually", False, True),
+    ],
+)
+def test_publication_requires_exclusive_publisher(monkeypatch, state, busy, allowed):
+    monkeypatch.setattr(api.config, "mock_mode", False)
+    workflow = SimpleNamespace(
+        state=state, get_runs=lambda **_kwargs: [object()] if busy else []
+    )
+    client = SimpleNamespace(
+        get_repo=lambda _repo: SimpleNamespace(get_workflow=lambda _name: workflow)
+    )
+    monkeypatch.setattr(policy.github_deployments, "github_client", lambda: client)
+    if allowed:
+        policy.require_publication_handoff("test/repo")
+    else:
+        with pytest.raises(policy.LocalReleasePolicyError):
+            policy.require_publication_handoff("test/repo")
+
+
+def test_publication_handoff_unavailable_fails_closed(monkeypatch):
+    monkeypatch.setattr(api.config, "mock_mode", False)
+
+    def unavailable():
+        raise OSError("offline")
+
+    monkeypatch.setattr(policy.github_deployments, "github_client", unavailable)
+    with pytest.raises(RuntimeError, match="Unable to verify"):
+        policy.require_publication_handoff("test/repo")
+
+
 def test_production_requires_durable_configuration(issuance, monkeypatch):
     monkeypatch.setattr(api.config.release_execution, "remote_activation_enabled", True)
     monkeypatch.setattr(api.config.release_execution, "allowed_services", ("test-api",))

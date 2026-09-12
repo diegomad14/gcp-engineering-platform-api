@@ -65,6 +65,13 @@ temporalmente. La adopción no cancela un workflow ya despachado: antes de
 activarla hay que comprobar su terminación. No se modifican branch protections
 ni se omiten gates.
 
+Antes de publicar tags localmente se deshabilita **solo** el workflow
+`semantic-release.yml` del repositorio adoptado y se espera a que terminen sus
+ejecuciones pendientes. El servidor verifica ese traspaso en GitHub antes de
+autorizar publicación y antes de cada intención; si GitHub no permite verificarlo,
+falla cerrado. CI y los checks protegidos permanecen activos. El bootstrap ocurre
+antes de este traspaso, mediante el publicador vigente.
+
 El CLI usa `ENG_PLATFORM_API_URL` y `ENG_PLATFORM_AUTH_HEADERS_FILE`, archivo
 privado del usuario (sin permisos para grupo/otros) que contiene únicamente
 cabeceras de su sesión autorizada. No pasar cookies o tokens como argumentos,

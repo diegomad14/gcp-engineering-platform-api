@@ -1,7 +1,7 @@
 """Server-owned, default-off adoption policy for individual local releases."""
 
 from ..config import config
-from . import deployment_store
+from . import deployment_store, github_deployments
 
 
 class LocalReleasePolicyError(ValueError):
@@ -18,6 +18,30 @@ def require_legacy_allowed(service_name: str) -> None:
         raise LocalReleasePolicyError(
             "This service uses the local release executor; Actions dispatch is disabled"
         )
+
+
+def require_publication_handoff(repository: str) -> None:
+    """Do not permit local tag publication alongside the automatic publisher."""
+    if config.mock_mode:
+        return
+    try:
+        repo = github_deployments.github_client().get_repo(repository)
+        workflow = repo.get_workflow("semantic-release.yml")
+        if workflow.state != "disabled_manually":
+            raise LocalReleasePolicyError(
+                "The repository semantic-release publisher must be explicitly disabled before local publication"
+            )
+        for state in ("queued", "in_progress", "waiting", "pending", "requested"):
+            if next(iter(workflow.get_runs(status=state)), None) is not None:
+                raise LocalReleasePolicyError(
+                    "A previously dispatched semantic release must finish before local publication"
+                )
+    except LocalReleasePolicyError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(
+            "Unable to verify the repository publication handoff"
+        ) from exc
 
 
 def require_enabled(service_name: str) -> None:

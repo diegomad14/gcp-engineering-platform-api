@@ -69,6 +69,8 @@ def _context_actor_for_intent(intent_id: str) -> str:
 def _validate_capability(payload: ReleaseExecutionAuthorizationIssueRequest) -> None:
     """Resolve all executable identity from the registered single-service catalog."""
     local_release_policy.require_enabled(payload.service_name)
+    if payload.operation == "publish":
+        local_release_policy.require_publication_handoff(payload.repository)
     service = catalog.get_service(payload.service_name)
     if service is None:
         raise ValueError("Service is not registered in the platform catalog")
@@ -199,6 +201,8 @@ def consume_local_authorization(
                 "Capability has no single-service identity"
             )
         local_release_policy.require_enabled(capability_service)
+        if payload.operation == "publish":
+            local_release_policy.require_publication_handoff(payload.repository)
         if payload.service_name and payload.service_name != capability_service:
             raise release_authorization.ReleaseAuthorizationError(
                 "Capability service does not match release execution"
@@ -274,6 +278,8 @@ def acquire_lease(payload: ExecutionLeaseAcquireRequest, request: Request):
     try:
         _require_context_actor(request, payload.actor_id)
         local_release_policy.require_enabled(payload.service_name)
+        if payload.operation == "publish":
+            local_release_policy.require_publication_handoff(payload.repository)
         return execution_control_store.acquire_lease(payload)
     except Exception as exc:
         raise _execution_http_error(exc) from exc
@@ -322,6 +328,8 @@ def create_intent(payload: ExecutionIntentCreateRequest, request: Request):
     try:
         _require_context_actor(request, payload.actor_id)
         local_release_policy.require_enabled(payload.service_name)
+        if payload.operation == "publish":
+            local_release_policy.require_publication_handoff(payload.repository)
         return execution_control_store.create_intent(payload)
     except Exception as exc:
         raise _execution_http_error(exc) from exc
