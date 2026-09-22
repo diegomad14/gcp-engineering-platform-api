@@ -591,6 +591,23 @@ def test_executor_trusts_only_the_exact_connected_repository(tmp_path, monkeypat
     assert calls == [("git", "-c", f"safe.directory={tmp_path}", "rev-parse", "HEAD")]
 
 
+def test_executor_uses_cloud_build_credential_home_only_for_builds(monkeypatch):
+    path = Path(__file__).parents[1] / "docker/release-executor/release_executor.py"
+    spec = spec_from_file_location("release_executor_home", path)
+    assert spec is not None and spec.loader is not None
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv("HOME", "/tmp/github")
+    monkeypatch.delenv("BUILD_ID", raising=False)
+
+    module.configure_runtime_home()
+    assert module.os.environ["HOME"] == "/tmp/github"
+
+    monkeypatch.setenv("BUILD_ID", "build-1")
+    module.configure_runtime_home()
+    assert module.os.environ["HOME"] == "/builder/home"
+
+
 @pytest.mark.parametrize(
     "workflow_name", ["platform-deploy.yml", "platform-rollback.yml"]
 )
