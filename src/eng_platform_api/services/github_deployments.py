@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Lock
 from time import monotonic
 from typing import Any, Literal
@@ -22,6 +22,7 @@ from ..models import (
     ReleaseTagPage,
 )
 from . import (
+    catalog,
     deployment_executions,
     deployment_store,
     release_authorization,
@@ -60,12 +61,43 @@ GITHUB_WORKFLOW_DISPATCH_FAILED = "GitHub workflow dispatch failed"
 GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED = "GitHub rollback workflow dispatch failed"
 
 
+def _dispatch_error_detail(error: BaseException) -> str:
+    """Keep GitHub's original dispatch response available for classification.
+
+    ``PyGithub`` exceptions normally expose the response payload through
+    ``data`` while HTTP clients commonly expose it as ``response.text``.  The
+    public deployment error intentionally stays generic; this detail is kept
+    only on the in-process exception so the backend can distinguish an Actions
+    billing rejection from an ordinary dispatch failure.
+    """
+    parts = [str(error)]
+    data = getattr(error, "data", None)
+    if data:
+        parts.append(str(data))
+    response = getattr(error, "response", None)
+    response_text = getattr(response, "text", None) if response is not None else None
+    if response_text:
+        parts.append(str(response_text))
+    return "\n".join(dict.fromkeys(part for part in parts if part))
+
+
 class GitHubDispatchError(RuntimeError):
     """A GitHub Deployment was created but its workflow could not be dispatched."""
 
-    def __init__(self, item: DeploymentItem, authorization_jti: str = ""):
+    def __init__(
+        self,
+        item: DeploymentItem,
+        authorization_jti: str = "",
+        *,
+        dispatch_error: BaseException | None = None,
+        dispatch_attempted: bool = True,
+    ):
         self.item = item
         self.authorization_jti = authorization_jti
+        self.dispatch_attempted = dispatch_attempted
+        self.dispatch_error_detail = (
+            _dispatch_error_detail(dispatch_error) if dispatch_error else ""
+        )
         super().__init__(item.error or GITHUB_WORKFLOW_DISPATCH_FAILED)
 
 
@@ -328,6 +360,7 @@ def start_deployment(
         requested_by=requested_by,
         kind="deploy",
     )
+    dispatch_attempted = False
     try:
         _reserve_github_execution(item, service, str(claims["jti"]))
         github_deployment.create_status(
@@ -337,6 +370,7 @@ def start_deployment(
         workflow = repo.get_workflow(
             service.deployment.workflow_file or config.github.deployment_workflow
         )
+        dispatch_attempted = True
         workflow.create_dispatch(
             ref=tag.name,
             inputs={
@@ -365,7 +399,12 @@ def start_deployment(
             )
         except Exception:
             item.error = f"{GITHUB_WORKFLOW_DISPATCH_FAILED}; status update failed"
-        raise GitHubDispatchError(item, str(claims["jti"])) from exc
+        raise GitHubDispatchError(
+            item,
+            str(claims["jti"]),
+            dispatch_error=exc if dispatch_attempted else None,
+            dispatch_attempted=dispatch_attempted,
+        ) from exc
     return item
 
 
@@ -431,6 +470,7 @@ def start_rollback(
         kind="rollback",
         target_revision=target.production_revision,
     )
+    dispatch_attempted = False
     try:
         _reserve_github_execution(item, service, str(claims["jti"]))
         github_deployment.create_status(
@@ -438,6 +478,7 @@ def start_rollback(
             description="Rollback queued by Engineering Platform",
         )
         workflow = repo.get_workflow(config.github.rollback_workflow)
+        dispatch_attempted = True
         workflow.create_dispatch(
             ref="main",
             inputs={
@@ -467,7 +508,12 @@ def start_rollback(
             item.error = (
                 f"{GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED}; status update failed"
             )
-        raise GitHubDispatchError(item, str(claims["jti"])) from exc
+        raise GitHubDispatchError(
+            item,
+            str(claims["jti"]),
+            dispatch_error=exc if dispatch_attempted else None,
+            dispatch_attempted=dispatch_attempted,
+        ) from exc
     return item
 
 
@@ -612,6 +658,7 @@ def retry_dispatch(
     repo = github_client().get_repo(item.repository)
     github_deployment = repo.get_deployment(item.github_deployment_id)
     now = datetime.now(timezone.utc).isoformat()
+    dispatch_attempted = False
     try:
         github_deployment.create_status(
             state="queued",
@@ -620,6 +667,7 @@ def retry_dispatch(
         workflow, inputs = _retry_workflow_and_inputs(
             repo, service, item, target_revision
         )
+        dispatch_attempted = True
         workflow.create_dispatch(
             ref="main" if item.kind == "rollback" else item.tag, inputs=inputs
         )
@@ -636,7 +684,11 @@ def retry_dispatch(
             github_deployment.create_status(state="failure", description=item.error)
         except Exception:
             item.error = f"{item.error}; status update failed"
-        raise GitHubDispatchError(item) from exc
+        raise GitHubDispatchError(
+            item,
+            dispatch_error=exc if dispatch_attempted else None,
+            dispatch_attempted=dispatch_attempted,
+        ) from exc
 
     item.status = "QUEUED"
     item.current_stage = "queued"
@@ -702,6 +754,69 @@ def _metadata_from_statuses(repo: Any, item: DeploymentItem) -> int | None:
     return discovered_run_id
 
 
+def _parse_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif value:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _discover_dispatch_run(repo: Any, item: DeploymentItem) -> Any | None:
+    """Find an unreported deploy run only when correlation is unambiguous.
+
+    A workflow rejected before its first step cannot post the Deployment status
+    that normally carries the run id.  Deploy runs can still be correlated by
+    the exact workflow, tag ref, release SHA and creation time.  Rollbacks use
+    ``main`` plus the target SHA as an input, which GitHub does not expose on a
+    workflow run, so guessing a rollback run would be unsafe and is forbidden.
+    """
+    if item.kind != "deploy":
+        return None
+    created_at = _parse_timestamp(item.created_at)
+    if created_at is None:
+        return None
+    service = catalog.get_service(item.service_name)
+    if service is None or service.repository != item.repository:
+        return None
+    workflow_file = (
+        service.deployment.workflow_file or config.github.deployment_workflow
+    )
+    try:
+        runs = repo.get_workflow(workflow_file).get_runs(
+            event="workflow_dispatch", head_sha=item.sha
+        )
+        candidates = []
+        for run in runs:
+            if getattr(run, "event", "") != "workflow_dispatch":
+                continue
+            if getattr(run, "head_sha", "") != item.sha:
+                continue
+            head_branch = str(getattr(run, "head_branch", "") or "")
+            if head_branch.removeprefix("refs/tags/") != item.tag.removeprefix(
+                "refs/tags/"
+            ):
+                continue
+            run_created_at = _parse_timestamp(getattr(run, "created_at", None))
+            if run_created_at is None or run_created_at < created_at - timedelta(
+                minutes=1
+            ):
+                continue
+            candidates.append(run)
+            if len(candidates) > 1:
+                return None
+        return candidates[0] if candidates else None
+    except Exception:
+        return None
+
+
 def refresh(item: DeploymentItem) -> DeploymentItem:
     """Project GitHub workflow jobs into the platform's friendly stage model."""
     if config.mock_mode:
@@ -712,7 +827,11 @@ def refresh(item: DeploymentItem) -> DeploymentItem:
         if not item.github_run_id or not item.production_revision:
             discovered_run_id = _metadata_from_statuses(repo, item)
         run_id = item.github_run_id or discovered_run_id
-        run = repo.get_workflow_run(run_id) if run_id else None
+        run = (
+            repo.get_workflow_run(run_id)
+            if run_id
+            else _discover_dispatch_run(repo, item)
+        )
     except Exception:
         item.error = "Unable to read GitHub workflow"
         return item
@@ -757,7 +876,12 @@ def refresh(item: DeploymentItem) -> DeploymentItem:
     elif active:
         item.status = _STAGE_TO_STATUS[active.key]  # type: ignore[assignment]
         item.current_stage = active.key
-    elif failed or run.conclusion in {"failure", "cancelled", "timed_out"}:
+    elif failed or run.conclusion in {
+        "failure",
+        "cancelled",
+        "timed_out",
+        "startup_failure",
+    }:
         item.status = "FAILED"
         item.current_stage = failed.key if failed else "failed"
         item.error = f"{failed.label if failed else 'Workflow'} failed"

@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 from fastapi import HTTPException
 
+from ..config import config
 from ..models import DeploymentItem, ReleaseTag
 from ..routers.quality import get_quality_report
 from . import (
@@ -19,12 +20,43 @@ from . import (
     cloud_build,
     deployment_executions,
     deployment_store,
+    executor_circuits,
     github_actions_quota,
     github_deployments,
+    github_release_control,
     release_authorization_store,
+    release_executions,
 )
 
 _GITHUB_UNAVAILABLE = "GitHub unavailable"
+
+
+def _open_billing_circuit(service, *, reason: str, evidence: str = "") -> None:
+    try:
+        if not github_release_control.repository_is_private(service.repository):
+            return
+    except Exception:
+        return
+    owner = config.github.billing_owner or service.repository.split("/", 1)[0]
+    executor_circuits.open_circuit(
+        owner,
+        reason=reason,
+        repository=service.repository,
+        evidence=evidence,
+    )
+    for repository in {
+        item.repository for item in catalog.get_services().services if item.repository
+    }:
+        try:
+            if not github_release_control.repository_is_private(repository):
+                continue
+            github_release_control.set_repository_execution_mode(
+                repository, "cloud_build"
+            )
+        except Exception:
+            # The durable circuit is authoritative. A webhook/scheduled
+            # reconciliation can retry the economic repository variable later.
+            pass
 
 
 def _service_or_404(service_name: str):
@@ -49,6 +81,29 @@ def _require_release_quality(service, sha: str) -> None:
     if report.quality_gate_status != "PASSED":
         raise HTTPException(
             status_code=409, detail="Release quality evidence is not PASSED"
+        )
+
+
+def _require_orchestrated_release(service, tag: ReleaseTag) -> None:
+    settings = config.release_orchestrator
+    if not settings.enabled or service.service_name not in {
+        *settings.enabled_services,
+        *settings.canary_services,
+    }:
+        return
+    execution = release_executions.find(
+        service.repository, tag.sha, "main_release"
+    )
+    plan = execution.get("release_plan", {}) if execution else {}
+    if (
+        not execution
+        or execution.get("status") != "released"
+        or plan.get("git_tag") != tag.name
+        or not execution.get("report_hash")
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Tag is not backed by a published Engineering Platform release",
         )
 
 
@@ -109,6 +164,13 @@ def _dispatch_deploy(service, tag: ReleaseTag, requested_by: str) -> DeploymentI
     if github_actions_quota.should_use_cloud_build(
         service.service_name, service.repository
     ):
+        owner = config.github.billing_owner or service.repository.split("/", 1)[0]
+        if executor_circuits.is_open(owner):
+            _open_billing_circuit(
+                service,
+                reason="persistent_github_actions_billing_circuit",
+                evidence="circuit already open",
+            )
         item = github_deployments.start_managed_deployment(
             service=service, tag=tag, requested_by=requested_by
         )
@@ -120,6 +182,11 @@ def _dispatch_deploy(service, tag: ReleaseTag, requested_by: str) -> DeploymentI
     except github_deployments.GitHubDispatchError as exc:
         if not github_actions_quota.is_quota_error(exc):
             raise
+        _open_billing_circuit(
+            service,
+            reason="github_actions_billing_rejection",
+            evidence=str(getattr(exc, "dispatch_error_detail", ""))[:1000],
+        )
         return start_cloud_build(service, exc.item, reason="github_quota_dispatch")
 
 
@@ -129,6 +196,13 @@ def _dispatch_rollback(
     if github_actions_quota.should_use_cloud_build(
         service.service_name, service.repository
     ):
+        owner = config.github.billing_owner or service.repository.split("/", 1)[0]
+        if executor_circuits.is_open(owner):
+            _open_billing_circuit(
+                service,
+                reason="persistent_github_actions_billing_circuit",
+                evidence="circuit already open",
+            )
         item = github_deployments.start_managed_deployment(
             service=service,
             tag=ReleaseTag(name=target.tag, sha=target.sha),
@@ -144,6 +218,11 @@ def _dispatch_rollback(
     except github_deployments.GitHubDispatchError as exc:
         if not github_actions_quota.is_quota_error(exc):
             raise
+        _open_billing_circuit(
+            service,
+            reason="github_actions_billing_rejection",
+            evidence=str(getattr(exc, "dispatch_error_detail", ""))[:1000],
+        )
         return start_cloud_build(service, exc.item, reason="github_quota_dispatch")
 
 
@@ -157,16 +236,34 @@ def _retry_failed_dispatch(
 ) -> DeploymentItem:
     if existing.kind == "deploy":
         (quality_validator or _require_release_quality)(service, existing.sha)
+        _require_orchestrated_release(
+            service, ReleaseTag(name=existing.tag, sha=existing.sha)
+        )
     try:
         if github_actions_quota.should_use_cloud_build(
             service.service_name, service.repository
         ):
+            owner = config.github.billing_owner or service.repository.split("/", 1)[0]
+            if executor_circuits.is_open(owner):
+                _open_billing_circuit(
+                    service,
+                    reason="persistent_github_actions_billing_circuit",
+                    evidence="circuit already open",
+                )
             retried = start_cloud_build(service, existing, reason="retry_preflight")
         else:
             retried = github_deployments.retry_dispatch(
                 service=service, item=existing, target_revision=target_revision
             )
     except github_deployments.GitHubDispatchError as exc:
+        if github_actions_quota.is_quota_error(exc):
+            _open_billing_circuit(
+                service,
+                reason="github_actions_billing_rejection",
+                evidence=str(getattr(exc, "dispatch_error_detail", ""))[:1000],
+            )
+            retried = start_cloud_build(service, exc.item, reason="retry_billing")
+            return deployment_store.save(retried, key)
         deployment_store.save(exc.item, key)
         raise HTTPException(status_code=502, detail=detail) from exc
     except Exception as exc:
@@ -210,6 +307,7 @@ def start_deployment(
         if not tag.eligible:
             raise HTTPException(status_code=409, detail=tag.reason)
         (quality_validator or _require_release_quality)(service, tag.sha)
+        _require_orchestrated_release(service, tag)
         return deployment_store.save(_dispatch_deploy(service, tag, requested_by), key)
     except HTTPException:
         raise

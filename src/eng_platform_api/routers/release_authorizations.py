@@ -21,6 +21,7 @@ router = APIRouter(prefix="/api/internal/release-authorizations", tags=["interna
     "/consume",
     response_model=ReleaseAuthorizationConsumeResponse,
     status_code=status.HTTP_200_OK,
+    include_in_schema=False,
 )
 def consume_authorization(
     payload: ReleaseAuthorizationConsumeRequest, request: Request

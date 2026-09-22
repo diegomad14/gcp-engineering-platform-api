@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
 from unittest import mock
 
+from eng_platform_api.models import DeploymentItem
 from eng_platform_api.services import github_actions_quota as quota
+from eng_platform_api.services import github_deployments
 
 
 def test_public_repository_never_uses_cloud_build(monkeypatch):
@@ -100,6 +102,48 @@ def test_reactive_fallback_accepts_explicit_zero_step_billing_annotation(monkeyp
 def test_quota_error_classifier_does_not_treat_code_failures_as_billing():
     assert quota.is_quota_error("Included minutes quota exceeded") is True
     assert quota.is_quota_error("tests failed with exit code 1") is False
+
+
+def test_quota_error_classifier_reads_original_dispatch_response_body():
+    original = RuntimeError("HTTP 422")
+    original.response = mock.Mock(
+        text=(
+            "The job was not started because recent account payments have failed "
+            "or your spending limit needs to be increased."
+        )
+    )
+    item = DeploymentItem(
+        id="42",
+        service_name="private",
+        repository="owner/private",
+        tag="v1.0.0",
+        sha="a" * 40,
+        error=github_deployments.GITHUB_WORKFLOW_DISPATCH_FAILED,
+    )
+    wrapped = github_deployments.GitHubDispatchError(
+        item, dispatch_error=original, dispatch_attempted=True
+    )
+
+    assert str(wrapped) == github_deployments.GITHUB_WORKFLOW_DISPATCH_FAILED
+    assert "recent account payments have failed" in wrapped.dispatch_error_detail
+    assert quota.is_quota_error(wrapped) is True
+
+
+def test_quota_error_classifier_rejects_failures_before_workflow_dispatch():
+    original = RuntimeError("billing service unavailable")
+    item = DeploymentItem(
+        id="42",
+        service_name="private",
+        repository="owner/private",
+        tag="v1.0.0",
+        sha="a" * 40,
+        error=github_deployments.GITHUB_WORKFLOW_DISPATCH_FAILED,
+    )
+    wrapped = github_deployments.GitHubDispatchError(
+        item, dispatch_error=original, dispatch_attempted=False
+    )
+
+    assert quota.is_quota_error(wrapped) is False
 
 
 def test_usage_cache_is_reused_within_month_and_rotates_at_utc_month(monkeypatch):

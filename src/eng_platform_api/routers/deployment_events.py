@@ -69,10 +69,21 @@ def accept_event(
             status_code=502, detail="Unable to verify Cloud Build"
         ) from exc
     substitutions = build.get("substitutions", {})
+    source = build.get("source", {}).get("connectedRepository", {})
+    expected_repository = config.cloud_build.repositories.get(item.service_name, "")
     if (
-        substitutions.get("_REQUEST_FINGERPRINT") != payload.fingerprint
+        str(build.get("id", "")) != payload.build_id
+        or not expected_repository
+        or source.get("repository") != expected_repository
+        or source.get("revision") != item.sha
+        or build.get("serviceAccount") != config.cloud_build.service_account
+        or substitutions.get("_REQUEST_FINGERPRINT") != payload.fingerprint
         or substitutions.get("_DEPLOYMENT_ID") != deployment_id
+        or substitutions.get("_SERVICE_NAME") != item.service_name
+        or substitutions.get("_REPOSITORY") != item.repository
+        or substitutions.get("_RELEASE_TAG") != item.tag
         or substitutions.get("_RELEASE_SHA") != item.sha
+        or substitutions.get("_OPERATION") != item.kind
     ):
         raise HTTPException(
             status_code=403, detail="Cloud Build does not match deployment"

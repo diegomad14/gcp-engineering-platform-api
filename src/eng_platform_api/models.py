@@ -333,6 +333,58 @@ class QualityReport(QualityReportCreate):
     received_at: str
 
 
+ReleaseExecutionStatus = Literal[
+    "received",
+    "waiting_github",
+    "submission_pending",
+    "submitting",
+    "running_quality",
+    "quality_passed",
+    "quality_failed",
+    "release_planned",
+    "no_release",
+    "publish_pending",
+    "released",
+    "failed",
+    "unknown",
+]
+
+
+class ReleasePlan(BaseModel):
+    """Write-free output of the pinned semantic release planner."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    next_version: str = Field(default="", max_length=64)
+    git_tag: str = Field(default="", max_length=128)
+    release_type: Literal["patch", "minor", "major", "none"] = "none"
+    notes: str = Field(default="", max_length=100_000)
+    config_hash: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+
+
+class ReleaseExecutionEvent(BaseModel):
+    """Monotonic event from a trusted Actions or Cloud Build quality engine."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    execution_id: str = Field(min_length=1, max_length=128)
+    provider_run_id: str = Field(min_length=1, max_length=128)
+    fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    sequence: int = Field(ge=1)
+    status: Literal[
+        "running_quality",
+        "quality_passed",
+        "quality_failed",
+        "release_planned",
+        "no_release",
+        "failed",
+    ]
+    report: QualityReportCreate | None = None
+    report_hash: str = Field(default="", max_length=64, pattern=r"^$|^[0-9a-f]{64}$")
+    release_plan: ReleasePlan | None = None
+    error: str = Field(default="", max_length=2_000)
+
+
 class QualityProject(BaseModel):
     policy_version: str = "oss-v1"
     base_sha: str = ""

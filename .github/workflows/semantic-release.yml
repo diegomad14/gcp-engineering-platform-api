@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   release:
-    if: ${{ github.repository != 'diegomad14/gcp-engineering-platform' || !contains(github.event.head_commit.message, '[skip release]') }}
+    if: ${{ vars.ENG_PLATFORM_RELEASE_ORCHESTRATOR_ENABLED != 'true' && (github.repository != 'diegomad14/gcp-engineering-platform' || !contains(github.event.head_commit.message, '[skip release]')) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

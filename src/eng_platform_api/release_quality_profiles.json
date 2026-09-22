@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "eng-platform-api": {
+      "runtime": "python",
+      "working_directory": ".",
+      "coverage_threshold": 70,
+      "timeout_seconds": 1800,
+      "postgres": false,
+      "container_smoke": true,
+      "commands": {
+        "install": "python -m pip install -e \".[dev]\"",
+        "tests": "python -m pytest -q --cov=eng_platform_api --cov=scripts.release --cov-report=json:quality-reports/coverage.json",
+        "build": "",
+        "lint": "ruff check src tests scripts/release --output-format json --output-file quality-reports/ruff.json",
+        "format": "ruff format --check src tests scripts/release",
+        "typecheck": "mypy src --ignore-missing-imports"
+      },
+      "extra": [
+        {"name": "Bandit", "category": "sast", "command": "bandit -q -lll -r src", "blocking": true},
+        {"name": "Dependency audit", "category": "dependencies", "command": "pip-audit", "blocking": true},
+        {"name": "Workflow contracts", "category": "build", "command": "actionlint .github/workflows/*.yml templates/github-actions/*.yml examples/caller-workflows/*.yml", "blocking": true}
+      ]
+    },
+    "eng-platform-web": {
+      "runtime": "node",
+      "working_directory": ".",
+      "coverage_threshold": 80,
+      "timeout_seconds": 1800,
+      "postgres": false,
+      "container_smoke": false,
+      "commands": {
+        "install": "npm ci",
+        "tests": "npm run test:coverage -- --coverage.clean=false --coverage.reporter=json-summary --coverage.reporter=lcov --coverage.reportsDirectory=quality-reports",
+        "build": "npm run build",
+        "lint": "npx eslint . --max-warnings 0 -f json -o quality-reports/eslint.json",
+        "format": "",
+        "typecheck": ""
+      },
+      "extra": [
+        {"name": "Dependency audit", "category": "dependencies", "command": "npm audit --audit-level=high", "blocking": true}
+      ]
+    },
+    "communications-ms": {
+      "runtime": "python",
+      "working_directory": ".",
+      "coverage_threshold": 70,
+      "timeout_seconds": 1800,
+      "postgres": false,
+      "container_smoke": false,
+      "commands": {
+        "install": "python -m pip install -e \".[dev]\"",
+        "tests": "python -m pytest -q --cov=. --cov-report=json:quality-reports/coverage.json",
+        "build": "",
+        "lint": "ruff check . --output-format json --output-file quality-reports/ruff.json",
+        "format": "ruff format --check .",
+        "typecheck": "python -m compileall -q ."
+      },
+      "extra": []
+    },
+    "cgm-bot-api": {
+      "runtime": "python",
+      "working_directory": "services/cgm-bot-api",
+      "coverage_threshold": 80,
+      "timeout_seconds": 1800,
+      "postgres": false,
+      "container_smoke": false,
+      "commands": {
+        "install": "python -m pip install -r requirements.txt",
+        "tests": "python -m pytest -q --cov=app --cov-report=json:quality-reports/coverage.json --cov-fail-under=80",
+        "build": "",
+        "lint": "ruff check app tests --output-format json --output-file quality-reports/ruff.json",
+        "format": "git diff --name-only -z --diff-filter=ACMR \"$ENG_PLATFORM_RELEASE_BASE_SHA\" \"$ENG_PLATFORM_RELEASE_HEAD_SHA\" -- 'app/**/*.py' 'tests/**/*.py' | xargs -0 -r ruff format --check --",
+        "typecheck": ""
+      },
+      "extra": [
+        {"name": "Bandit", "category": "sast", "command": "bandit -q -lll -r app", "blocking": true},
+        {"name": "Mypy advisory", "category": "typecheck", "command": "mypy app --ignore-missing-imports", "blocking": false},
+        {"name": "Dependency audit advisory", "category": "dependencies", "command": "pip-audit -r requirements.txt", "blocking": false}
+      ]
+    },
+    "cgm-sanplat-web": {
+      "runtime": "node",
+      "working_directory": ".",
+      "coverage_threshold": 70,
+      "timeout_seconds": 3600,
+      "postgres": false,
+      "container_smoke": false,
+      "commands": {
+        "install": "npm ci",
+        "tests": "npm run test:coverage -- --coverage.clean=false --coverage.reporter=json-summary --coverage.reporter=lcov --coverage.reportsDirectory=quality-reports",
+        "build": "npm run build",
+        "lint": "npx eslint . --max-warnings 0 -f json -o quality-reports/eslint.json",
+        "format": "",
+        "typecheck": "npx tsc --noEmit"
+      },
+      "extra": [
+        {"name": "Proxy script contracts", "category": "tests", "command": "python3 -m unittest discover -s scripts -p \"test_*.py\"", "blocking": true}
+      ]
+    },
+    "cgm-sanplat-api": {
+      "runtime": "python",
+      "working_directory": ".",
+      "coverage_threshold": 70,
+      "timeout_seconds": 3600,
+      "postgres": true,
+      "container_smoke": false,
+      "commands": {
+        "install": "python -m pip install --no-build-isolation -e \".[dev,sqlserver,postgresql]\" \"ruff==0.15.22\"",
+        "tests": "python -m pytest -q --cov=. --cov-report=json:quality-reports/coverage.json",
+        "build": "",
+        "lint": "ruff check . --output-format json --output-file quality-reports/ruff.json",
+        "format": "ruff format --check .",
+        "typecheck": "python -m compileall -q src/cgm_sanplat_param"
+      },
+      "extra": []
+    }
+  }
+}

@@ -1,0 +1,231 @@
+name: Engineering Platform Quality
+run-name: eng-platform-quality-${{ github.event.pull_request.head.sha }}
+
+on:
+  pull_request_target:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: eng-platform-quality-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    if: ${{ vars.ENG_PLATFORM_RELEASE_ORCHESTRATOR_ENABLED == 'true' && vars.ENG_PLATFORM_CI_EXECUTOR != 'cloud_build' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      # pull_request_target keeps this workflow and its OIDC identity on main.
+      # The untrusted PR head is only mounted into credential-free containers.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve authorized execution
+        id: execution
+        env:
+          PLATFORM_API_URL: ${{ vars.ENG_PLATFORM_API_URL }}
+          AUTHORIZED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          control_dir="$RUNNER_TEMP/eng-platform-control-$GITHUB_RUN_ID"
+          mkdir -m 0700 "$control_dir"
+          token="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=engineering-platform-release-orchestrator" | jq -r .value)"
+          echo "::add-mask::$token"
+          for attempt in $(seq 1 20); do
+            code="$(curl --silent --show-error -o "$control_dir/execution.json" -w '%{http_code}' \
+              -X POST "$PLATFORM_API_URL/api/internal/release-executions/resolve" \
+              -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+              --data "{\"repository\":\"$GITHUB_REPOSITORY\",\"head_sha\":\"$AUTHORIZED_HEAD_SHA\",\"operation\":\"pr_quality\"}")"
+            [ "$code" = 200 ] && break
+            [ "$attempt" = 20 ] && { jq -r .detail "$control_dir/execution.json"; exit 1; }
+            sleep 3
+          done
+          for key in execution_id fingerprint base_sha profile_hash executor_image; do
+            value="$(jq -er --arg key "$key" '.[$key]' "$control_dir/execution.json")"
+            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
+          done
+          rm -f "$control_dir/execution.json"
+          rmdir "$control_dir"
+          token=""
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f
+
+      - name: Pull pinned engine and remove cloud credentials
+        env:
+          EXECUTOR_IMAGE: ${{ steps.execution.outputs.executor_image }}
+        run: |
+          set -euo pipefail
+          [[ "$EXECUTOR_IMAGE" == *@sha256:* ]]
+          gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+          docker pull "$EXECUTOR_IMAGE"
+          credential_file="${GOOGLE_GHA_CREDS_PATH:-${GOOGLE_APPLICATION_CREDENTIALS:-}}"
+          if [ -n "$credential_file" ]; then
+            case "$credential_file" in
+              "$GITHUB_WORKSPACE"/*|"$RUNNER_TEMP"/*) rm -f -- "$credential_file" ;;
+              *) echo "Unexpected Google credential path" >&2; exit 1 ;;
+            esac
+          fi
+          find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -name 'gha-creds-*.json' -delete
+          if find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -name 'gha-creds-*.json' | grep -q .; then
+            echo "Google credential file remained in the source checkout" >&2
+            exit 1
+          fi
+
+      - name: Prepare isolated result volumes
+        id: paths
+        run: |
+          set -euo pipefail
+          quality_volume="eng-platform-quality-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          external_volume="eng-platform-external-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          control_volume="eng-platform-control-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker volume create "$quality_volume" >/dev/null
+          docker volume create "$external_volume" >/dev/null
+          docker volume create "$control_volume" >/dev/null
+          {
+            printf 'quality_volume=%s\n' "$quality_volume"
+            printf 'external_volume=%s\n' "$external_volume"
+            printf 'control_volume=%s\n' "$control_volume"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mark quality as started
+        env:
+          ENG_PLATFORM_RELEASE_EXECUTION_ID: ${{ steps.execution.outputs.execution_id }}
+          ENG_PLATFORM_RELEASE_FINGERPRINT: ${{ steps.execution.outputs.fingerprint }}
+          ENG_PLATFORM_RELEASE_SERVICE: eng-platform-api
+          ENG_PLATFORM_RELEASE_REPOSITORY: ${{ github.repository }}
+          ENG_PLATFORM_RELEASE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ENG_PLATFORM_RELEASE_BASE_SHA: ${{ steps.execution.outputs.base_sha }}
+          ENG_PLATFORM_RELEASE_OPERATION: pr_quality
+          ENG_PLATFORM_RELEASE_PROFILE_SHA256: ${{ steps.execution.outputs.profile_hash }}
+          ENG_PLATFORM_PROVIDER_RUN_ID: ${{ github.run_id }}
+          ENG_PLATFORM_API_URL: ${{ vars.ENG_PLATFORM_API_URL }}
+          EXECUTOR_IMAGE: ${{ steps.execution.outputs.executor_image }}
+          CONTROL_VOLUME: ${{ steps.paths.outputs.control_volume }}
+        run: |
+          set -euo pipefail
+          docker run --rm --network bridge --read-only \
+            --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=64m \
+            --volume "$CONTROL_VOLUME:/eng-platform-control:rw" \
+            --env ACTIONS_ID_TOKEN_REQUEST_URL --env ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+            --env GITHUB_ACTIONS --env GITHUB_RUN_ID \
+            --env ENG_PLATFORM_RELEASE_EXECUTION_ID --env ENG_PLATFORM_RELEASE_FINGERPRINT \
+            --env ENG_PLATFORM_RELEASE_SERVICE --env ENG_PLATFORM_RELEASE_REPOSITORY \
+            --env ENG_PLATFORM_RELEASE_HEAD_SHA --env ENG_PLATFORM_RELEASE_BASE_SHA \
+            --env ENG_PLATFORM_RELEASE_OPERATION --env ENG_PLATFORM_RELEASE_PROFILE_SHA256 \
+            --env ENG_PLATFORM_PROVIDER_RUN_ID --env ENG_PLATFORM_API_URL \
+            "$EXECUTOR_IMAGE" --mode start --service eng-platform-api \
+              --control-dir /eng-platform-control
+
+      - name: Run trusted container smoke wrapper
+        env:
+          EXECUTOR_IMAGE: ${{ steps.execution.outputs.executor_image }}
+          EXTERNAL_VOLUME: ${{ steps.paths.outputs.external_volume }}
+        run: |
+          set -euo pipefail
+          docker run --rm --network host --read-only \
+            --cap-drop ALL --cap-add CHOWN \
+            --security-opt no-new-privileges --pids-limit 256 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --env HOME=/tmp \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --volume "$EXTERNAL_VOLUME:/eng-platform-external:rw" \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            --entrypoint /opt/eng-platform/api_container_smoke.sh \
+            "$EXECUTOR_IMAGE" /workspace /eng-platform-external
+
+      - name: Run credential-free quality engine
+        id: quality_run
+        continue-on-error: true
+        env:
+          ENG_PLATFORM_RELEASE_EXECUTION_ID: ${{ steps.execution.outputs.execution_id }}
+          ENG_PLATFORM_RELEASE_FINGERPRINT: ${{ steps.execution.outputs.fingerprint }}
+          ENG_PLATFORM_RELEASE_SERVICE: eng-platform-api
+          ENG_PLATFORM_RELEASE_REPOSITORY: ${{ github.repository }}
+          ENG_PLATFORM_RELEASE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ENG_PLATFORM_RELEASE_BASE_SHA: ${{ steps.execution.outputs.base_sha }}
+          ENG_PLATFORM_RELEASE_OPERATION: pr_quality
+          ENG_PLATFORM_RELEASE_PROFILE_SHA256: ${{ steps.execution.outputs.profile_hash }}
+          ENG_PLATFORM_PROVIDER_RUN_ID: ${{ github.run_id }}
+          EXECUTOR_IMAGE: ${{ steps.execution.outputs.executor_image }}
+          QUALITY_VOLUME: ${{ steps.paths.outputs.quality_volume }}
+          EXTERNAL_VOLUME: ${{ steps.paths.outputs.external_volume }}
+        run: |
+          set -euo pipefail
+          docker run --rm --init --network bridge --read-only \
+            --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID \
+            --cap-add KILL --security-opt no-new-privileges --pids-limit 2048 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=6g \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --volume "$QUALITY_VOLUME:/eng-platform-output:rw" \
+            --volume "$EXTERNAL_VOLUME:/eng-platform-external:ro" \
+            --env ENG_PLATFORM_RELEASE_EXECUTION_ID --env ENG_PLATFORM_RELEASE_FINGERPRINT \
+            --env ENG_PLATFORM_RELEASE_SERVICE --env ENG_PLATFORM_RELEASE_REPOSITORY \
+            --env ENG_PLATFORM_RELEASE_HEAD_SHA --env ENG_PLATFORM_RELEASE_BASE_SHA \
+            --env ENG_PLATFORM_RELEASE_OPERATION --env ENG_PLATFORM_RELEASE_PROFILE_SHA256 \
+            --env ENG_PLATFORM_PROVIDER_RUN_ID \
+            "$EXECUTOR_IMAGE" --mode run --service eng-platform-api \
+              --source /workspace --scratch /tmp/quality \
+              --output-dir /eng-platform-output --external-dir /eng-platform-external
+
+      - name: Publish quality result
+        if: ${{ always() && !cancelled() }}
+        env:
+          ENG_PLATFORM_RELEASE_EXECUTION_ID: ${{ steps.execution.outputs.execution_id }}
+          ENG_PLATFORM_RELEASE_FINGERPRINT: ${{ steps.execution.outputs.fingerprint }}
+          ENG_PLATFORM_RELEASE_SERVICE: eng-platform-api
+          ENG_PLATFORM_RELEASE_REPOSITORY: ${{ github.repository }}
+          ENG_PLATFORM_RELEASE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ENG_PLATFORM_RELEASE_BASE_SHA: ${{ steps.execution.outputs.base_sha }}
+          ENG_PLATFORM_RELEASE_OPERATION: pr_quality
+          ENG_PLATFORM_RELEASE_PROFILE_SHA256: ${{ steps.execution.outputs.profile_hash }}
+          ENG_PLATFORM_PROVIDER_RUN_ID: ${{ github.run_id }}
+          ENG_PLATFORM_API_URL: ${{ vars.ENG_PLATFORM_API_URL }}
+          EXECUTOR_IMAGE: ${{ steps.execution.outputs.executor_image }}
+          QUALITY_VOLUME: ${{ steps.paths.outputs.quality_volume }}
+          CONTROL_VOLUME: ${{ steps.paths.outputs.control_volume }}
+        run: |
+          set -euo pipefail
+          docker run --rm --network bridge --read-only \
+            --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=64m \
+            --volume "$QUALITY_VOLUME:/eng-platform-output:ro" \
+            --volume "$CONTROL_VOLUME:/eng-platform-control:ro" \
+            --env ACTIONS_ID_TOKEN_REQUEST_URL --env ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+            --env GITHUB_ACTIONS --env GITHUB_RUN_ID \
+            --env ENG_PLATFORM_RELEASE_EXECUTION_ID --env ENG_PLATFORM_RELEASE_FINGERPRINT \
+            --env ENG_PLATFORM_RELEASE_SERVICE --env ENG_PLATFORM_RELEASE_REPOSITORY \
+            --env ENG_PLATFORM_RELEASE_HEAD_SHA --env ENG_PLATFORM_RELEASE_BASE_SHA \
+            --env ENG_PLATFORM_RELEASE_OPERATION --env ENG_PLATFORM_RELEASE_PROFILE_SHA256 \
+            --env ENG_PLATFORM_PROVIDER_RUN_ID --env ENG_PLATFORM_API_URL \
+            "$EXECUTOR_IMAGE" --mode publish --service eng-platform-api \
+              --manifest /eng-platform-output/quality-result.json \
+              --control-dir /eng-platform-control
+
+      - name: Remove isolated execution volumes
+        if: ${{ always() }}
+        env:
+          QUALITY_VOLUME: ${{ steps.paths.outputs.quality_volume }}
+          EXTERNAL_VOLUME: ${{ steps.paths.outputs.external_volume }}
+          CONTROL_VOLUME: ${{ steps.paths.outputs.control_volume }}
+        run: |
+          set -euo pipefail
+          for volume in "$QUALITY_VOLUME" "$EXTERNAL_VOLUME" "$CONTROL_VOLUME"; do
+            if [ -n "$volume" ]; then
+              docker volume rm "$volume" >/dev/null
+            fi
+          done

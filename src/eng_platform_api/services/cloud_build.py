@@ -162,12 +162,22 @@ def _matching_build(
     )
     if response.status_code >= 300:
         raise CloudBuildError("Cloud Build submission reconciliation failed")
+    expected_repository = config.cloud_build.repositories.get(item.service_name, "")
     for build in response.json().get("builds", []):
         substitutions = build.get("substitutions", {})
+        source = build.get("source", {}).get("connectedRepository", {})
         if (
-            substitutions.get("_REQUEST_FINGERPRINT") == request_fingerprint
+            expected_repository
+            and source.get("repository") == expected_repository
+            and source.get("revision") == item.sha
+            and build.get("serviceAccount") == config.cloud_build.service_account
+            and substitutions.get("_REQUEST_FINGERPRINT") == request_fingerprint
             and substitutions.get("_DEPLOYMENT_ID") == item.id
+            and substitutions.get("_SERVICE_NAME") == item.service_name
+            and substitutions.get("_REPOSITORY") == item.repository
+            and substitutions.get("_RELEASE_TAG") == item.tag
             and substitutions.get("_RELEASE_SHA") == item.sha
+            and substitutions.get("_OPERATION") == item.kind
         ):
             return build
     return None

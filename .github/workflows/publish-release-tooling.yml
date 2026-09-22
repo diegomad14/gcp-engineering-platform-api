@@ -1,0 +1,67 @@
+name: Publish Release Tooling
+run-name: eng-platform-tooling-${{ github.sha }}
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: eng-platform-release-tooling
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_RELEASE_TOOLING_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f
+
+      - name: Build and publish immutable tooling images
+        env:
+          REGISTRY: us-central1-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.ENG_PLATFORM_TOOLING_REPOSITORY }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+          build_and_push() {
+            local name="$1"
+            local dockerfile="$2"
+            local tag="$REGISTRY/$name:$SOURCE_SHA"
+            docker build --pull --file "$dockerfile" --tag "$tag" .
+            local push_output
+            push_output="$(docker push "$tag")"
+            printf '%s\n' "$push_output"
+            local digest
+            digest="$(printf '%s\n' "$push_output" | sed -n 's/^.*digest: \(sha256:[0-9a-f]\{64\}\).*$/\1/p' | tail -n 1)"
+            [[ "$digest" == sha256:* ]]
+            printf '%s=%s@%s\n' "$name" "$REGISTRY/$name" "$digest" >> "$RUNNER_TEMP/tooling-digests"
+          }
+
+          : > "$RUNNER_TEMP/tooling-digests"
+          build_and_push quality-python docker/quality-executor/Dockerfile.python
+          build_and_push quality-node docker/quality-executor/Dockerfile.node
+          build_and_push release-planner docker/release-planner/Dockerfile
+
+          {
+            echo '### Immutable release tooling'
+            echo
+            echo 'Configure eng-platform with these exact digests:'
+            echo '```text'
+            cat "$RUNNER_TEMP/tooling-digests"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

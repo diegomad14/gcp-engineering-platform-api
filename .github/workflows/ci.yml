@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   quality:
+    if: ${{ vars.ENG_PLATFORM_RELEASE_ORCHESTRATOR_ENABLED != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -34,6 +35,7 @@ jobs:
           pytest -q --cov=eng_platform_api --cov=scripts.release --cov-report=term-missing --cov-report=xml:coverage.xml --cov-fail-under=70
 
   workflows:
+    if: ${{ vars.ENG_PLATFORM_RELEASE_ORCHESTRATOR_ENABLED != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -48,6 +50,7 @@ jobs:
           curl --fail-with-body --silent --request POST http://localhost:8000/api/service-factory/plan --header 'Content-Type: application/json' --data '{"repository":"test-org/test-repo","service_name":"test-api","service_type":"api","runtime":"python","gcp_project":"test-project","owner":"platform"}' | grep --quiet 'platform_deploy_workflow'
 
   normalized:
+    if: ${{ vars.ENG_PLATFORM_RELEASE_ORCHESTRATOR_ENABLED != 'true' }}
     needs: [quality, workflows]
     uses: ./.github/workflows/reusable-quality-gate.yml
     with:

@@ -502,6 +502,8 @@ def test_dispatch_failure_marks_github_deployment_failed():
     assert raised.value.item.status == "FAILED"
     assert raised.value.item.current_stage == "dispatch"
     assert raised.value.item.error == "GitHub workflow dispatch failed"
+    assert raised.value.dispatch_attempted is True
+    assert raised.value.dispatch_error_detail == "payment blocked"
     assert [
         call.kwargs["state"] for call in github_deployment.create_status.call_args_list
     ] == ["queued", "failure"]
@@ -907,6 +909,113 @@ def test_refresh_recaptures_production_revision_after_run_id_already_cached():
     assert result.production_revision == "eng-platform-api-00099-zzz"
     assert result.status == "SUCCEEDED"
     repo.get_deployment.assert_called_once_with(900)
+
+
+def test_refresh_discovers_unreported_startup_failure_by_exact_tag_and_sha():
+    """Billing-rejected workflows cannot post the usual Deployment status."""
+    from eng_platform_api.services import github_deployments
+
+    item = _deployment()
+    run = SimpleNamespace(
+        id=902,
+        html_url="https://github.com/diegomad14/repo/actions/runs/902",
+        created_at=datetime(2026, 7, 16, 12, 0, 5),
+        updated_at=datetime(2026, 7, 16, 12, 0, 6),
+        event="workflow_dispatch",
+        head_sha=item.sha,
+        head_branch=item.tag,
+        conclusion="startup_failure",
+        jobs=lambda: [],
+    )
+    workflow = mock.MagicMock()
+    workflow.get_runs.return_value = [run]
+    repo = mock.MagicMock()
+    repo.get_deployment.return_value.get_statuses.return_value = []
+    repo.get_workflow.return_value = workflow
+    github = mock.MagicMock()
+    github.get_repo.return_value = repo
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        result = github_deployments.refresh(item)
+
+    assert result.github_run_id == 902
+    assert result.status == "FAILED"
+    assert result.current_stage == "failed"
+    assert result.logs_url == run.html_url
+    workflow.get_runs.assert_called_once_with(
+        event="workflow_dispatch", head_sha=item.sha
+    )
+    repo.get_workflow_run.assert_not_called()
+
+
+def test_refresh_does_not_guess_between_ambiguous_unreported_runs():
+    from eng_platform_api.services import github_deployments
+
+    item = _deployment()
+
+    def candidate(run_id):
+        return SimpleNamespace(
+            id=run_id,
+            created_at=datetime(2026, 7, 16, 12, 0, run_id - 900),
+            event="workflow_dispatch",
+            head_sha=item.sha,
+            head_branch=item.tag,
+        )
+
+    workflow = mock.MagicMock()
+    workflow.get_runs.return_value = [candidate(901), candidate(902)]
+    repo = mock.MagicMock()
+    repo.get_deployment.return_value.get_statuses.return_value = []
+    repo.get_workflow.return_value = workflow
+    github = mock.MagicMock()
+    github.get_repo.return_value = repo
+
+    with (
+        mock.patch.object(github_deployments.config, "mock_mode", False),
+        mock.patch.object(github_deployments, "github_client", return_value=github),
+    ):
+        result = github_deployments.refresh(item)
+
+    assert result.github_run_id is None
+    assert result.status == "QUEUED"
+
+
+def test_open_billing_circuit_only_updates_private_repositories(monkeypatch):
+    from eng_platform_api.services import deployment_commands
+
+    service = SimpleNamespace(repository="owner/private")
+    services = SimpleNamespace(
+        services=[
+            SimpleNamespace(repository="owner/private"),
+            SimpleNamespace(repository="owner/public"),
+        ]
+    )
+    modes: list[tuple[str, str]] = []
+    monkeypatch.setattr(deployment_commands.catalog, "get_services", lambda: services)
+    monkeypatch.setattr(
+        deployment_commands.github_release_control,
+        "repository_is_private",
+        lambda repository: repository.endswith("/private"),
+    )
+    monkeypatch.setattr(
+        deployment_commands.github_release_control,
+        "set_repository_execution_mode",
+        lambda repository, mode: modes.append((repository, mode)),
+    )
+    monkeypatch.setattr(
+        deployment_commands.executor_circuits,
+        "open_circuit",
+        lambda *_args, **_kwargs: ({"state": "open"}, True),
+    )
+
+    deployment_commands._open_billing_circuit(
+        service, reason="billing", evidence="explicit rejection"
+    )
+
+    assert modes == [("owner/private", "cloud_build")]
 
 
 def test_refresh_does_not_recheck_statuses_once_production_revision_known():

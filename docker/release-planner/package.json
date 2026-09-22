@@ -1,0 +1,12 @@
+{
+  "name": "eng-platform-release-planner",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test release_planner.test.mjs"
+  },
+  "dependencies": {
+    "@semantic-release/commit-analyzer": "13.0.1",
+    "@semantic-release/release-notes-generator": "14.1.1"
+  }
+}
