@@ -146,12 +146,17 @@ def emit(stage: str, status: str, **values: str) -> None:
 
 
 def assert_source() -> None:
-    if run("git", "rev-parse", "HEAD") != env("CGM_RELEASE_SHA"):
+    if not (ROOT / ".git").exists():
+        raise RuntimeError("Cloud Build source must be a connected repository checkout")
+    # Cloud Build owns the connected-repository checkout with a different UID
+    # than the non-root executor. Trust only this exact workspace, never '*'.
+    if (
+        run("git", "-c", f"safe.directory={ROOT}", "rev-parse", "HEAD")
+        != env("CGM_RELEASE_SHA")
+    ):
         raise RuntimeError(
             "connected repository checkout does not match authorized SHA"
         )
-    if not (ROOT / ".git").exists():
-        raise RuntimeError("Cloud Build source must be a connected repository checkout")
     tag = env("CGM_RELEASE_TAG")
     if not re.fullmatch(
         r"v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"

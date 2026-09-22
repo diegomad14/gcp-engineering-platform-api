@@ -568,6 +568,29 @@ def test_executor_persists_release_summary_in_shared_workspace(tmp_path, monkeyp
     assert summary["production_revision"] == "revision-1"
 
 
+def test_executor_trusts_only_the_exact_connected_repository(tmp_path, monkeypatch):
+    path = Path(__file__).parents[1] / "docker/release-executor/release_executor.py"
+    spec = spec_from_file_location("release_executor_source", path)
+    assert spec is not None and spec.loader is not None
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+    monkeypatch.setenv("CGM_RELEASE_SHA", "a" * 40)
+    monkeypatch.setenv("CGM_RELEASE_TAG", "v1.2.3")
+    calls = []
+
+    def run(*args, **_kwargs):
+        calls.append(args)
+        return "a" * 40
+
+    monkeypatch.setattr(module, "run", run)
+
+    module.assert_source()
+
+    assert calls == [("git", "-c", f"safe.directory={tmp_path}", "rev-parse", "HEAD")]
+
+
 @pytest.mark.parametrize(
     "workflow_name", ["platform-deploy.yml", "platform-rollback.yml"]
 )
