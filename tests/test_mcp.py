@@ -138,6 +138,41 @@ def test_feature_flag_hides_mcp_and_enabled_endpoint_requires_oauth(monkeypatch)
         assert metadata.json()["resource"].endswith("/mcp")
 
 
+def test_oauth_metadata_matches_public_pkce_dcr_contract(monkeypatch):
+    monkeypatch.setattr(config.mcp, "enabled", True)
+    monkeypatch.setattr(config.mcp, "issuer_url", "http://testserver")
+    with TestClient(app) as client:
+        response = client.get("/.well-known/oauth-authorization-server")
+    assert response.status_code == 200
+    metadata = response.json()
+    assert metadata["token_endpoint_auth_methods_supported"] == ["none"]
+    assert metadata["revocation_endpoint_auth_methods_supported"] == ["none"]
+    assert metadata["code_challenge_methods_supported"] == ["S256"]
+    assert metadata["registration_endpoint"] == "http://testserver/register"
+
+
+def test_http_dcr_accepts_public_pkce_and_rejects_confidential_method(monkeypatch):
+    monkeypatch.setattr(config.mcp, "enabled", True)
+    body = {
+        "client_name": "ChatGPT",
+        "redirect_uris": ["http://localhost:3333/callback"],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+        "scope": "eng-platform.read",
+    }
+    with TestClient(app) as client:
+        accepted = client.post("/register", json=body)
+        rejected = client.post(
+            "/register",
+            json={**body, "token_endpoint_auth_method": "client_secret_post"},
+        )
+    assert accepted.status_code == 201
+    assert accepted.json()["client_id"]
+    assert rejected.status_code == 400
+    assert rejected.json()["error"] == "invalid_client_metadata"
+
+
 def test_existing_github_callback_routes_pending_mcp_state(monkeypatch):
     monkeypatch.setattr(config.mcp, "enabled", True)
     mcp_store.save(
