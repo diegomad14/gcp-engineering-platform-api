@@ -6,11 +6,13 @@ All GCP integrations require explicit configuration.
 
 import logging
 import secrets
+from contextlib import asynccontextmanager
 from time import monotonic
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.routing import BaseRoute, Match, NoMatchFound
 
 from .config import config
 from .routers import (
@@ -27,6 +29,68 @@ from .routers import (
     service_factory,
     secrets as operational_secrets_router,
 )
+from .mcp_server import mcp as mcp_server
+
+
+class _FeatureFlagMCPApp:
+    """Keep the remote surface completely undiscoverable until activation."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if not config.mcp.enabled:
+            await send({"type": "http.response.start", "status": 404, "headers": []})
+            await send({"type": "http.response.body", "body": b"Not Found"})
+            return
+        await self.app(scope, receive, send)
+
+
+class _MCPRoute(BaseRoute):
+    """Route only MCP/OAuth metadata paths; never swallow normal API redirects."""
+
+    _paths = {
+        "/mcp",
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-protected-resource/mcp",
+        "/authorize",
+        "/token",
+        "/register",
+        "/revoke",
+    }
+
+    def __init__(self, app):
+        self.app = app
+
+    def matches(self, scope):
+        return (
+            (Match.FULL, {}) if scope.get("path") in self._paths else (Match.NONE, {})
+        )
+
+    async def handle(self, scope, receive, send):
+        await self.app(scope, receive, send)
+
+    def url_path_for(self, name: str, /, **path_params):
+        raise NoMatchFound(name, path_params)
+
+
+_mcp_asgi: _FeatureFlagMCPApp | None = None
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Run the MCP session manager even though it is mounted below FastAPI."""
+    if not config.mcp.enabled:
+        yield
+        return
+    # FastMCP session managers are intentionally single-use. Recreate the
+    # mounted sub-app for a process restart (and isolated TestClient lifespans).
+    mcp_server._session_manager = None
+    assert _mcp_asgi is not None
+    _mcp_asgi.app = mcp_server.streamable_http_app()
+    async with mcp_server.session_manager.run():
+        yield
+
 
 app = FastAPI(
     title="Engineering Platform API",
@@ -35,6 +99,7 @@ app = FastAPI(
     "All endpoints use mock data unless GCP credentials are configured.",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=_lifespan,
 )
 
 app.add_middleware(
@@ -95,3 +160,10 @@ async def root():
         "version": "0.5.0",
         "docs": "/docs",
     }
+
+
+# The MCP SDK provides RFC 9728 metadata, DCR, authorization, token,
+# revocation, and the exact Streamable HTTP route under this same API origin.
+# Mount last so the regular FastAPI routes always win.
+_mcp_asgi = _FeatureFlagMCPApp(mcp_server.streamable_http_app())
+app.router.routes.append(_MCPRoute(_mcp_asgi))

@@ -46,6 +46,11 @@ python3 -m pytest -q
 | GET | `/api/quality/services/{service_name}/reports` | Recent quality history for a service |
 | POST | `/api/service-factory/plan` | Generate service onboarding artifacts |
 
+The optional remote MCP endpoint is `/mcp`. It is disabled by default and uses
+OAuth 2.1 + DCR with GitHub identity; see
+[`docs/runbooks/remote-mcp.md`](docs/runbooks/remote-mcp.md). It reuses the same
+release engine and never lets a client select GitHub Actions or Cloud Build.
+
 ## Quality report storage
 
 - `ENG_PLATFORM_QUALITY_INGEST_TOKEN`: required Bearer token for report writes.

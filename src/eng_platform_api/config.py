@@ -77,6 +77,20 @@ class AuthConfig:
 
 
 @dataclass
+class MCPConfig:
+    """Configuration for the remote Model Context Protocol surface."""
+
+    enabled: bool = False
+    public_base_url: str = ""
+    issuer_url: str = ""
+    audit_collection: str = "eng_platform_mcp_audit"
+    oauth_collection: str = "eng_platform_mcp_oauth"
+    access_token_ttl_seconds: int = 3600
+    refresh_token_ttl_seconds: int = 2_592_000
+    mutation_limit_per_hour: int = 10
+
+
+@dataclass
 class SonarQubeConfig:
     enabled: bool = False
     token: str = ""
@@ -100,6 +114,7 @@ class PlatformConfig:
     github: GitHubConfig = field(default_factory=GitHubConfig)
     cloud_build: CloudBuildConfig = field(default_factory=CloudBuildConfig)
     auth: AuthConfig = field(default_factory=AuthConfig)
+    mcp: MCPConfig = field(default_factory=MCPConfig)
     sonarqube: SonarQubeConfig = field(default_factory=SonarQubeConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
 
@@ -230,6 +245,34 @@ def load_config() -> PlatformConfig:
         == "true",
     )
 
+    public_base_url = os.getenv("ENG_PLATFORM_MCP_PUBLIC_BASE_URL", "").rstrip("/")
+    mcp = MCPConfig(
+        enabled=os.getenv("ENG_PLATFORM_MCP_ENABLED", "false").lower() == "true",
+        public_base_url=public_base_url,
+        issuer_url=os.getenv("ENG_PLATFORM_MCP_ISSUER_URL", public_base_url).rstrip(
+            "/"
+        ),
+        audit_collection=os.getenv(
+            "ENG_PLATFORM_MCP_AUDIT_FIRESTORE_COLLECTION", "eng_platform_mcp_audit"
+        ).strip(),
+        oauth_collection=os.getenv(
+            "ENG_PLATFORM_MCP_OAUTH_FIRESTORE_COLLECTION", "eng_platform_mcp_oauth"
+        ).strip(),
+        access_token_ttl_seconds=int(
+            os.getenv("ENG_PLATFORM_MCP_ACCESS_TOKEN_TTL_SECONDS", "3600")
+        ),
+        refresh_token_ttl_seconds=int(
+            os.getenv("ENG_PLATFORM_MCP_REFRESH_TOKEN_TTL_SECONDS", "2592000")
+        ),
+        mutation_limit_per_hour=int(
+            os.getenv("ENG_PLATFORM_MCP_MUTATION_LIMIT_PER_HOUR", "10")
+        ),
+    )
+    if mcp.enabled and not mcp.public_base_url:
+        raise ValueError(
+            "ENG_PLATFORM_MCP_PUBLIC_BASE_URL is required when MCP is enabled"
+        )
+
     # Deprecated compatibility fields are inert; no Sonar credentials are loaded.
     sonarqube = SonarQubeConfig()
 
@@ -250,6 +293,7 @@ def load_config() -> PlatformConfig:
         github=github,
         cloud_build=cloud_build,
         auth=auth,
+        mcp=mcp,
         sonarqube=sonarqube,
         quality=quality,
     )
