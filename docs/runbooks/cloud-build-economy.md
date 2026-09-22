@@ -13,8 +13,11 @@ workflow that created the semantic tag and its exact `oss-v2` evidence.
    `ENG_PLATFORM_CLOUD_BUILD_REPOSITORIES_JSON`. The value is a map keyed by
    catalog service name.
 3. Build `docker/release-executor` once, scan it in its normal build pipeline,
-   and set `ENG_PLATFORM_CLOUD_BUILD_EXECUTOR_IMAGE` to its immutable
-   `@sha256:` digest. Never use a tag in this setting.
+   and set `ENG_PLATFORM_RELEASE_EXECUTOR_IMAGE` to its immutable `@sha256:`
+   digest in both the GitHub repository variable and the API runtime. Never
+   use a tag in this setting. The legacy
+   `ENG_PLATFORM_CLOUD_BUILD_EXECUTOR_IMAGE` runtime setting remains accepted
+   during migration; if both are present, their values must match.
 4. Create a dedicated executor service account. Grant only Artifact Registry
    writer/read, Cloud Run deploy/traffic permissions, the profile-specific
    auxiliary-resource permissions, evidence-bucket write, and log write. Do
@@ -49,7 +52,7 @@ not change the machine class as a response.
 `ENG_PLATFORM_CLOUD_BUILD_PROJECT_ID`,
 `ENG_PLATFORM_CLOUD_BUILD_REGION=us-central1`,
 `ENG_PLATFORM_CLOUD_BUILD_SERVICE_ACCOUNT`,
-`ENG_PLATFORM_CLOUD_BUILD_EXECUTOR_IMAGE`,
+`ENG_PLATFORM_RELEASE_EXECUTOR_IMAGE`,
 `ENG_PLATFORM_CLOUD_BUILD_EVIDENCE_BUCKET`,
 `ENG_PLATFORM_CLOUD_BUILD_REPOSITORIES_JSON`, and
 `ENG_PLATFORM_CLOUD_BUILD_CALLBACK_SERVICE_ACCOUNT`, plus the rollout

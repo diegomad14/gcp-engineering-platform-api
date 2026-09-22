@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from eng_platform_api.config import config
+from eng_platform_api.config import config, load_config
 from eng_platform_api.models import DeploymentItem
 from eng_platform_api.services import catalog, cloud_build, deployment_executions
 from eng_platform_api.services.release_profiles import profile_for
@@ -95,6 +95,24 @@ def _item() -> DeploymentItem:
         tag="v1.2.3",
         sha="b" * 40,
     )
+
+
+def test_release_executor_image_setting_is_shared_with_cloud_build(monkeypatch):
+    image = "registry.example/executor@sha256:" + "a" * 64
+    monkeypatch.setenv("ENG_PLATFORM_RELEASE_EXECUTOR_IMAGE", image)
+    monkeypatch.delenv("ENG_PLATFORM_CLOUD_BUILD_EXECUTOR_IMAGE", raising=False)
+
+    assert load_config().cloud_build.executor_image == image
+
+
+def test_conflicting_executor_image_settings_fail_closed(monkeypatch):
+    monkeypatch.setenv("ENG_PLATFORM_RELEASE_EXECUTOR_IMAGE", "registry/new@sha256:1")
+    monkeypatch.setenv(
+        "ENG_PLATFORM_CLOUD_BUILD_EXECUTOR_IMAGE", "registry/old@sha256:2"
+    )
+
+    with pytest.raises(ValueError, match="Release executor image settings must match"):
+        load_config()
 
 
 def test_build_request_has_fixed_economy_contract():

@@ -171,6 +171,19 @@ def load_config() -> PlatformConfig:
     ):
         raise ValueError("ENG_PLATFORM_CLOUD_BUILD_REPOSITORIES_JSON must map strings")
 
+    release_executor_image = os.getenv(
+        "ENG_PLATFORM_RELEASE_EXECUTOR_IMAGE", ""
+    ).strip()
+    cloud_build_executor_image = os.getenv(
+        "ENG_PLATFORM_CLOUD_BUILD_EXECUTOR_IMAGE", ""
+    ).strip()
+    if (
+        release_executor_image
+        and cloud_build_executor_image
+        and release_executor_image != cloud_build_executor_image
+    ):
+        raise ValueError("Release executor image settings must match")
+
     cloud_build = CloudBuildConfig(
         enabled=os.getenv("ENG_PLATFORM_CLOUD_BUILD_ENABLED", "false").lower()
         == "true",
@@ -180,7 +193,7 @@ def load_config() -> PlatformConfig:
         service_account=os.getenv(
             "ENG_PLATFORM_CLOUD_BUILD_SERVICE_ACCOUNT", ""
         ).strip(),
-        executor_image=os.getenv("ENG_PLATFORM_CLOUD_BUILD_EXECUTOR_IMAGE", "").strip(),
+        executor_image=release_executor_image or cloud_build_executor_image,
         execution_collection=os.getenv(
             "ENG_PLATFORM_DEPLOYMENT_EXECUTION_FIRESTORE_COLLECTION",
             "deployment_executions",
