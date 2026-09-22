@@ -105,6 +105,7 @@ def test_build_request_has_fixed_economy_contract():
     assert request["options"] == {
         "machineType": "E2_STANDARD_2",
         "logging": "CLOUD_LOGGING_ONLY",
+        "substitutionOption": "ALLOW_LOOSE",
     }
     assert request["timeout"] == "1800s"
     assert len(request["steps"]) == 1

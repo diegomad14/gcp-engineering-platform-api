@@ -125,6 +125,10 @@ def build_request(item: DeploymentItem, service: CatalogService) -> dict[str, An
         "options": {
             "machineType": "E2_STANDARD_2",
             "logging": "CLOUD_LOGGING_ONLY",
+            # Identity fields intentionally remain recorded as substitutions
+            # even when the executor receives their already-validated values
+            # through env. Reconciliation verifies those immutable fields.
+            "substitutionOption": "ALLOW_LOOSE",
         },
         "serviceAccount": config.cloud_build.service_account,
         "substitutions": substitutions,
