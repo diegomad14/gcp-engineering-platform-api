@@ -539,9 +539,7 @@ def test_executor_persists_release_summary_in_shared_workspace(tmp_path, monkeyp
 
     module.write_summary({"production_revision": "revision-1"})
 
-    summary = json.loads(
-        (tmp_path / ".eng-platform-release-result.json").read_text()
-    )
+    summary = json.loads((tmp_path / ".eng-platform-release-result.json").read_text())
     assert summary["deployment_id"] == "42"
     assert summary["production_revision"] == "revision-1"
 
