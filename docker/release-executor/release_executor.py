@@ -7,13 +7,14 @@ database services.  Input comes exclusively from the signed backend profile.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import urllib.request
-import hashlib
 
 
 ROOT = pathlib.Path("/workspace").resolve()
@@ -81,6 +82,10 @@ PROFILE_SPECS = {
 }
 
 
+class AutomaticRollback(RuntimeError):
+    """The release failed after promotion and production was restored."""
+
+
 def env(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
@@ -110,8 +115,10 @@ def run(*args: str, cwd: pathlib.Path = ROOT) -> str:
 def emit(stage: str, status: str, **values: str) -> None:
     """Send a compact, monotonic state event. Failure to report is non-fatal."""
     api = os.getenv("CGM_PLATFORM_API_URL", "").rstrip("/")
-    if not api:
+    if not api or not os.getenv("BUILD_ID", "").strip():
         return
+    if status == "running":
+        os.environ["CGM_CURRENT_STAGE"] = stage
     sequence = int(os.getenv("CGM_EVENT_SEQUENCE", "0")) + 1
     os.environ["CGM_EVENT_SEQUENCE"] = str(sequence)
     body = {
@@ -145,6 +152,41 @@ def assert_source() -> None:
         )
     if not (ROOT / ".git").exists():
         raise RuntimeError("Cloud Build source must be a connected repository checkout")
+    tag = env("CGM_RELEASE_TAG")
+    if not re.fullmatch(
+        r"v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+        r"(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?",
+        tag,
+    ):
+        raise RuntimeError("release tag is not semantic")
+
+
+def verify_quality() -> None:
+    api = env("CGM_PLATFORM_API_URL").rstrip("/")
+    endpoint = (
+        f"{api}/api/quality/services/{env('CGM_SERVICE')}/commits/"
+        f"{env('CGM_RELEASE_SHA')}?for_release=true"
+    )
+    with urllib.request.urlopen(endpoint, timeout=20) as response:
+        report = json.load(response)
+    identity = (
+        report.get("service_name"),
+        report.get("repository"),
+        report.get("commit_sha"),
+    )
+    if identity != (
+        env("CGM_SERVICE"),
+        env("CGM_REPOSITORY"),
+        env("CGM_RELEASE_SHA"),
+    ):
+        raise RuntimeError("quality evidence identity does not match release")
+    if (
+        report.get("policy_version") != "oss-v2"
+        or report.get("quality_gate_status") != "PASSED"
+        or not report.get("checks")
+        or any(check.get("status") == "FAILED" for check in report["checks"])
+    ):
+        raise RuntimeError("release requires exact passed oss-v2 evidence")
 
 
 def image_for_tag() -> str:
@@ -158,7 +200,18 @@ def image_for_tag() -> str:
         if data.get("org.opencontainers.image.revision") == env(
             "CGM_RELEASE_SHA"
         ) and data.get("org.opencontainers.image.source") == env("CGM_REPOSITORY"):
-            return image
+            digest = run(
+                "gcloud",
+                "artifacts",
+                "docker",
+                "images",
+                "describe",
+                image,
+                "--format=value(image_summary.digest)",
+            )
+            if not digest.startswith("sha256:"):
+                raise RuntimeError("existing release image has no immutable digest")
+            return f"{image.rsplit(':', 1)[0]}@{digest}"
     except subprocess.CalledProcessError:
         pass
     context = (ROOT / env("CGM_BUILD_CONTEXT")).resolve()
@@ -177,6 +230,19 @@ def image_for_tag() -> str:
     if env("CGM_PROFILE") == "eng-platform-web":
         args.extend(["--build-arg", f"APP_VERSION={env('CGM_RELEASE_TAG')}"])
     cache = os.getenv("CGM_CACHE_IMAGE", "").strip()
+    if not cache:
+        cache = run(
+            "gcloud",
+            "run",
+            "services",
+            "describe",
+            env("CGM_SERVICE"),
+            "--region",
+            env("CGM_REGION"),
+            "--project",
+            env("CGM_PROJECT_ID"),
+            "--format=value(spec.template.spec.containers[0].image)",
+        )
     if cache:
         subprocess.run(["docker", "pull", cache], check=False, capture_output=True)
         args.extend(["--cache-from", cache])
@@ -407,11 +473,12 @@ def deploy(image: str) -> dict[str, str]:
         _set_traffic(service, region, project, previous)
         restored = max(previous, key=previous.get)
         emit("rollback", "succeeded", production_revision=restored)
-        raise
+        raise AutomaticRollback("production smoke failed; traffic was restored")
 
 
 def rollback() -> dict[str, str]:
     target = env("CGM_TARGET_REVISION")
+    emit("rollback", "running")
     run(
         "gcloud",
         "run",
@@ -458,6 +525,8 @@ def main() -> None:
     verify_profile()
     assert_source()
     emit("verify-release", "running")
+    if env("CGM_OPERATION") != "rollback":
+        verify_quality()
     emit("verify-release", "succeeded")
     if env("CGM_OPERATION") == "rollback":
         write_summary(rollback())
@@ -471,6 +540,8 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except AutomaticRollback:
+        raise
     except Exception as exc:
-        emit("rollback", "failed", error=str(exc))
+        emit(os.getenv("CGM_CURRENT_STAGE", "verify-release"), "failed", error=str(exc))
         raise

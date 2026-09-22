@@ -70,6 +70,7 @@ jobs:
           CGM_REQUEST_FINGERPRINT: ${{ steps.release.outputs.fingerprint }}
           CGM_PROFILE: ${{ inputs.service_name }}
           CGM_PROFILE_SHA256: ${{ inputs.profile_sha256 }}
+          CGM_PLATFORM_API_URL: ${{ vars.ENG_PLATFORM_API_URL }}
         run: |
           set -euo pipefail
           credential_file="$(basename "$GOOGLE_APPLICATION_CREDENTIALS")"
@@ -81,6 +82,7 @@ jobs:
             --env CGM_DEPLOYMENT_ID --env CGM_OPERATION --env CGM_TARGET_REVISION \
             --env CGM_REPOSITORY --env CGM_REQUEST_FINGERPRINT --env CGM_PROFILE \
             --env CGM_PROFILE_SHA256 \
+            --env CGM_PLATFORM_API_URL \
             "${{ vars.ENG_PLATFORM_RELEASE_EXECUTOR_IMAGE }}" --service "$CGM_SERVICE"
       - name: Publish rollback result
         if: always()

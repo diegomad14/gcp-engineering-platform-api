@@ -91,6 +91,7 @@ jobs:
           CGM_REQUEST_FINGERPRINT: ${{ steps.release.outputs.fingerprint }}
           CGM_PROFILE: ${{ inputs.service_name }}
           CGM_PROFILE_SHA256: ${{ inputs.profile_sha256 }}
+          CGM_PLATFORM_API_URL: ${{ vars.ENG_PLATFORM_API_URL }}
           CGM_IMAGE: ${{ inputs.region }}-docker.pkg.dev/${{ inputs.project_id }}/${{ inputs.artifact_repository }}/${{ inputs.image_name }}:${{ inputs.tag }}
         run: |
           set -euo pipefail
@@ -103,6 +104,7 @@ jobs:
             --env CGM_ARTIFACT_REPOSITORY --env CGM_BUILD_CONTEXT --env CGM_HEALTH_PATH \
             --env CGM_DEPLOYMENT_ID --env CGM_OPERATION --env CGM_REPOSITORY \
             --env CGM_REQUEST_FINGERPRINT --env CGM_PROFILE --env CGM_PROFILE_SHA256 \
+            --env CGM_PLATFORM_API_URL \
             --env CGM_IMAGE \
             "${{ vars.ENG_PLATFORM_RELEASE_EXECUTOR_IMAGE }}" --service "$CGM_SERVICE"
       - name: Publish deployment result

@@ -113,6 +113,69 @@ def test_submit_reuses_matching_build_instead_of_posting_twice(monkeypatch):
     assert deployment_executions.get(item.id)["build_id"] == "build-1"
 
 
+def test_submit_claim_allows_only_one_external_post(monkeypatch):
+    service = catalog.get_service("eng-platform-api")
+    assert service is not None
+    item = _item()
+    fingerprint = cloud_build.fingerprint(item, service)
+    deployment_executions.reserve(
+        item.id,
+        provider="cloud_build",
+        fingerprint=fingerprint,
+        service_name=item.service_name,
+        repository=item.repository,
+        sha=item.sha,
+        tag=item.tag,
+        kind=item.kind,
+    )
+    assert deployment_executions.claim_submission(item.id) is True
+
+    session = mock.MagicMock()
+    monkeypatch.setattr(cloud_build, "_matching_build", lambda *_: None)
+    monkeypatch.setattr(cloud_build, "_session", lambda: session)
+
+    with pytest.raises(cloud_build.CloudBuildError, match="being reconciled"):
+        cloud_build.submit(item, service, reason="concurrent-retry")
+
+    session.post.assert_not_called()
+
+
+def test_provider_transition_is_single_and_preserves_identity():
+    service = catalog.get_service("eng-platform-api")
+    assert service is not None
+    item = _item()
+    fingerprint = cloud_build.fingerprint(item, service)
+    deployment_executions.reserve(
+        item.id,
+        provider="github_actions",
+        fingerprint=fingerprint,
+        service_name=item.service_name,
+        repository=item.repository,
+        sha=item.sha,
+        tag=item.tag,
+        kind=item.kind,
+        authorization_jti="auth-1",
+    )
+
+    first = deployment_executions.transition_provider(
+        item.id,
+        from_provider="github_actions",
+        to_provider="cloud_build",
+        reason="quota",
+    )
+    second = deployment_executions.transition_provider(
+        item.id,
+        from_provider="github_actions",
+        to_provider="cloud_build",
+        reason="duplicate",
+    )
+
+    assert first["provider"] == second["provider"] == "cloud_build"
+    assert second["fingerprint"] == fingerprint
+    assert second["reason"] == "quota"
+    assert second["status"] == "SUBMISSION_PENDING"
+
+
 def test_disabled_cloud_build_never_builds_a_request(monkeypatch):
     monkeypatch.setattr(config.cloud_build, "enabled", False)
     service = catalog.get_service("eng-platform-api")

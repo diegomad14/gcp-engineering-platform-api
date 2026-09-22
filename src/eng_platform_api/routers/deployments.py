@@ -29,6 +29,7 @@ from ..services import (
     deployment_store,
     github_actions_quota,
     github_deployments,
+    release_authorization_store,
 )
 from .quality import get_quality_report
 
@@ -142,7 +143,25 @@ def _retry_failed_dispatch(
 
 def _start_cloud_build(service, item: DeploymentItem, *, reason: str) -> DeploymentItem:
     try:
-        return cloud_build.submit(item, service, reason=reason)
+        execution = deployment_executions.get(item.id)
+        if execution and execution.get("provider") == "github_actions":
+            release_authorization_store.revoke(
+                str(execution.get("authorization_jti", ""))
+            )
+            deployment_executions.transition_provider(
+                item.id,
+                from_provider="github_actions",
+                to_provider="cloud_build",
+                reason=reason,
+            )
+        submitted = cloud_build.submit(item, service, reason=reason)
+        github_deployments.set_managed_status(
+            submitted,
+            state="queued",
+            description="Deployment queued",
+            log_url=submitted.logs_url,
+        )
+        return submitted
     except cloud_build.CloudBuildError as exc:
         item.status = "FAILED"
         item.current_stage = "dispatch"
@@ -446,7 +465,20 @@ def get_deployment(deployment_id: str):
 def _refresh(item: DeploymentItem) -> DeploymentItem:
     execution = deployment_executions.get(item.id)
     if execution and execution.get("provider") == "cloud_build":
-        return cloud_build.refresh(item)
+        refreshed = cloud_build.refresh(item)
+        if refreshed.status in github_deployments.TERMINAL_STATUSES:
+            github_deployments.set_managed_status(
+                refreshed,
+                state="success"
+                if refreshed.status in {"SUCCEEDED", "ROLLED_BACK"}
+                else "failure",
+                description=(
+                    refreshed.error or f"Deployment {refreshed.status.lower()}"
+                ),
+                log_url=refreshed.logs_url,
+                environment_url=refreshed.production_url,
+            )
+        return refreshed
     item = github_deployments.refresh(item)
     if item.status != "FAILED" or not item.github_run_id:
         return item

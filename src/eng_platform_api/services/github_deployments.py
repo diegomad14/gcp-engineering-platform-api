@@ -10,6 +10,7 @@ from time import monotonic
 from typing import Any, Literal
 
 from github import Github, GithubIntegration
+from github.GithubObject import NotSet
 
 from ..config import config
 from ..models import (
@@ -20,7 +21,12 @@ from ..models import (
     ReleaseTag,
     ReleaseTagPage,
 )
-from . import deployment_store, release_authorization
+from . import (
+    deployment_executions,
+    deployment_store,
+    release_authorization,
+    release_authorization_store,
+)
 from .release_profiles import profile_for
 
 _SEMVER = re.compile(
@@ -57,9 +63,70 @@ GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED = "GitHub rollback workflow dispatch fa
 class GitHubDispatchError(RuntimeError):
     """A GitHub Deployment was created but its workflow could not be dispatched."""
 
-    def __init__(self, item: DeploymentItem):
+    def __init__(self, item: DeploymentItem, authorization_jti: str = ""):
         self.item = item
+        self.authorization_jti = authorization_jti
         super().__init__(item.error or GITHUB_WORKFLOW_DISPATCH_FAILED)
+
+
+def _reserve_github_execution(
+    item: DeploymentItem, service: CatalogService, authorization_jti: str
+) -> None:
+    if not config.cloud_build.enabled:
+        return
+    from . import cloud_build
+
+    deployment_executions.reserve(
+        item.id,
+        provider="github_actions",
+        fingerprint=cloud_build.fingerprint(item, service),
+        service_name=item.service_name,
+        repository=item.repository,
+        sha=item.sha,
+        tag=item.tag,
+        kind=item.kind,
+        reason="github_dispatch",
+        authorization_jti=authorization_jti,
+    )
+
+
+def _revoke_rejected_authorization(authorization_jti: str) -> None:
+    """Best-effort revocation when Cloud Build fallback is not active.
+
+    A rejected GitHub dispatch must keep reporting the original dispatch error even
+    in development/test environments without a durable authorization store.  When
+    Cloud Build is active, revocation is part of the handoff safety boundary and a
+    missing durable store remains a hard failure.
+    """
+    try:
+        release_authorization_store.revoke(authorization_jti)
+    except RuntimeError:
+        if config.cloud_build.enabled:
+            raise
+
+
+def set_managed_status(
+    item: DeploymentItem,
+    *,
+    state: str,
+    description: str,
+    log_url: str = "",
+    environment_url: str = "",
+) -> None:
+    """Project a provider-neutral execution onto its canonical Deployment."""
+    if config.mock_mode or not item.github_deployment_id:
+        return
+    deployment = (
+        github_client()
+        .get_repo(item.repository)
+        .get_deployment(item.github_deployment_id)
+    )
+    deployment.create_status(
+        state=state,
+        target_url=log_url or NotSet,
+        description=description[:140],
+        environment_url=environment_url or NotSet,
+    )
 
 
 def default_stages(kind: str = "deploy") -> list[DeploymentStage]:
@@ -252,7 +319,7 @@ def start_deployment(
         updated_at=now,
         github_deployment_id=github_deployment.id,
     )
-    authorization, _ = release_authorization.issue(
+    authorization, claims = release_authorization.issue(
         repository=repository,
         service_name=service_name,
         tag=tag.name,
@@ -262,6 +329,7 @@ def start_deployment(
         kind="deploy",
     )
     try:
+        _reserve_github_execution(item, service, str(claims["jti"]))
         github_deployment.create_status(
             state="queued",
             description="Queued by Engineering Platform",
@@ -286,6 +354,7 @@ def start_deployment(
             },
         )
     except Exception as exc:
+        _revoke_rejected_authorization(str(claims["jti"]))
         item.status = "FAILED"
         item.current_stage = "dispatch"
         item.error = GITHUB_WORKFLOW_DISPATCH_FAILED
@@ -296,7 +365,7 @@ def start_deployment(
             )
         except Exception:
             item.error = f"{GITHUB_WORKFLOW_DISPATCH_FAILED}; status update failed"
-        raise GitHubDispatchError(item) from exc
+        raise GitHubDispatchError(item, str(claims["jti"])) from exc
     return item
 
 
@@ -352,7 +421,7 @@ def start_rollback(
         github_deployment_id=github_deployment.id,
         production_revision=target.production_revision,
     )
-    authorization, _ = release_authorization.issue(
+    authorization, claims = release_authorization.issue(
         repository=repository,
         service_name=service_name,
         tag=target.tag,
@@ -363,6 +432,7 @@ def start_rollback(
         target_revision=target.production_revision,
     )
     try:
+        _reserve_github_execution(item, service, str(claims["jti"]))
         github_deployment.create_status(
             state="queued",
             description="Rollback queued by Engineering Platform",
@@ -384,6 +454,7 @@ def start_rollback(
             },
         )
     except Exception as exc:
+        _revoke_rejected_authorization(str(claims["jti"]))
         item.status = "FAILED"
         item.current_stage = "dispatch"
         item.error = GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED
@@ -396,14 +467,14 @@ def start_rollback(
             item.error = (
                 f"{GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED}; status update failed"
             )
-        raise GitHubDispatchError(item) from exc
+        raise GitHubDispatchError(item, str(claims["jti"])) from exc
     return item
 
 
 def _retry_workflow_and_inputs(
     repo: Any, service: CatalogService, item: DeploymentItem, target_revision: str
 ) -> tuple[Any, dict[str, str]]:
-    authorization, _ = release_authorization.issue(
+    authorization, claims = release_authorization.issue(
         repository=item.repository,
         service_name=item.service_name,
         tag=item.tag,
@@ -413,6 +484,10 @@ def _retry_workflow_and_inputs(
         kind=item.kind,
         target_revision=item.production_revision or target_revision,
     )
+    if config.cloud_build.enabled and deployment_executions.get(item.id):
+        deployment_executions.save(
+            item.id, authorization_jti=str(claims["jti"]), status="GITHUB_RETRY"
+        )
     if item.kind == "rollback":
         revision = item.production_revision or target_revision
         if not revision:

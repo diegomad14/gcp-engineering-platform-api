@@ -201,7 +201,7 @@ def submit(
     recovered = _matching_build(item, request_fingerprint)
     if recovered:
         return _bind_build(item, recovered)
-    if existing.get("status") == "SUBMISSION_UNKNOWN":
+    if not deployment_executions.claim_submission(item.id):
         raise CloudBuildError("Cloud Build submission is still being reconciled")
     location = f"projects/{config.cloud_build.project_id}/locations/{config.cloud_build.region}"
     try:

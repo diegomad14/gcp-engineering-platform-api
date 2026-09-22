@@ -8,7 +8,12 @@ from fastapi import APIRouter, Header, HTTPException
 
 from ..config import config
 from ..models import DeploymentExecutionEvent, DeploymentStatus
-from ..services import cloud_build, deployment_executions, deployment_store
+from ..services import (
+    cloud_build,
+    deployment_executions,
+    deployment_store,
+    github_deployments,
+)
 
 router = APIRouter(prefix="/api/internal", tags=["internal"])
 
@@ -120,4 +125,16 @@ def accept_event(
         item.status = status_by_stage.get(payload.stage, item.status)
         item.current_stage = payload.stage
     deployment_store.save(item, "")
+    github_state = "in_progress"
+    if item.status in {"SUCCEEDED", "ROLLED_BACK"}:
+        github_state = "success"
+    elif item.status in {"FAILED", "ROLLBACK_FAILED"}:
+        github_state = "failure"
+    github_deployments.set_managed_status(
+        item,
+        state=github_state,
+        description=(item.error or f"Deployment stage: {item.current_stage}"),
+        log_url=str(execution.get("log_url", "")),
+        environment_url=item.production_url,
+    )
     return {"accepted": True, "event_sequence": event["event_sequence"]}

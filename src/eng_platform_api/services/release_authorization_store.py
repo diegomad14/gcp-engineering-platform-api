@@ -43,6 +43,27 @@ def consume(jti: str, record: dict[str, Any], *, require_durable: bool = False) 
         return True
 
 
+def revoke(jti: str) -> None:
+    """Persistently make an issued authorization unusable."""
+    if not jti:
+        return
+    record = {"revoked": True}
+    collection = _firestore_collection()
+    if collection is not None:
+        document = collection.document(jti)
+        try:
+            document.create(record)
+        except Exception as exc:
+            if exc.__class__.__name__ not in {"AlreadyExists", "Conflict"}:
+                raise
+            document.set(record, merge=True)
+        return
+    if not config.mock_mode:
+        raise RuntimeError("Durable release authorization store is not configured")
+    with _lock:
+        _mock_entries.setdefault(jti, {}).update(record)
+
+
 def get(jti: str) -> dict[str, Any] | None:
     """Return a consumed authorization without exposing its token."""
     if not jti:
