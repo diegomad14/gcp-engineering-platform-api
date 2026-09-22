@@ -518,3 +518,16 @@ def test_executor_and_backend_authorize_the_same_release_spec():
             module.profile_fingerprint(service_name)
             == profile_for(service).fingerprint()
         )
+
+
+@pytest.mark.parametrize(
+    "workflow_name", ["platform-deploy.yml", "platform-rollback.yml"]
+)
+def test_thin_workflow_authenticates_before_pulling_private_executor(workflow_name):
+    workflow = (
+        Path(__file__).parents[1] / ".github/workflows" / workflow_name
+    ).read_text()
+
+    assert workflow.index("gcloud auth configure-docker") < workflow.index(
+        '"${{ vars.ENG_PLATFORM_RELEASE_EXECUTOR_IMAGE }}"'
+    )
