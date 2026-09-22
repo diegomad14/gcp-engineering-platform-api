@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
-
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from threading import Lock
@@ -18,8 +16,8 @@ from ..models import (
     DeploymentList,
     DeploymentOverview,
     DeploymentOverviewItem,
-    ReleaseTagPage,
     ReleaseTag,
+    ReleaseTagPage,
 )
 from ..security import require_deployer
 from ..services import (
@@ -31,6 +29,7 @@ from ..services import (
     github_deployments,
     release_authorization_store,
 )
+from ..services import deployment_commands
 from .quality import get_quality_report
 
 router = APIRouter(prefix="/api", tags=["deployments"])
@@ -55,18 +54,6 @@ def _service_or_404(service_name: str):
     return service
 
 
-def _require_deployment_ready(service) -> None:
-    if service.deployment_ready:
-        return
-    blockers = (
-        "; ".join(service.deployment_blockers) or "service is not deployment-ready"
-    )
-    raise HTTPException(
-        status_code=409,
-        detail=f"Service '{service.service_name}' is not ready for platform deploy: {blockers}",
-    )
-
-
 def _require_release_quality(service, sha: str) -> None:
     report = get_quality_report(service.service_name, sha, for_release=True)
     if report.quality_gate_status != "PASSED":
@@ -75,6 +62,9 @@ def _require_release_quality(service, sha: str) -> None:
         )
 
 
+# Compatibility helpers retained for existing internal callers. REST and MCP
+# mutations use deployment_commands directly; these functions do not form an
+# alternate request surface.
 def _active_deployment(service_name: str) -> DeploymentItem | None:
     return next(
         (
@@ -86,87 +76,11 @@ def _active_deployment(service_name: str) -> DeploymentItem | None:
     )
 
 
-def _require_matching_idempotency(
-    existing: DeploymentItem,
-    service_name: str,
-    tag: str,
-    kind: str,
-) -> None:
-    if (
-        existing.service_name != service_name
-        or existing.tag != tag
-        or existing.kind != kind
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="Idempotency-Key was already used for another deployment",
-        )
-
-
-def _save_dispatch_error(
-    exc: github_deployments.GitHubDispatchError, key: str, detail: str
-) -> None:
-    try:
-        deployment_store.save(exc.item, key)
-        _invalidate_overview_cache()
-    except Exception as store_exc:
-        raise HTTPException(status_code=502, detail=_GITHUB_UNAVAILABLE) from store_exc
-    raise HTTPException(status_code=502, detail=detail) from exc
-
-
-def _retry_failed_dispatch(
-    service, existing: DeploymentItem, key: str, detail: str, target_revision: str = ""
-) -> DeploymentItem:
-    if existing.kind == "deploy":
-        _require_release_quality(service, existing.sha)
-    try:
-        # Retry through the same private selector.  A submission whose response
-        # timed out is protected by the durable Cloud Build fingerprint.
-        if github_actions_quota.should_use_cloud_build(
-            service.service_name, service.repository
-        ):
-            retried = _start_cloud_build(service, existing, reason="retry_preflight")
-        else:
-            retried = github_deployments.retry_dispatch(
-                service=service, item=existing, target_revision=target_revision
-            )
-    except github_deployments.GitHubDispatchError as exc:
-        deployment_store.save(exc.item, key)
-        _invalidate_overview_cache()
-        raise HTTPException(status_code=502, detail=detail) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=_GITHUB_UNAVAILABLE) from exc
-    saved = deployment_store.save(retried, key)
-    _invalidate_overview_cache()
-    return saved
-
-
 def _start_cloud_build(service, item: DeploymentItem, *, reason: str) -> DeploymentItem:
-    try:
-        execution = deployment_executions.get(item.id)
-        if execution and execution.get("provider") == "github_actions":
-            release_authorization_store.revoke(
-                str(execution.get("authorization_jti", ""))
-            )
-            deployment_executions.transition_provider(
-                item.id,
-                from_provider="github_actions",
-                to_provider="cloud_build",
-                reason=reason,
-            )
-        submitted = cloud_build.submit(item, service, reason=reason)
-        github_deployments.set_managed_status(
-            submitted,
-            state="queued",
-            description="Deployment queued",
-            log_url=submitted.logs_url,
-        )
-        return submitted
-    except cloud_build.CloudBuildError as exc:
-        item.status = "FAILED"
-        item.current_stage = "dispatch"
-        item.error = str(exc)
-        raise github_deployments.GitHubDispatchError(item) from exc
+    # Kept as a module attribute for compatibility with the operational tests
+    # that patch the release-authorization store used by the shared command.
+    assert release_authorization_store is not None
+    return deployment_commands.start_cloud_build(service, item, reason=reason)
 
 
 def _dispatch_deploy(service, tag, requested_by: str) -> DeploymentItem:
@@ -193,10 +107,9 @@ def _dispatch_rollback(
     if github_actions_quota.should_use_cloud_build(
         service.service_name, service.repository
     ):
-        tag = ReleaseTag(name=target.tag, sha=target.sha)
         item = github_deployments.start_managed_deployment(
             service=service,
-            tag=tag,
+            tag=ReleaseTag(name=target.tag, sha=target.sha),
             requested_by=requested_by,
             kind="rollback",
             target_revision=target.production_revision,
@@ -210,6 +123,19 @@ def _dispatch_rollback(
         if not github_actions_quota.is_quota_error(exc):
             raise
         return _start_cloud_build(service, exc.item, reason="github_quota_dispatch")
+
+
+def _retry_failed_dispatch(
+    service, existing: DeploymentItem, key: str, detail: str, target_revision: str = ""
+) -> DeploymentItem:
+    return deployment_commands._retry_failed_dispatch(
+        service,
+        existing,
+        key,
+        detail,
+        target_revision,
+        quality_validator=_require_release_quality,
+    )
 
 
 @router.get(
@@ -258,49 +184,16 @@ def create_deployment(
     request: Request,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
-    service = _service_or_404(service_name)
-    _require_deployment_ready(service)
     requested_by = require_deployer(request)
-    key = idempotency_key or str(uuid.uuid4())
-    existing = deployment_store.find_by_idempotency_key(key)
-    if existing is not None:
-        _require_matching_idempotency(existing, service_name, payload.tag, "deploy")
-        if existing.status == "FAILED" and existing.current_stage == "dispatch":
-            return _retry_failed_dispatch(
-                service,
-                existing,
-                key,
-                github_deployments.GITHUB_WORKFLOW_DISPATCH_FAILED,
-            )
-        return existing
-    active = _active_deployment(service_name)
-    if active is not None:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Deployment '{active.tag}' is already active for this service "
-                f"(id: {active.id})"
-            ),
-        )
-    try:
-        tag = github_deployments.get_tag(service.repository, service_name, payload.tag)
-        if tag is None:
-            raise HTTPException(status_code=404, detail=f"Unknown tag '{payload.tag}'")
-        if not tag.eligible:
-            raise HTTPException(status_code=409, detail=tag.reason)
-        _require_release_quality(service, tag.sha)
-        item = _dispatch_deploy(service, tag, requested_by)
-        saved = deployment_store.save(item, key)
-        _invalidate_overview_cache()
-        return saved
-    except HTTPException:
-        raise
-    except github_deployments.GitHubDispatchError as exc:
-        _save_dispatch_error(
-            exc, key, github_deployments.GITHUB_WORKFLOW_DISPATCH_FAILED
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=_GITHUB_UNAVAILABLE) from exc
+    item = deployment_commands.start_deployment(
+        service_name=service_name,
+        tag_name=payload.tag,
+        requested_by=requested_by,
+        idempotency_key=idempotency_key,
+        quality_validator=_require_release_quality,
+    )
+    _invalidate_overview_cache()
+    return item
 
 
 @router.post(
@@ -323,54 +216,16 @@ def rollback_deployment(
     request: Request,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
-    service = _service_or_404(service_name)
-    _require_deployment_ready(service)
     requested_by = require_deployer(request)
-    target = deployment_store.get(target_deployment_id)
-    if target is None or target.service_name != service_name:
-        raise HTTPException(
-            status_code=404, detail="Unknown deployment to roll back to"
-        )
-    if target.status != "SUCCEEDED" or not target.production_revision:
-        raise HTTPException(
-            status_code=409,
-            detail="Can only roll back to a previously succeeded production revision",
-        )
-    key = idempotency_key or str(uuid.uuid4())
-    existing = deployment_store.find_by_idempotency_key(key)
-    if existing is not None:
-        _require_matching_idempotency(existing, service_name, target.tag, "rollback")
-        if existing.status == "FAILED" and existing.current_stage == "dispatch":
-            return _retry_failed_dispatch(
-                service,
-                existing,
-                key,
-                github_deployments.GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED,
-                target.production_revision,
-            )
-        return existing
-    active = _active_deployment(service_name)
-    if active is not None:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Deployment '{active.tag}' is already active for this service "
-                f"(id: {active.id})"
-            ),
-        )
-    try:
-        item = _dispatch_rollback(service, target, requested_by)
-        saved = deployment_store.save(item, key)
-        _invalidate_overview_cache()
-        return saved
-    except HTTPException:
-        raise
-    except github_deployments.GitHubDispatchError as exc:
-        _save_dispatch_error(
-            exc, key, github_deployments.GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=_GITHUB_UNAVAILABLE) from exc
+    item = deployment_commands.start_rollback(
+        service_name=service_name,
+        target_deployment_id=target_deployment_id,
+        requested_by=requested_by,
+        idempotency_key=idempotency_key,
+        quality_validator=_require_release_quality,
+    )
+    _invalidate_overview_cache()
+    return item
 
 
 @router.get(

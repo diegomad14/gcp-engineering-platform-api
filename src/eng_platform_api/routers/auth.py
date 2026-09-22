@@ -105,13 +105,31 @@ async def github_login(
 
 @router.get("/callback", name="github_callback")
 async def github_callback(request: Request):
+    supplied_state = request.query_params.get("state", "")
+    # The remote MCP OAuth server reuses this registered GitHub callback. Its
+    # opaque state lives in Firestore, never in the browser session used by UI
+    # sign-in, so the two flows stay isolated.
+    from ..services.mcp_auth import owns_pending_state, provider as mcp_provider
+
+    if config.mcp.enabled and supplied_state and owns_pending_state(supplied_state):
+        try:
+            destination = await mcp_provider.complete_github_authorization(
+                state=supplied_state, authorization_response=str(request.url)
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="MCP GitHub authorization was not accepted",
+            ) from exc
+        return RedirectResponse(
+            destination, status_code=302, headers={"Cache-Control": "no-store"}
+        )
     if not _configured():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="GitHub OAuth is not configured",
         )
     expected_state = str(request.session.pop("oauth_state", ""))
-    supplied_state = request.query_params.get("state", "")
     if not expected_state or not hmac.compare_digest(expected_state, supplied_state):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
