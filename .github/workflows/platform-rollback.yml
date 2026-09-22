@@ -32,10 +32,11 @@ jobs:
         env:
           EXPECTED_SHA: ${{ inputs.target_sha }}
           DEPLOYMENT_ID: ${{ inputs.github_deployment_id }}
+          TARGET_TAG: ${{ inputs.target_tag }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-          fingerprint="$(printf '%s' "$DEPLOYMENT_ID|${GITHUB_REPOSITORY}|${{ inputs.target_tag }}|$EXPECTED_SHA|rollback" | sha256sum | cut -d' ' -f1)"
+          fingerprint="$(printf '%s' "$DEPLOYMENT_ID|${GITHUB_REPOSITORY}|$TARGET_TAG|$EXPECTED_SHA|rollback" | sha256sum | cut -d' ' -f1)"
           echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
       - name: Verify Engineering Platform authorization
         uses: ./.github/actions/verify-release-authorization
@@ -76,6 +77,8 @@ jobs:
           credential_file="$(basename "$GOOGLE_APPLICATION_CREDENTIALS")"
           docker run --rm --network host \
             --volume "$PWD:/workspace" --volume /var/run/docker.sock:/var/run/docker.sock \
+            --user "$(id -u):$(id -g)" --group-add "$(stat -c %g /var/run/docker.sock)" \
+            --env HOME=/tmp \
             --workdir /workspace --env GOOGLE_APPLICATION_CREDENTIALS="/workspace/$credential_file" \
             --env CGM_SERVICE --env CGM_RELEASE_TAG --env CGM_RELEASE_SHA \
             --env CGM_PROJECT_ID --env CGM_REGION --env CGM_HEALTH_PATH \
@@ -90,9 +93,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DEPLOYMENT_ID: ${{ inputs.github_deployment_id }}
           JOB_STATUS: ${{ job.status }}
+          TARGET_REVISION: ${{ inputs.target_revision }}
         run: |
           state=$([ "$JOB_STATUS" = success ] && echo success || echo failure)
           gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
             -f state="$state" \
-            -f description="production_revision=${{ inputs.target_revision }}" \
+            -f description="production_revision=$TARGET_REVISION" \
             -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >/dev/null

@@ -98,6 +98,8 @@ jobs:
           credential_file="$(basename "$GOOGLE_APPLICATION_CREDENTIALS")"
           docker run --rm --network host \
             --volume "$PWD:/workspace" --volume /var/run/docker.sock:/var/run/docker.sock \
+            --user "$(id -u):$(id -g)" --group-add "$(stat -c %g /var/run/docker.sock)" \
+            --env HOME=/tmp \
             --workdir /workspace --env GOOGLE_APPLICATION_CREDENTIALS="/workspace/$credential_file" \
             --env CGM_SERVICE --env CGM_RELEASE_TAG --env CGM_RELEASE_SHA \
             --env CGM_PROJECT_ID --env CGM_REGION --env CGM_IMAGE_NAME \
