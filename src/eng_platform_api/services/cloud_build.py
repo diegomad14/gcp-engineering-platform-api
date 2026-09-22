@@ -141,6 +141,15 @@ def _session() -> AuthorizedSession:
     return AuthorizedSession(credentials)
 
 
+def _error_status(response: Any) -> str:
+    """Return only the stable Google API status, never an arbitrary body."""
+    try:
+        value = str(response.json().get("error", {}).get("status", ""))
+    except Exception:
+        return ""
+    return value if value.replace("_", "").isalnum() else ""
+
+
 def _matching_build(
     item: DeploymentItem, request_fingerprint: str
 ) -> dict[str, Any] | None:
@@ -216,8 +225,16 @@ def submit(
         deployment_executions.save(item.id, status="SUBMISSION_UNKNOWN")
         raise CloudBuildError("Cloud Build submission response was uncertain") from exc
     if response.status_code >= 300:
-        deployment_executions.save(item.id, status="SUBMISSION_FAILED")
-        raise CloudBuildError(f"Cloud Build submission failed: {response.status_code}")
+        error_status = _error_status(response)
+        deployment_executions.save(
+            item.id,
+            status="SUBMISSION_FAILED",
+            submission_error_code=error_status,
+        )
+        detail = f" ({error_status})" if error_status else ""
+        raise CloudBuildError(
+            f"Managed executor submission failed: {response.status_code}{detail}"
+        )
     operation = response.json()
     build = operation.get("metadata", {}).get("build", operation)
     build_id = build.get("id")

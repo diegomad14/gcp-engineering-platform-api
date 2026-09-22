@@ -187,6 +187,29 @@ def test_submit_claim_allows_only_one_external_post(monkeypatch):
     session.post.assert_not_called()
 
 
+def test_submit_records_stable_api_error_without_provider_leak(monkeypatch):
+    service = catalog.get_service("eng-platform-api")
+    assert service is not None
+    response = mock.MagicMock(status_code=400)
+    response.json.return_value = {
+        "error": {"status": "INVALID_ARGUMENT", "message": "untrusted detail"}
+    }
+    session = mock.MagicMock()
+    session.post.return_value = response
+    monkeypatch.setattr(cloud_build, "_matching_build", lambda *_: None)
+    monkeypatch.setattr(cloud_build, "_session", lambda: session)
+
+    with pytest.raises(
+        cloud_build.CloudBuildError,
+        match=r"Managed executor submission failed: 400 \(INVALID_ARGUMENT\)",
+    ):
+        cloud_build.submit(_item(), service, reason="canary")
+
+    execution = deployment_executions.get("123")
+    assert execution is not None
+    assert execution["submission_error_code"] == "INVALID_ARGUMENT"
+
+
 def test_provider_transition_is_single_and_preserves_identity():
     service = catalog.get_service("eng-platform-api")
     assert service is not None
