@@ -1,5 +1,6 @@
 """Economic, immutable Cloud Build request and idempotency contracts."""
 
+import json
 from unittest import mock
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -518,6 +519,31 @@ def test_executor_and_backend_authorize_the_same_release_spec():
             module.profile_fingerprint(service_name)
             == profile_for(service).fingerprint()
         )
+
+
+def test_executor_persists_release_summary_in_shared_workspace(tmp_path, monkeypatch):
+    path = Path(__file__).parents[1] / "docker/release-executor/release_executor.py"
+    spec = spec_from_file_location("release_executor_summary", path)
+    assert spec is not None and spec.loader is not None
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+    for name, value in {
+        "CGM_DEPLOYMENT_ID": "42",
+        "CGM_REQUEST_FINGERPRINT": "fingerprint",
+        "CGM_SERVICE": "eng-platform-api",
+        "CGM_RELEASE_SHA": "a" * 40,
+        "CGM_RELEASE_TAG": "v1.2.3",
+    }.items():
+        monkeypatch.setenv(name, value)
+
+    module.write_summary({"production_revision": "revision-1"})
+
+    summary = json.loads(
+        (tmp_path / ".eng-platform-release-result.json").read_text()
+    )
+    assert summary["deployment_id"] == "42"
+    assert summary["production_revision"] == "revision-1"
 
 
 @pytest.mark.parametrize(
