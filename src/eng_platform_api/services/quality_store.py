@@ -380,9 +380,7 @@ def save_immutable_report(
             current_create = _as_create(current_payload)
             provenance = current.get("provenance", {})
             current_fingerprint = (
-                provenance.get("fingerprint")
-                if isinstance(provenance, dict)
-                else ""
+                provenance.get("fingerprint") if isinstance(provenance, dict) else ""
             )
             if (
                 _report_hash(current_create) != calculated_hash

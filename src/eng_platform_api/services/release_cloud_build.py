@@ -370,9 +370,7 @@ def _matching_build(execution: dict[str, Any]) -> dict[str, Any] | None:
             and source.get("revision") == execution.get("head_sha")
             and build.get("serviceAccount")
             == config.release_orchestrator.service_account
-            and all(
-                substitutions.get(key) == value for key, value in expected.items()
-            )
+            and all(substitutions.get(key) == value for key, value in expected.items())
         ):
             return build
     return None

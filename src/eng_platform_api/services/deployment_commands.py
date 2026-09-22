@@ -91,9 +91,7 @@ def _require_orchestrated_release(service, tag: ReleaseTag) -> None:
         *settings.canary_services,
     }:
         return
-    execution = release_executions.find(
-        service.repository, tag.sha, "main_release"
-    )
+    execution = release_executions.find(service.repository, tag.sha, "main_release")
     plan = execution.get("release_plan", {}) if execution else {}
     if (
         not execution

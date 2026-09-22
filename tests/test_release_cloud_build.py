@@ -406,9 +406,7 @@ def test_api_profile_runs_container_smoke_without_control_volume(
         "entrypoint": "/opt/eng-platform/api_container_smoke.sh",
         "args": ["/workspace", "/eng-platform-external"],
         "env": ["BUILD_ID=$BUILD_ID"],
-        "volumes": [
-            {"name": "quality-external", "path": "/eng-platform-external"}
-        ],
+        "volumes": [{"name": "quality-external", "path": "/eng-platform-external"}],
         "waitFor": ["prepare"],
     }
     quality = request["steps"][2]
@@ -455,9 +453,10 @@ def test_postgres_profile_uses_pinned_image_and_isolated_test_dsn(
     assert '"$ENG_PLATFORM_POSTGRES_IMAGE"' in postgres["args"][3]
     assert "POSTGRES_DB=wm_test" in postgres["args"][3]
     assert "pg_isready -U postgres -d wm_test" in postgres["args"][3]
-    assert "docker exec eng-platform-postgres createdb -U postgres fnd_test" in postgres[
-        "args"
-    ][3]
+    assert (
+        "docker exec eng-platform-postgres createdb -U postgres fnd_test"
+        in postgres["args"][3]
+    )
     assert postgres["env"] == [f"ENG_PLATFORM_POSTGRES_IMAGE={POSTGRES}"]
     assert postgres["waitFor"] == ["prepare"]
     assert "volumes" not in postgres
@@ -642,9 +641,7 @@ def test_matching_build_returns_none_and_fails_closed_on_api_error(
 
 
 def test_bind_requires_build_id_and_persists_only_public_metadata(monkeypatch):
-    bind = mock.Mock(
-        return_value={"execution_id": "execution", "build_id": "build-1"}
-    )
+    bind = mock.Mock(return_value={"execution_id": "execution", "build_id": "build-1"})
     monkeypatch.setattr(cloud_build.release_executions, "bind_build", bind)
 
     result = cloud_build._bind(

@@ -504,7 +504,9 @@ def claim_source_token(execution_id: str) -> bool:
 
 def claim_event_token(execution_id: str, *, token_hash: str) -> bool:
     """Bind one callback token hash without ever persisting its plaintext value."""
-    if len(token_hash) != 64 or any(character not in "0123456789abcdef" for character in token_hash):
+    if len(token_hash) != 64 or any(
+        character not in "0123456789abcdef" for character in token_hash
+    ):
         raise ValueError("Event token hash must be a SHA-256 hex digest")
     changes = {
         "event_token_hash": token_hash,

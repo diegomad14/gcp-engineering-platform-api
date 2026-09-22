@@ -15,9 +15,7 @@ from ..models import CatalogService
 def _load_document() -> dict[str, Any]:
     path = files("eng_platform_api").joinpath("release_quality_profiles.json")
     value = json.loads(path.read_text(encoding="utf-8"))
-    if value.get("schema_version") != 1 or not isinstance(
-        value.get("profiles"), dict
-    ):
+    if value.get("schema_version") != 1 or not isinstance(value.get("profiles"), dict):
         raise RuntimeError("Release quality profile document is invalid")
     return value
 

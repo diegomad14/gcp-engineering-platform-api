@@ -278,8 +278,7 @@ def handle_pull_request(payload: dict[str, Any], *, delivery_id: str) -> list[di
             if (
                 previous.get("execution_id") != execution["execution_id"]
                 and previous.get("operation") == "pr_quality"
-                and previous.get("pull_request_number")
-                == int(payload.get("number", 0))
+                and previous.get("pull_request_number") == int(payload.get("number", 0))
                 and previous.get("provider") == "cloud_build"
                 and not _is_terminal(previous)
             ):
@@ -393,9 +392,7 @@ def _close_circuit_from_probe(repository: str, payload_run: dict[str, Any]) -> b
                         "Unable to roll back GitHub mode for %s", candidate
                     )
         else:
-            executor_circuits.close_after_successful_probe(
-                owner, run_id=str(run_id)
-            )
+            executor_circuits.close_after_successful_probe(owner, run_id=str(run_id))
     return True
 
 
@@ -559,9 +556,9 @@ def handle_workflow_run(payload: dict[str, Any], *, delivery_id: str) -> list[di
             and execution.get("pending_report_hash")
         ):
             changes: dict[str, Any] = {"provider_terminal_success": True}
-            if execution.get("engine_event_status") == "quality_passed" or execution.get(
-                "release_engine_failed"
-            ):
+            if execution.get(
+                "engine_event_status"
+            ) == "quality_passed" or execution.get("release_engine_failed"):
                 changes.update(
                     {
                         "release_engine_failed": True,
