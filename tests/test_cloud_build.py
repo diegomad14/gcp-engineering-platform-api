@@ -608,6 +608,18 @@ def test_executor_uses_cloud_build_credential_home_only_for_builds(monkeypatch):
     assert module.os.environ["HOME"] == "/builder/home"
 
 
+def test_executor_user_is_scoped_per_runtime():
+    root = Path(__file__).parents[1]
+    dockerfile = (root / "docker/release-executor/Dockerfile").read_text()
+    deploy_workflow = (root / ".github/workflows/platform-deploy.yml").read_text()
+    rollback_workflow = (root / ".github/workflows/platform-rollback.yml").read_text()
+
+    assert "\nUSER root\n" in dockerfile
+    for workflow in (deploy_workflow, rollback_workflow):
+        assert '--user "$(id -u):$(id -g)"' in workflow
+        assert '--group-add "$(stat -c %g /var/run/docker.sock)"' in workflow
+
+
 @pytest.mark.parametrize(
     "workflow_name", ["platform-deploy.yml", "platform-rollback.yml"]
 )

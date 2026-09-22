@@ -11,6 +11,9 @@ COPY release_executor.py /opt/eng-platform/release_executor.py
 RUN chmod 0555 /opt/eng-platform/release_executor.py
 
 ENV HOME=/tmp/release-executor
-USER release-executor
+# Cloud Build's credential home and Docker socket are builder-owned. The
+# managed worker therefore uses its standard root build user; GitHub Actions
+# still overrides this with --user/--group-add when it runs the same image.
+USER root
 
 ENTRYPOINT ["python3", "/opt/eng-platform/release_executor.py"]
