@@ -427,7 +427,8 @@ def _handle_deployment_workflow_run(
         )
         active = deployment_store.get(correlated[1]) if correlated else None
         if active is not None and (
-            active.kind != correlated[0]
+            correlated is None
+            or active.kind != correlated[0]
             or active.service_name != service.service_name
             or active.repository != repository
         ):

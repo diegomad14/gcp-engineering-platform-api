@@ -37,7 +37,7 @@ def set_repository_execution_mode(repository: str, mode: str) -> None:
     name = config.release_orchestrator.github_mode_variable
     if not name:
         raise RuntimeError("GitHub execution mode variable is not configured")
-    requester = repo._requester
+    requester = repo._requester  # type: ignore[attr-defined]
     path = f"/repos/{repository}/actions/variables/{name}"
     try:
         requester.requestJsonAndCheck(
@@ -93,27 +93,27 @@ def upsert_check(
                 break
     if check_run_id:
         check = repo.get_check_run(check_run_id)
-        check.edit(
+        check.edit(  # type: ignore[arg-type]
             name=CHECK_NAMES[kind],
             status=status,
-            conclusion=conclusion,
-            details_url=details_url or None,
+            conclusion=conclusion,  # type: ignore[arg-type]
+            details_url=details_url or None,  # type: ignore[arg-type]
             output=output,
-            completed_at=(
-                datetime.now(timezone.utc) if status == "completed" else None
+            completed_at=(  # type: ignore[arg-type]
+                datetime.now(timezone.utc) if status == "completed" else None  # type: ignore[arg-type]
             ),
         )
         return int(check.id)
-    check = repo.create_check_run(
+    check = repo.create_check_run(  # type: ignore[arg-type]
         name=CHECK_NAMES[kind],
         head_sha=head_sha,
-        external_id=external_id or None,
+        external_id=external_id or None,  # type: ignore[arg-type]
         status=status,
-        conclusion=conclusion,
-        details_url=details_url or None,
-        output=output,
-        started_at=datetime.now(timezone.utc) if status == "in_progress" else None,
-        completed_at=datetime.now(timezone.utc) if status == "completed" else None,
+        conclusion=conclusion,  # type: ignore[arg-type]
+        details_url=details_url or None,  # type: ignore[arg-type]
+        output=output,  # type: ignore[arg-type]
+        started_at=datetime.now(timezone.utc) if status == "in_progress" else None,  # type: ignore[arg-type]
+        completed_at=datetime.now(timezone.utc) if status == "completed" else None,  # type: ignore[arg-type]
     )
     return int(check.id)
 
@@ -208,7 +208,7 @@ def installation_read_token(repository: str) -> tuple[str, str]:
         raise RuntimeError("GitHub App authentication is not configured")
     repo = github_client().get_repo(repository)
     integration = GithubIntegration(int(settings.app_id), settings.private_key)
-    _, payload = integration._requester.requestJsonAndCheck(
+    _, payload = integration._requester.requestJsonAndCheck(  # type: ignore[attr-defined]
         "POST",
         f"/app/installations/{int(settings.installation_id)}/access_tokens",
         input={

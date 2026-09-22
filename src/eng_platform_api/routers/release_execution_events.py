@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import re
 import secrets
+from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -286,7 +287,7 @@ async def accept_event(
             except ValueError:
                 pass
         raise
-    changes = {
+    changes: dict[str, Any] = {
         "provider_run_id": payload.provider_run_id,
         "engine_event_status": payload.status,
         "error": payload.error,
