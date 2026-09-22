@@ -5,6 +5,7 @@ from unittest import mock
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
+import pytest
 
 from eng_platform_api.config import config
 from eng_platform_api.main import app
@@ -103,3 +104,35 @@ def test_consume_is_one_time_only():
     assert first.status_code == 200
     assert first.json()["accepted"] is True
     assert second.status_code == 409
+
+
+def test_revoked_authorization_cannot_be_consumed():
+    with (
+        mock.patch.object(config, "mock_mode", True),
+        mock.patch.object(release_authorization_store, "_mock_entries", {}),
+        mock.patch.dict(
+            "os.environ", {"ENG_PLATFORM_RELEASE_AUTH_FIRESTORE_COLLECTION": ""}
+        ),
+    ):
+        release_authorization_store.revoke("revoked-ticket")
+        assert release_authorization_store.get("revoked-ticket") == {"revoked": True}
+        assert (
+            release_authorization_store.consume(
+                "revoked-ticket", {"repository": "example"}
+            )
+            is False
+        )
+        release_authorization_store.revoke("")
+
+
+def test_durable_authorization_store_is_required_outside_mock_mode():
+    with (
+        mock.patch.object(config, "mock_mode", False),
+        mock.patch.dict(
+            "os.environ", {"ENG_PLATFORM_RELEASE_AUTH_FIRESTORE_COLLECTION": ""}
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="Durable"):
+            release_authorization_store.revoke("ticket")
+        with pytest.raises(RuntimeError, match="Durable"):
+            release_authorization_store.get("ticket")

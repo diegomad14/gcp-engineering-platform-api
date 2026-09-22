@@ -83,7 +83,7 @@ def _catalog_service(cfg: dict) -> CatalogService:
         project_id=cfg.get("project_id", _PROJECT_ID),
         region=cfg.get("region", _REGION),
         environment=cfg.get("environment", "prod"),
-        release_model=cfg.get("release_model", "local-first-preparation"),
+        release_model=cfg.get("release_model", "managed-release"),
         release_policy=cfg.get("release_policy", "oss-v2"),
         validation_targets=[
             ValidationTarget(**vt) for vt in cfg.get("validation_targets", [])

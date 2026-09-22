@@ -43,13 +43,9 @@ the release in the platform UI is rejected before GCP authentication.
 9. Use the rollback action from deployment history only when returning to a
    previously successful production revision.
 
-If GitHub blocks the workflow for billing, quota or runner availability, stop
-and follow the canonical `release_process` section and `Runbook - GitHub
-Actions bloqueado`. Resolve billing/quota first or use the approved
-`CGM_ACTIONS_RUNNER=cgm-release-local` fallback from the disposable-VM
-controller with the same SHA and tag. Do not create another tag or dispatch a
-parallel workflow manually. The local fallback is only for runner
-availability; it cannot bypass a GitHub billing or account suspension.
+If GitHub's private-minute quota is exhausted, Engineering Platform preserves
+the same SHA and tag and selects Cloud Build internally. Do not create another
+tag or dispatch a workflow manually.
 
 ## If a Service Is Blocked
 
@@ -60,11 +56,3 @@ platform catalog.
 
 Do not bypass readiness with manual Cloud Run commands. Manual `gcloud` traffic
 operations are reserved for authorized incident response runbooks only.
-
-## Runner contingency
-
-The normal release path uses GitHub-hosted runners. During a hosted-runner
-outage, the platform owner may set the repository variable
-`CGM_ACTIONS_RUNNER=cgm-release-local` after confirming that the ephemeral
-repository-scoped runner is online. Only the exact value `cgm-release-local` is
-accepted, and release workflows still require a protected branch/tag and WIF.
