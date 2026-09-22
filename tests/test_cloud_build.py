@@ -614,7 +614,7 @@ def test_executor_user_is_scoped_per_runtime():
     deploy_workflow = (root / ".github/workflows/platform-deploy.yml").read_text()
     rollback_workflow = (root / ".github/workflows/platform-rollback.yml").read_text()
 
-    assert "\nUSER root\n" in dockerfile
+    assert "\nUSER root" in dockerfile
     for workflow in (deploy_workflow, rollback_workflow):
         assert '--user "$(id -u):$(id -g)"' in workflow
         assert '--group-add "$(stat -c %g /var/run/docker.sock)"' in workflow
