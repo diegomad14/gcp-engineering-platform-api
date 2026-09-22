@@ -144,82 +144,6 @@ def test_create_deployment_and_idempotent_replay(client):
     assert second.status_code == 202
     assert first.json()["id"] == second.json()["id"]
     assert start.call_count == 1
-    assert start.call_args.kwargs["runner_label"] == ""
-
-
-def test_create_deployment_dispatches_and_audits_contingency_runner(client):
-    contingency = _deployment().model_copy(
-        update={
-            "runner_label": "cgm-release-local",
-            "contingency_cause": "billing",
-        }
-    )
-    with (
-        mock.patch(
-            "eng_platform_api.routers.deployments.github_deployments.get_tag",
-            return_value=_tag(),
-        ),
-        mock.patch(
-            "eng_platform_api.routers.deployments.github_deployments.start_deployment",
-            return_value=contingency,
-        ) as start,
-    ):
-        response = client.post(
-            "/api/services/eng-platform-api/deployments",
-            json={"tag": "v0.5.0", "runner_label": "cgm-release-local"},
-        )
-
-    assert response.status_code == 202
-    assert response.json()["runner_label"] == "cgm-release-local"
-    assert response.json()["contingency_cause"] == "billing"
-    assert start.call_args.kwargs["runner_label"] == "cgm-release-local"
-    assert start.call_args.kwargs["contingency_cause"] == "billing"
-
-
-def test_create_deployment_records_drill_cause(client):
-    contingency = _deployment().model_copy(
-        update={"runner_label": "cgm-release-local", "contingency_cause": "drill"}
-    )
-    with (
-        mock.patch(
-            "eng_platform_api.routers.deployments.github_deployments.get_tag",
-            return_value=_tag(),
-        ),
-        mock.patch(
-            "eng_platform_api.routers.deployments.github_deployments.start_deployment",
-            return_value=contingency,
-        ) as start,
-    ):
-        response = client.post(
-            "/api/services/eng-platform-api/deployments",
-            json={
-                "tag": "v0.5.0",
-                "runner_label": "cgm-release-local",
-                "contingency_cause": "drill",
-            },
-        )
-
-    assert response.status_code == 202
-    assert response.json()["contingency_cause"] == "drill"
-    assert start.call_args.kwargs["contingency_cause"] == "drill"
-
-
-def test_hosted_deployment_rejects_contingency_cause(client):
-    response = client.post(
-        "/api/services/eng-platform-api/deployments",
-        json={"tag": "v0.5.0", "contingency_cause": "drill"},
-    )
-
-    assert response.status_code == 422
-
-
-def test_create_deployment_rejects_unknown_runner_label(client):
-    response = client.post(
-        "/api/services/eng-platform-api/deployments",
-        json={"tag": "v0.5.0", "runner_label": "untrusted-runner"},
-    )
-
-    assert response.status_code == 422
 
 
 def test_ineligible_tag_is_rejected(client):
@@ -244,20 +168,6 @@ def test_idempotency_key_cannot_be_reused_for_another_tag(client):
         json={"tag": "v0.5.1"},
         headers={"Idempotency-Key": "one-request"},
     )
-    assert response.status_code == 409
-    assert "another deployment" in response.json()["detail"]
-
-
-def test_idempotency_key_cannot_change_runner_label(client):
-    from eng_platform_api.services import deployment_store
-
-    deployment_store.save(_deployment(), "one-request")
-    response = client.post(
-        "/api/services/eng-platform-api/deployments",
-        json={"tag": "v0.5.0", "runner_label": "cgm-release-local"},
-        headers={"Idempotency-Key": "one-request"},
-    )
-
     assert response.status_code == 409
     assert "another deployment" in response.json()["detail"]
 
@@ -300,26 +210,6 @@ def test_github_token_is_trimmed(monkeypatch):
 
     monkeypatch.setenv("ENG_PLATFORM_GITHUB_TOKEN", "token-with-whitespace\n")
     assert load_config().github.token == "token-with-whitespace"
-
-
-def test_runner_label_is_allowlisted_and_forwarded(monkeypatch):
-    from eng_platform_api.config import load_config
-    from eng_platform_api.services import github_deployments
-
-    monkeypatch.setenv("CGM_ACTIONS_RUNNER", "cgm-release-local")
-    assert load_config().github.runner_label == "cgm-release-local"
-
-    with mock.patch.object(
-        github_deployments.config.github, "runner_label", "cgm-release-local"
-    ):
-        assert github_deployments._runner_input() == {
-            "runner_label": "cgm-release-local"
-        }
-    with mock.patch.object(
-        github_deployments.config.github, "runner_label", "arbitrary-runner"
-    ):
-        with pytest.raises(RuntimeError, match="not an allowed value"):
-            github_deployments._runner_input()
 
 
 def test_create_deployment_hides_upstream_error_details(client):
@@ -580,37 +470,6 @@ def test_dispatch_uses_independent_service_catalog_configuration():
     assert inputs["build_context"] == "."
     assert inputs["health_path"] == "/"
     assert inputs["project_id"] == "cgm-assistant-prod"
-
-
-def test_contingency_dispatch_uses_stable_runner_label():
-    from eng_platform_api.services import catalog, github_deployments
-
-    service = catalog.get_service("cgm-sanplat-web")
-    assert service is not None
-    repository = mock.MagicMock()
-    github_deployment = mock.MagicMock(id=173)
-    repository.create_deployment.return_value = github_deployment
-    workflow = repository.get_workflow.return_value
-    github = mock.MagicMock()
-    github.get_repo.return_value = repository
-
-    with (
-        mock.patch.object(github_deployments.config, "mock_mode", False),
-        mock.patch.object(github_deployments, "github_client", return_value=github),
-    ):
-        item = github_deployments.start_deployment(
-            service=service,
-            tag=_tag(),
-            requested_by="diegomad14",
-            runner_label="cgm-release-local",
-        )
-
-    expected = "cgm-release-local"
-    assert item.runner_label == "cgm-release-local"
-    assert item.effective_runner_label == expected
-    assert (
-        workflow.create_dispatch.call_args.kwargs["inputs"]["runner_label"] == expected
-    )
 
 
 def test_dispatch_failure_marks_github_deployment_failed():

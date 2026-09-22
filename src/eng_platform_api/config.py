@@ -4,6 +4,7 @@ All integrations default to mock mode. Real GCP/GitHub/SonarQube
 integrations require explicit environment variable configuration.
 """
 
+import json
 import os
 from dataclasses import dataclass, field
 
@@ -39,17 +40,30 @@ class GitHubConfig:
     release_signing_private_key: str = ""
     release_signing_public_key: str = ""
     release_authorization_collection: str = "release_authorizations"
-    runner_label: str = ""
+    billing_owner: str = ""
+    included_private_minutes: int = 2000
 
 
 @dataclass
-class ReleaseExecutionConfig:
-    """Shared execution state; remote activation stays disabled by default."""
+class CloudBuildConfig:
+    """Configuration for the managed, economy deployment executor.
 
-    remote_activation_enabled: bool = False
-    allowed_services: tuple[str, ...] = ()
-    store_path: str = "data/release_execution_control.json"
-    firestore_collection: str = ""
+    The feature stays off until the GitHub connection, its repositories and IAM
+    are installed.  The executor image is deliberately a digest, never a tag:
+    a release must not silently acquire new orchestration code.
+    """
+
+    enabled: bool = False
+    mode: str = "auto"
+    project_id: str = ""
+    region: str = "us-central1"
+    service_account: str = ""
+    executor_image: str = ""
+    execution_collection: str = "deployment_executions"
+    evidence_bucket: str = ""
+    repositories: dict[str, str] = field(default_factory=dict)
+    callback_service_account: str = ""
+    enabled_services: tuple[str, ...] = ()
 
 
 @dataclass
@@ -84,9 +98,7 @@ class PlatformConfig:
     billing: BillingConfig = field(default_factory=BillingConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
-    release_execution: ReleaseExecutionConfig = field(
-        default_factory=ReleaseExecutionConfig
-    )
+    cloud_build: CloudBuildConfig = field(default_factory=CloudBuildConfig)
     auth: AuthConfig = field(default_factory=AuthConfig)
     sonarqube: SonarQubeConfig = field(default_factory=SonarQubeConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
@@ -140,26 +152,53 @@ def load_config() -> PlatformConfig:
             "ENG_PLATFORM_RELEASE_AUTH_FIRESTORE_COLLECTION",
             "release_authorizations",
         ),
-        runner_label=os.getenv("CGM_ACTIONS_RUNNER", "").strip(),
+        billing_owner=os.getenv("ENG_PLATFORM_GITHUB_BILLING_OWNER", "").strip(),
+        included_private_minutes=int(
+            os.getenv("ENG_PLATFORM_GITHUB_INCLUDED_PRIVATE_MINUTES", "2000")
+        ),
     )
 
-    release_execution = ReleaseExecutionConfig(
-        remote_activation_enabled=os.getenv(
-            "ENG_PLATFORM_LOCAL_RELEASE_ENABLED", "false"
-        ).lower()
+    repositories_raw = os.getenv("ENG_PLATFORM_CLOUD_BUILD_REPOSITORIES_JSON", "{}")
+    try:
+        repositories = json.loads(repositories_raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "ENG_PLATFORM_CLOUD_BUILD_REPOSITORIES_JSON must be JSON"
+        ) from exc
+    if not isinstance(repositories, dict) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in repositories.items()
+    ):
+        raise ValueError("ENG_PLATFORM_CLOUD_BUILD_REPOSITORIES_JSON must map strings")
+
+    cloud_build = CloudBuildConfig(
+        enabled=os.getenv("ENG_PLATFORM_CLOUD_BUILD_ENABLED", "false").lower()
         == "true",
-        allowed_services=tuple(
-            value.strip()
-            for value in os.getenv("ENG_PLATFORM_LOCAL_RELEASE_SERVICES", "").split(",")
-            if value.strip()
-        ),
-        store_path=os.getenv(
-            "ENG_PLATFORM_RELEASE_CONTROL_STORE_PATH",
-            "data/release_execution_control.json",
-        ),
-        firestore_collection=os.getenv(
-            "ENG_PLATFORM_RELEASE_CONTROL_FIRESTORE_COLLECTION", ""
+        mode=os.getenv("ENG_PLATFORM_DEPLOY_EXECUTOR_MODE", "auto").strip(),
+        project_id=os.getenv("ENG_PLATFORM_CLOUD_BUILD_PROJECT_ID", "").strip(),
+        region=os.getenv("ENG_PLATFORM_CLOUD_BUILD_REGION", "us-central1").strip(),
+        service_account=os.getenv(
+            "ENG_PLATFORM_CLOUD_BUILD_SERVICE_ACCOUNT", ""
         ).strip(),
+        executor_image=os.getenv("ENG_PLATFORM_CLOUD_BUILD_EXECUTOR_IMAGE", "").strip(),
+        execution_collection=os.getenv(
+            "ENG_PLATFORM_DEPLOYMENT_EXECUTION_FIRESTORE_COLLECTION",
+            "deployment_executions",
+        ).strip(),
+        evidence_bucket=os.getenv(
+            "ENG_PLATFORM_CLOUD_BUILD_EVIDENCE_BUCKET", ""
+        ).strip(),
+        repositories=repositories,
+        callback_service_account=os.getenv(
+            "ENG_PLATFORM_CLOUD_BUILD_CALLBACK_SERVICE_ACCOUNT", ""
+        ).strip(),
+        enabled_services=tuple(
+            service.strip()
+            for service in os.getenv(
+                "ENG_PLATFORM_CLOUD_BUILD_ENABLED_SERVICES", ""
+            ).split(",")
+            if service.strip()
+        ),
     )
 
     auth = AuthConfig(
@@ -196,7 +235,7 @@ def load_config() -> PlatformConfig:
         billing=billing,
         monitoring=monitoring,
         github=github,
-        release_execution=release_execution,
+        cloud_build=cloud_build,
         auth=auth,
         sonarqube=sonarqube,
         quality=quality,

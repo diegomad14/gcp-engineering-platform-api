@@ -10,7 +10,6 @@ from ..models import (
 )
 from ..services import (
     release_authorization,
-    local_release_policy,
     release_authorization_store,
     workflow_identity,
 )
@@ -27,7 +26,6 @@ def consume_authorization(
     payload: ReleaseAuthorizationConsumeRequest, request: Request
 ):
     try:
-        local_release_policy.require_legacy_allowed(payload.service_name)
         claims = release_authorization.verify(
             payload.token,
             {
@@ -78,8 +76,6 @@ def consume_authorization(
             },
             require_durable=bool(claims.get("execution_repository")),
         )
-    except local_release_policy.LocalReleasePolicyError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (release_authorization.ReleaseAuthorizationError, RuntimeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

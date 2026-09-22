@@ -36,6 +36,5 @@ jobs:
       runtime-service-account: ${{ vars.RUNTIME_SERVICE_ACCOUNT }}
       build-api: true
       build-web: ${{ vars.HAS_FRONTEND == 'true' }}
-      runner_label: ${{ vars.CGM_ACTIONS_RUNNER }}
     secrets:
       QUALITY_API_TOKEN: ${{ secrets.QUALITY_API_TOKEN }}

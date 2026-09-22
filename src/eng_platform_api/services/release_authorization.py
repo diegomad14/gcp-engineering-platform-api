@@ -19,8 +19,6 @@ from ..config import config
 
 ISSUER = "engineering-platform"
 AUDIENCE = "github-release-workflow"
-LOCAL_AUDIENCE = "engineering-platform-local-release"
-LOCAL_EXECUTION_MODE = "local-cli"
 TOKEN_TTL_SECONDS = 300
 
 

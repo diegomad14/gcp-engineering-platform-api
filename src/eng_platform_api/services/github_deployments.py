@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from threading import Lock
 from time import monotonic
-from typing import Any
+from typing import Any, Literal
 
 from github import Github, GithubIntegration
 
@@ -17,12 +17,11 @@ from ..models import (
     DeploymentStage,
     DeploymentStageStatus,
     CatalogService,
-    ContingencyCause,
     ReleaseTag,
     ReleaseTagPage,
-    RunnerLabel,
 )
 from . import deployment_store, release_authorization
+from .release_profiles import profile_for
 
 _SEMVER = re.compile(
     r"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
@@ -53,21 +52,6 @@ _tag_metadata_cache: dict[tuple[str, int, int], tuple[float, ReleaseTagPage]] = 
 _tag_metadata_cache_lock = Lock()
 GITHUB_WORKFLOW_DISPATCH_FAILED = "GitHub workflow dispatch failed"
 GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED = "GitHub rollback workflow dispatch failed"
-
-
-def effective_runner_label(runner_label: RunnerLabel, sha: str) -> str:
-    del sha  # The fallback label is intentionally stable across all workflows.
-    if runner_label not in {"", "cgm-release-local"}:
-        raise ValueError("Contingency deployments require cgm-release-local")
-    return runner_label
-
-
-def _runner_input() -> dict[str, str]:
-    """Pass only the allowlisted emergency runner label to service workflows."""
-    label = config.github.runner_label
-    if label not in {"", "cgm-release-local"}:
-        raise RuntimeError("ENG_PLATFORM_RUNNER_LABEL is not an allowed value")
-    return {"runner_label": label}
 
 
 class GitHubDispatchError(RuntimeError):
@@ -225,12 +209,9 @@ def start_deployment(
     service: CatalogService,
     tag: ReleaseTag,
     requested_by: str,
-    runner_label: RunnerLabel = "",
-    contingency_cause: ContingencyCause = "",
 ) -> DeploymentItem:
     repository = service.repository
     service_name = service.service_name
-    selected_runner_label = effective_runner_label(runner_label, tag.sha)
     now = datetime.now(timezone.utc).isoformat()
     if config.mock_mode:
         deployment_id = str(int(datetime.now(timezone.utc).timestamp() * 1000))
@@ -240,9 +221,6 @@ def start_deployment(
             repository=repository,
             tag=tag.name,
             sha=tag.sha,
-            runner_label=runner_label,
-            effective_runner_label=selected_runner_label,
-            contingency_cause=contingency_cause,
             status="QUEUED",
             current_stage="queued",
             stages=default_stages(),
@@ -266,9 +244,6 @@ def start_deployment(
         repository=repository,
         tag=tag.name,
         sha=tag.sha,
-        runner_label=runner_label,
-        effective_runner_label=selected_runner_label,
-        contingency_cause=contingency_cause,
         status="QUEUED",
         current_stage="queued",
         stages=default_stages(),
@@ -306,8 +281,8 @@ def start_deployment(
                 "artifact_repository": service.deployment.artifact_repository,
                 "build_context": service.deployment.build_context,
                 "health_path": service.deployment.health_path,
+                "profile_sha256": profile_for(service).fingerprint(),
                 "platform_authorization": authorization,
-                "runner_label": selected_runner_label,
             },
         )
     except Exception as exc:
@@ -340,9 +315,6 @@ def start_rollback(
             repository=repository,
             tag=target.tag,
             sha=target.sha,
-            runner_label=target.runner_label,
-            effective_runner_label=target.effective_runner_label,
-            contingency_cause=target.contingency_cause,
             kind="rollback",
             status="QUEUED",
             current_stage="queued",
@@ -370,9 +342,6 @@ def start_rollback(
         repository=repository,
         tag=target.tag,
         sha=target.sha,
-        runner_label=target.runner_label,
-        effective_runner_label=target.effective_runner_label,
-        contingency_cause=target.contingency_cause,
         kind="rollback",
         status="QUEUED",
         current_stage="queued",
@@ -411,7 +380,7 @@ def start_rollback(
                 "health_path": service.deployment.health_path,
                 "target_sha": target.sha,
                 "platform_authorization": authorization,
-                **_runner_input(),
+                "profile_sha256": profile_for(service).fingerprint(),
             },
         )
     except Exception as exc:
@@ -459,7 +428,7 @@ def _retry_workflow_and_inputs(
             "health_path": service.deployment.health_path,
             "target_sha": item.sha,
             "platform_authorization": authorization,
-            **_runner_input(),
+            "profile_sha256": profile_for(service).fingerprint(),
         }
         item.production_revision = revision
         return workflow, inputs
@@ -477,9 +446,71 @@ def _retry_workflow_and_inputs(
         "build_context": service.deployment.build_context,
         "health_path": service.deployment.health_path,
         "platform_authorization": authorization,
-        "runner_label": item.effective_runner_label,
+        "profile_sha256": profile_for(service).fingerprint(),
     }
     return workflow, inputs
+
+
+def start_managed_deployment(
+    *,
+    service: CatalogService,
+    tag: ReleaseTag,
+    requested_by: str,
+    kind: Literal["deploy", "rollback"] = "deploy",
+    target_revision: str = "",
+) -> DeploymentItem:
+    """Create the canonical GitHub Deployment without dispatching Actions.
+
+    Cloud Build is still represented by the same GitHub Deployment, so history,
+    authorization and rollback correlation remain provider-neutral.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    stages = default_stages(kind)
+    if config.mock_mode:
+        return DeploymentItem(
+            id=str(int(datetime.now(timezone.utc).timestamp() * 1000)),
+            service_name=service.service_name,
+            repository=service.repository,
+            tag=tag.name,
+            sha=tag.sha,
+            kind=kind,
+            status="QUEUED",
+            current_stage="queued",
+            stages=stages,
+            requested_by=requested_by,
+            created_at=now,
+            updated_at=now,
+            production_revision=target_revision,
+        )
+    repo = github_client().get_repo(service.repository)
+    deployment = repo.create_deployment(
+        ref=tag.name,
+        task=kind,
+        auto_merge=False,
+        required_contexts=[],
+        environment=f"{service.service_name}-production",
+        description=f"{kind.title()} {service.service_name} {tag.name}",
+        payload={"service_name": service.service_name, "tag": tag.name},
+    )
+    deployment.create_status(
+        state="queued", description="Queued by Engineering Platform"
+    )
+    return DeploymentItem(
+        id=str(deployment.id),
+        service_name=service.service_name,
+        repository=service.repository,
+        tag=tag.name,
+        sha=tag.sha,
+        kind=kind,
+        status="QUEUED",
+        current_stage="queued",
+        stages=stages,
+        requested_by=requested_by,
+        created_at=now,
+        updated_at=now,
+        github_deployment_id=deployment.id,
+        production_revision=target_revision,
+    )
 
 
 def retry_dispatch(

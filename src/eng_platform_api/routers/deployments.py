@@ -19,13 +19,16 @@ from ..models import (
     DeploymentOverview,
     DeploymentOverviewItem,
     ReleaseTagPage,
+    ReleaseTag,
 )
 from ..security import require_deployer
 from ..services import (
     catalog,
+    cloud_build,
+    deployment_executions,
     deployment_store,
+    github_actions_quota,
     github_deployments,
-    local_release_policy,
 )
 from .quality import get_quality_report
 
@@ -52,10 +55,6 @@ def _service_or_404(service_name: str):
 
 
 def _require_deployment_ready(service) -> None:
-    try:
-        local_release_policy.require_legacy_allowed(service.service_name)
-    except local_release_policy.LocalReleasePolicyError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if service.deployment_ready:
         return
     blockers = (
@@ -91,15 +90,11 @@ def _require_matching_idempotency(
     service_name: str,
     tag: str,
     kind: str,
-    runner_label: str = "",
-    contingency_cause: str = "",
 ) -> None:
     if (
         existing.service_name != service_name
         or existing.tag != tag
         or existing.kind != kind
-        or existing.runner_label != runner_label
-        or existing.contingency_cause != contingency_cause
     ):
         raise HTTPException(
             status_code=409,
@@ -124,9 +119,16 @@ def _retry_failed_dispatch(
     if existing.kind == "deploy":
         _require_release_quality(service, existing.sha)
     try:
-        retried = github_deployments.retry_dispatch(
-            service=service, item=existing, target_revision=target_revision
-        )
+        # Retry through the same private selector.  A submission whose response
+        # timed out is protected by the durable Cloud Build fingerprint.
+        if github_actions_quota.should_use_cloud_build(
+            service.service_name, service.repository
+        ):
+            retried = _start_cloud_build(service, existing, reason="retry_preflight")
+        else:
+            retried = github_deployments.retry_dispatch(
+                service=service, item=existing, target_revision=target_revision
+            )
     except github_deployments.GitHubDispatchError as exc:
         deployment_store.save(exc.item, key)
         _invalidate_overview_cache()
@@ -136,6 +138,59 @@ def _retry_failed_dispatch(
     saved = deployment_store.save(retried, key)
     _invalidate_overview_cache()
     return saved
+
+
+def _start_cloud_build(service, item: DeploymentItem, *, reason: str) -> DeploymentItem:
+    try:
+        return cloud_build.submit(item, service, reason=reason)
+    except cloud_build.CloudBuildError as exc:
+        item.status = "FAILED"
+        item.current_stage = "dispatch"
+        item.error = str(exc)
+        raise github_deployments.GitHubDispatchError(item) from exc
+
+
+def _dispatch_deploy(service, tag, requested_by: str) -> DeploymentItem:
+    if github_actions_quota.should_use_cloud_build(
+        service.service_name, service.repository
+    ):
+        item = github_deployments.start_managed_deployment(
+            service=service, tag=tag, requested_by=requested_by
+        )
+        return _start_cloud_build(service, item, reason="github_quota_preflight")
+    try:
+        return github_deployments.start_deployment(
+            service=service, tag=tag, requested_by=requested_by
+        )
+    except github_deployments.GitHubDispatchError as exc:
+        if not github_actions_quota.is_quota_error(exc):
+            raise
+        return _start_cloud_build(service, exc.item, reason="github_quota_dispatch")
+
+
+def _dispatch_rollback(
+    service, target: DeploymentItem, requested_by: str
+) -> DeploymentItem:
+    if github_actions_quota.should_use_cloud_build(
+        service.service_name, service.repository
+    ):
+        tag = ReleaseTag(name=target.tag, sha=target.sha)
+        item = github_deployments.start_managed_deployment(
+            service=service,
+            tag=tag,
+            requested_by=requested_by,
+            kind="rollback",
+            target_revision=target.production_revision,
+        )
+        return _start_cloud_build(service, item, reason="github_quota_preflight")
+    try:
+        return github_deployments.start_rollback(
+            service=service, target=target, requested_by=requested_by
+        )
+    except github_deployments.GitHubDispatchError as exc:
+        if not github_actions_quota.is_quota_error(exc):
+            raise
+        return _start_cloud_build(service, exc.item, reason="github_quota_dispatch")
 
 
 @router.get(
@@ -190,14 +245,7 @@ def create_deployment(
     key = idempotency_key or str(uuid.uuid4())
     existing = deployment_store.find_by_idempotency_key(key)
     if existing is not None:
-        _require_matching_idempotency(
-            existing,
-            service_name,
-            payload.tag,
-            "deploy",
-            payload.runner_label,
-            payload.contingency_cause,
-        )
+        _require_matching_idempotency(existing, service_name, payload.tag, "deploy")
         if existing.status == "FAILED" and existing.current_stage == "dispatch":
             return _retry_failed_dispatch(
                 service,
@@ -222,13 +270,7 @@ def create_deployment(
         if not tag.eligible:
             raise HTTPException(status_code=409, detail=tag.reason)
         _require_release_quality(service, tag.sha)
-        item = github_deployments.start_deployment(
-            service=service,
-            tag=tag,
-            requested_by=requested_by,
-            runner_label=payload.runner_label,
-            contingency_cause=payload.contingency_cause,
-        )
+        item = _dispatch_deploy(service, tag, requested_by)
         saved = deployment_store.save(item, key)
         _invalidate_overview_cache()
         return saved
@@ -298,11 +340,7 @@ def rollback_deployment(
             ),
         )
     try:
-        item = github_deployments.start_rollback(
-            service=service,
-            target=target,
-            requested_by=requested_by,
-        )
+        item = _dispatch_rollback(service, target, requested_by)
         saved = deployment_store.save(item, key)
         _invalidate_overview_cache()
         return saved
@@ -333,7 +371,7 @@ def list_service_deployments(
         if item.status not in github_deployments.TERMINAL_STATUSES:
             try:
                 previous = item.model_dump()
-                item = github_deployments.refresh(item)
+                item = _refresh(item)
                 if item.model_dump() != previous:
                     deployment_store.save(item, "")
                     _invalidate_overview_cache()
@@ -396,10 +434,31 @@ def get_deployment(deployment_id: str):
     if item.status not in github_deployments.TERMINAL_STATUSES:
         try:
             previous = item.model_dump()
-            item = github_deployments.refresh(item)
+            item = _refresh(item)
             if item.model_dump() != previous:
                 deployment_store.save(item, "")
                 _invalidate_overview_cache()
         except Exception:
             item.error = _GITHUB_UNAVAILABLE
+    return item
+
+
+def _refresh(item: DeploymentItem) -> DeploymentItem:
+    execution = deployment_executions.get(item.id)
+    if execution and execution.get("provider") == "cloud_build":
+        return cloud_build.refresh(item)
+    item = github_deployments.refresh(item)
+    if item.status != "FAILED" or not item.github_run_id:
+        return item
+    try:
+        run = (
+            github_deployments.github_client()
+            .get_repo(item.repository)
+            .get_workflow_run(item.github_run_id)
+        )
+        if github_actions_quota.is_reactive_quota_failure(run, item):
+            service = _service_or_404(item.service_name)
+            return _start_cloud_build(service, item, reason="github_quota_startup")
+    except Exception:
+        pass
     return item

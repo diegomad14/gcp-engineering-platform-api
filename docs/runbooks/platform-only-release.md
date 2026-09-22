@@ -31,9 +31,8 @@ Production configuration requires:
   Cloud Run service URLs;
 - `GCP_RELEASE_WIF_PROVIDER` configured in every catalog service repository.
 
-The normal runner setting is empty, which selects GitHub-hosted runners. Set
-`CGM_ACTIONS_RUNNER=cgm-release-local` only for an approved contingency test
-after the runner health check reports it online.
+GitHub-hosted Actions is selected while private included minutes remain; the
+platform changes to Cloud Build internally only for the strict quota cases.
 
 Operators do not use `gcloud`, GCP Console, or direct workflow dispatches for
 normal deploys and rollbacks. Platform maintainers handle allowlist changes,
@@ -55,9 +54,6 @@ The application identity and exact workflow path replace that condition. Native
 quality, exact-SHA oss-v2 evidence, signed one-time authorization and historical
 rollback verification remain mandatory in the release workflows. The provider
 condition is recorded in `docs/quality/release-wif-policy.json`.
-
-Keep the `cgm-release-local` allowlist and exact-SHA contingency restrictions;
-this federation configuration does not authorize arbitrary local runners.
 
 The API validates current exact-SHA quality evidence before creating or retrying
 a deployment. Historical tags cannot invoke old deploy workflows to bypass the

@@ -65,23 +65,9 @@ def test_generate_service_plan():
     assert "github_deployment_id" in data["platform_deploy_workflow"]
     assert "target_revision" in data["platform_rollback_workflow"]
     assert "semantic-release" in data["semantic_release_workflow"]
-    assert "CGM_ACTIONS_RUNNER" in data["semantic_release_workflow"]
-    assert "== 'cgm-release-local'" in data["platform_deploy_workflow"]
-    assert "== 'cgm-release-local'" in data["platform_rollback_workflow"]
-    assert "cgm-release-local" in " ".join(data["checklist"])
-    assert "CGM_ACTIONS_RUNNER" in data["agent_prompt"]
-    assert "disposable-VM" in data["agent_prompt"]
-    assert "runner_label" in data["caller_promote"]
-    assert "runner_label" in data["caller_rollback"]
-    assert "runner_label: ${{ inputs.runner_label }}" in data["caller_promote"]
     assert "service_name: test-api" in data["catalog_entry"]
     assert "Never use GCP Console" in data["agent_prompt"]
     assert data["sonar_properties"] == ""
-    assert ".cgm/local-release.yaml" in data["generated_files"]
-    assert "policy_id: oss-v2" in data["local_release_config"]
-    assert "build_platform: linux/amd64" in data["local_release_config"]
-    assert "remote_effects_require_confirmation: true" in data["local_release_config"]
-    assert "separately approved" in " ".join(data["checklist"])
 
 
 def test_generate_plan_rejects_legacy_app_name():
