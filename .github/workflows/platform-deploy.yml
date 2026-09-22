@@ -95,6 +95,7 @@ jobs:
           CGM_IMAGE: ${{ inputs.region }}-docker.pkg.dev/${{ inputs.project_id }}/${{ inputs.artifact_repository }}/${{ inputs.image_name }}:${{ inputs.tag }}
         run: |
           set -euo pipefail
+          gcloud auth configure-docker "$CGM_REGION-docker.pkg.dev" --quiet
           credential_file="$(basename "$GOOGLE_APPLICATION_CREDENTIALS")"
           docker run --rm --network host \
             --volume "$PWD:/workspace" --volume /var/run/docker.sock:/var/run/docker.sock \

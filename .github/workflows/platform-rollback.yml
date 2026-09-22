@@ -74,6 +74,7 @@ jobs:
           CGM_PLATFORM_API_URL: ${{ vars.ENG_PLATFORM_API_URL }}
         run: |
           set -euo pipefail
+          gcloud auth configure-docker "$CGM_REGION-docker.pkg.dev" --quiet
           credential_file="$(basename "$GOOGLE_APPLICATION_CREDENTIALS")"
           docker run --rm --network host \
             --volume "$PWD:/workspace" --volume /var/run/docker.sock:/var/run/docker.sock \
