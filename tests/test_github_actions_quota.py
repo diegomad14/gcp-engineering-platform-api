@@ -74,6 +74,29 @@ def test_reactive_fallback_requires_exact_no_job_startup_failure(monkeypatch):
     assert quota.is_reactive_quota_failure(run, item) is False
 
 
+def test_reactive_fallback_accepts_explicit_zero_step_billing_annotation(monkeypatch):
+    monkeypatch.setattr(quota.config.cloud_build, "enabled", True)
+    monkeypatch.setattr(quota.config.cloud_build, "enabled_services", ("private",))
+    item = mock.MagicMock(
+        service_name="private",
+        repository="owner/private",
+        sha="a" * 40,
+        candidate_revision="",
+        production_revision="",
+    )
+    job = mock.MagicMock(id=42, steps=[])
+    run = mock.MagicMock(
+        conclusion="failure", head_sha="a" * 40, event="workflow_dispatch"
+    )
+    run.jobs.return_value = [job]
+    monkeypatch.setattr(
+        quota,
+        "_job_annotations_are_quota_failure",
+        lambda repository, jobs: repository == "owner/private" and jobs == [job],
+    )
+    assert quota.is_reactive_quota_failure(run, item) is True
+
+
 def test_quota_error_classifier_does_not_treat_code_failures_as_billing():
     assert quota.is_quota_error("Included minutes quota exceeded") is True
     assert quota.is_quota_error("tests failed with exit code 1") is False

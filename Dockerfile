@@ -8,6 +8,7 @@ WORKDIR /app
 COPY pyproject.toml .
 COPY src/ src/
 COPY templates/ templates/
+COPY .github/workflows/platform-deploy.yml .github/workflows/platform-deploy.yml
 COPY .github/workflows/platform-rollback.yml .github/workflows/platform-rollback.yml
 
 RUN python -m pip install --no-cache-dir --upgrade pip \

@@ -14,6 +14,7 @@ from eng_platform_api.services.release_profiles import profile_for
 
 @pytest.fixture(autouse=True)
 def cloud_build_settings(monkeypatch):
+    monkeypatch.setattr(config, "mock_mode", True)
     monkeypatch.setattr(config.cloud_build, "enabled", True)
     monkeypatch.setattr(config.cloud_build, "mode", "auto")
     monkeypatch.setattr(config.cloud_build, "project_id", "cgm-assistant-prod")

@@ -125,24 +125,42 @@ def is_quota_error(error: BaseException | str) -> bool:
     return any(marker in text for marker in _QUOTA_MARKERS)
 
 
+def _job_annotations_are_quota_failure(repository: str, jobs: list[Any]) -> bool:
+    """Recognize GitHub's zero-step billing rejection from check annotations."""
+    if not jobs or any(getattr(job, "steps", []) for job in jobs):
+        return False
+    try:
+        requester = github_client().get_repo(repository)._requester
+        for job in jobs:
+            _, annotations = requester.requestJsonAndCheck(
+                "GET", f"/repos/{repository}/check-runs/{job.id}/annotations"
+            )
+            if any(is_quota_error(row.get("message", "")) for row in annotations):
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def is_reactive_quota_failure(run: Any, item: Any) -> bool:
     """Only accept the GitHub no-job startup failure caused by exhaustion."""
     if not config.cloud_build.enabled:
         return False
     if item.service_name not in config.cloud_build.enabled_services:
         return False
-    if getattr(run, "conclusion", "") != "startup_failure":
-        return False
     if getattr(run, "head_sha", "") != item.sha:
         return False
     if getattr(run, "event", "") != "workflow_dispatch":
         return False
     try:
-        if list(run.jobs()):
-            return False
+        jobs = list(run.jobs())
     except Exception:
         return False
     if item.candidate_revision or item.production_revision:
+        return False
+    if _job_annotations_are_quota_failure(item.repository, jobs):
+        return True
+    if getattr(run, "conclusion", "") != "startup_failure" or jobs:
         return False
     usage = current_usage(force=True)
     return bool(usage and usage.exhausted)

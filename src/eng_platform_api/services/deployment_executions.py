@@ -9,7 +9,11 @@ from ..config import config
 
 
 def _collection():
-    if not config.cloud_build.execution_collection or config.mock_mode:
+    if (
+        not config.cloud_build.enabled
+        or not config.cloud_build.execution_collection
+        or config.mock_mode
+    ):
         return None
     from google.cloud import firestore
 
