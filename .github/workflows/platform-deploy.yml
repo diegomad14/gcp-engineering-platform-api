@@ -120,7 +120,7 @@ jobs:
         run: |
           set -euo pipefail
           state=$([ "$JOB_STATUS" = success ] && echo success || echo failure)
-          description='Central release engine failed'
+          description=$([ "$JOB_STATUS" = success ] && echo 'Central release engine succeeded' || echo 'Central release engine failed')
           args=()
           if [ -f .eng-platform-release-result.json ]; then
             revision="$(jq -r '.production_revision // empty' .eng-platform-release-result.json)"

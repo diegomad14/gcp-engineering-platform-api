@@ -511,7 +511,9 @@ def write_summary(values: dict[str, str]) -> None:
         "tag": env("CGM_RELEASE_TAG"),
         **values,
     }
-    path = pathlib.Path("/tmp/eng-platform-release-result.json")
+    # The workspace is bind-mounted by GitHub Actions and retained by Cloud
+    # Build, so the caller can publish the immutable revision and URL.
+    path = ROOT / ".eng-platform-release-result.json"
     path.write_text(json.dumps(summary, sort_keys=True), encoding="utf-8")
     bucket = os.getenv("CGM_EVIDENCE_BUCKET", "").strip()
     if bucket:
