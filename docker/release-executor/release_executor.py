@@ -106,6 +106,12 @@ def verify_profile() -> None:
         raise RuntimeError("authorized release profile does not match executor")
 
 
+def configure_runtime_home() -> None:
+    """Use the credential home mounted by Cloud Build, but not in Actions."""
+    if os.getenv("BUILD_ID", "").strip():
+        os.environ["HOME"] = "/builder/home"
+
+
 def run(*args: str, cwd: pathlib.Path = ROOT) -> str:
     return subprocess.run(
         args, cwd=cwd, check=True, text=True, capture_output=True
@@ -529,6 +535,7 @@ def write_summary(values: dict[str, str]) -> None:
 
 
 def main() -> None:
+    configure_runtime_home()
     verify_profile()
     assert_source()
     emit("verify-release", "running")
