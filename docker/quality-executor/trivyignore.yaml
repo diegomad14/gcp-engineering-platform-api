@@ -7,3 +7,10 @@ misconfigurations:
       These pinned quality-supervisor images require root only to seal scanner
       results and drop untrusted subprocesses to UID 65532. Runtime containers
       are read-only, cap-limited, and do not pass cloud credentials to PR code.
+  - id: AVD-DS-0002
+    paths:
+      - docker/release-executor/Dockerfile
+    statement: >-
+      The pinned, short-lived Cloud Build release executor needs the builder's
+      credential mount and Docker socket. GitHub Actions runs the same image
+      as an unprivileged UID; no service runs this image persistently.
