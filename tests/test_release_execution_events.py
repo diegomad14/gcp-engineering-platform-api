@@ -1380,13 +1380,12 @@ def test_source_token_rejects_unknown_or_wrong_fingerprint(monkeypatch):
     assert error.value.status_code == 403
 
 
-def test_source_token_is_one_time_after_verified_build(monkeypatch):
-    execution = _execution()
+@pytest.mark.parametrize("provider_name", ["cloud_build", "github_actions"])
+def test_source_token_is_one_time_after_verified_provider(monkeypatch, provider_name):
+    execution = _execution(provider=provider_name)
     monkeypatch.setattr(events.release_executions, "get", lambda _: execution)
-    google = mock.Mock()
-    build = mock.Mock()
-    monkeypatch.setattr(events, "_verify_google", google)
-    monkeypatch.setattr(events, "_verify_cloud_build", build)
+    provider = mock.Mock()
+    monkeypatch.setattr(events, "_verify_provider", provider)
     monkeypatch.setattr(events.release_executions, "claim_source_token", lambda _: True)
     mint = mock.Mock(return_value=("installation-token", "2026-09-22T13:00:00Z"))
     monkeypatch.setattr(events.github_release_control, "installation_read_token", mint)
@@ -1402,15 +1401,13 @@ def test_source_token_is_one_time_after_verified_build(monkeypatch):
         "token": "installation-token",
         "expires_at": "2026-09-22T13:00:00Z",
     }
-    google.assert_called_once_with("oidc-token")
-    build.assert_called_once_with(execution, "build-1")
+    provider.assert_called_once_with(execution, "build-1", "Bearer oidc-token")
     mint.assert_called_once_with(execution["repository"])
 
 
 def test_source_token_rejects_reuse_before_minting(monkeypatch):
     monkeypatch.setattr(events.release_executions, "get", lambda _: _execution())
-    monkeypatch.setattr(events, "_verify_google", mock.Mock())
-    monkeypatch.setattr(events, "_verify_cloud_build", mock.Mock())
+    monkeypatch.setattr(events, "_verify_provider", mock.Mock())
     monkeypatch.setattr(
         events.release_executions, "claim_source_token", lambda _: False
     )
@@ -1431,8 +1428,7 @@ def test_source_token_rejects_reuse_before_minting(monkeypatch):
 
 def test_source_token_mint_failure_consumes_claim_and_hides_error(monkeypatch):
     monkeypatch.setattr(events.release_executions, "get", lambda _: _execution())
-    monkeypatch.setattr(events, "_verify_google", mock.Mock())
-    monkeypatch.setattr(events, "_verify_cloud_build", mock.Mock())
+    monkeypatch.setattr(events, "_verify_provider", mock.Mock())
     claim = mock.Mock(return_value=True)
     monkeypatch.setattr(events.release_executions, "claim_source_token", claim)
     monkeypatch.setattr(

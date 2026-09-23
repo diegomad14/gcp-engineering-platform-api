@@ -403,9 +403,7 @@ def issue_source_token(
         raise HTTPException(status_code=404, detail="Unknown release execution")
     if payload.fingerprint != execution.get("fingerprint"):
         raise HTTPException(status_code=403, detail="Execution fingerprint mismatch")
-    token = _bearer(authorization)
-    _verify_google(token)
-    _verify_cloud_build(execution, payload.provider_run_id)
+    _verify_provider(execution, payload.provider_run_id, authorization)
     if not release_executions.claim_source_token(execution_id):
         raise HTTPException(status_code=409, detail="Source token was already issued")
     try:
