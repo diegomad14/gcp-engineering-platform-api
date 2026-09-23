@@ -60,6 +60,32 @@ class QualityProfilesTest(unittest.TestCase):
             " ".join(trusted_scanner._trusted_scan_args("trivy", trusted.split())),
         )
 
+    def test_pinned_semgrep_scans_without_inaccessible_git_metadata(self) -> None:
+        report_directory = Path("/tmp/quality-reports")
+        trusted = quality_gate._defaults(
+            "node", report_directory, trusted_scanner_policy=True
+        )["semgrep"]
+        legacy = quality_gate._defaults("node", report_directory)["semgrep"]
+        self.assertIn("--no-git-ignore", trusted)
+        self.assertIn("--exclude node_modules", trusted)
+        self.assertNotIn("--no-git-ignore", legacy)
+
+        with self.assertRaisesRegex(
+            trusted_scanner.TrustedScannerError, "did not scan any source"
+        ):
+            trusted_scanner._validate_scanner_result(
+                "semgrep", {"paths": {"scanned": []}, "errors": []}
+            )
+        with self.assertRaisesRegex(
+            trusted_scanner.TrustedScannerError, "reported scan errors"
+        ):
+            trusted_scanner._validate_scanner_result(
+                "semgrep", {"paths": {"scanned": ["src/app.ts"]}, "errors": ["error"]}
+            )
+        trusted_scanner._validate_scanner_result(
+            "semgrep", {"paths": {"scanned": ["src/app.ts"]}, "errors": []}
+        )
+
     def test_pinned_scanner_binary_has_safe_image_permissions(self) -> None:
         if not Path("/usr/local/bin/trivy").exists():
             self.skipTest("Trivy is only installed in the executor image")

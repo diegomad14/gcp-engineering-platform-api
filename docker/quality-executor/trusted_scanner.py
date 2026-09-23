@@ -132,9 +132,7 @@ def _output_argument(scanner: str, args: list[str]) -> tuple[list[str], Path]:
     if len(outputs) != 1:
         raise TrustedScannerError("Scanner must declare exactly one JSON output")
     target = Path(outputs[0])
-    report_directory = Path(
-        os.environ.get("ENG_PLATFORM_TRUSTED_REPORT_DIRECTORY", "")
-    )
+    report_directory = Path(os.environ.get("ENG_PLATFORM_TRUSTED_REPORT_DIRECTORY", ""))
     if (
         not target.is_absolute()
         or target.name != _OUTPUT_NAMES[scanner]
@@ -203,6 +201,20 @@ def _read_normalized_capture(path: Path, handle: BinaryIO) -> dict[str, object]:
     return value
 
 
+def _validate_scanner_result(scanner: str, value: dict[str, object]) -> None:
+    if scanner != "semgrep":
+        return
+    paths = value.get("paths")
+    if (
+        not isinstance(paths, dict)
+        or not isinstance(paths.get("scanned"), list)
+        or not paths["scanned"]
+    ):
+        raise TrustedScannerError("Semgrep did not scan any source files")
+    if value.get("errors"):
+        raise TrustedScannerError("Semgrep reported scan errors")
+
+
 def _seal_output(target: Path, value: dict[str, object]) -> None:
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{target.name}.", dir=target.parent
@@ -255,6 +267,7 @@ def run(scanner: str, args: list[str]) -> int:
         with os.fdopen(descriptor, "w+b", closefd=True) as capture:
             returncode = _run_process(binary, cleaned, capture)
             value = _read_normalized_capture(capture_path, capture)
+            _validate_scanner_result(scanner, value)
         _seal_output(target, value)
         return returncode
     finally:

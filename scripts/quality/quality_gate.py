@@ -170,10 +170,17 @@ def _defaults(
     trivy_ignorefile = (
         "" if trusted_scanner_policy else "--ignorefile .trivyignore.yaml "
     )
+    semgrep_targeting = (
+        "--no-git-ignore --exclude .git --exclude .venv --exclude node_modules "
+        "--exclude dist --exclude build --exclude coverage "
+        if trusted_scanner_policy
+        else ""
+    )
     common = {
         "semgrep": (
             "semgrep scan --config auto --severity ERROR --error "
-            f"--exclude {shlex.quote(report_dir.name)} "
+            + semgrep_targeting
+            + f"--exclude {shlex.quote(report_dir.name)} "
             f"--json --output {shlex.quote(str(semgrep_file))} ."
         ),
         "trivy": (
