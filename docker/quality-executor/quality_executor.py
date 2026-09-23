@@ -280,7 +280,13 @@ def _verify_checkout(source: Path, identity: dict[str, str]) -> None:
 
 def _prepare_history(source: Path, identity: dict[str, str]) -> None:
     """Fetch exact history with a one-use token; never run repository code."""
-    _verify_checkout(source, identity)
+    if not source.is_dir():
+        raise QualityExecutorError("Source volume is unavailable")
+    bootstrap = not (source / ".git").exists()
+    if bootstrap and any(source.iterdir()):
+        raise QualityExecutorError("Source volume is not empty")
+    if not bootstrap:
+        _verify_checkout(source, identity)
     repository = identity.get("repository", "")
     if not _REPOSITORY.fullmatch(repository):
         raise QualityExecutorError("Invalid GitHub repository identity")
@@ -299,6 +305,8 @@ def _prepare_history(source: Path, identity: dict[str, str]) -> None:
         "GIT_CONFIG_VALUE_1": "false",
     }
     try:
+        if bootstrap:
+            _git(source, "init", "--quiet", env=environment)
         _git(
             source,
             "-c",
@@ -307,10 +315,26 @@ def _prepare_history(source: Path, identity: dict[str, str]) -> None:
             "--force",
             "--no-recurse-submodules",
             repository_url,
+            *(
+                (f"+{identity['head_sha']}:refs/heads/eng-platform-quality-head",)
+                if bootstrap
+                else ()
+            ),
             f"+{identity['base_sha']}:refs/heads/eng-platform-quality-base",
             "+refs/tags/*:refs/tags/*",
             env=environment,
         )
+        if bootstrap:
+            _git(
+                source,
+                "-c",
+                f"safe.directory={source}",
+                "checkout",
+                "--detach",
+                identity["head_sha"],
+                env=environment,
+            )
+            _verify_checkout(source, identity)
         resolved = _git(
             source,
             "-c",
