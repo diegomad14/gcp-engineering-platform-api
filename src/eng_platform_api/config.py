@@ -417,10 +417,8 @@ def load_config() -> PlatformConfig:
         if not cloud_build.evidence_bucket:
             raise ValueError("Cloud Build evidence bucket is required")
         quality_bucket = os.getenv("ENG_PLATFORM_QUALITY_BUCKET", "").strip()
-        if not quality_bucket or quality_bucket != cloud_build.evidence_bucket:
-            raise ValueError(
-                "Release orchestration requires one shared Cloud Build/quality evidence bucket"
-            )
+        if not quality_bucket:
+            raise ValueError("Release orchestration requires a quality evidence bucket")
         missing_repositories = (
             set(release_orchestrator.enabled_services)
             | set(release_orchestrator.canary_services)

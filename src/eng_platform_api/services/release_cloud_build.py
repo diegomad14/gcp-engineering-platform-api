@@ -110,7 +110,7 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
         f"ENG_PLATFORM_RELEASE_OPERATION={operation}",
         f"ENG_PLATFORM_RELEASE_PROFILE_SHA256={profile.fingerprint()}",
         f"ENG_PLATFORM_API_URL={config.github.platform_api_url}",
-        f"ENG_PLATFORM_EVIDENCE_BUCKET={config.cloud_build.evidence_bucket}",
+        f"ENG_PLATFORM_EVIDENCE_BUCKET={config.quality.bucket}",
         "ENG_PLATFORM_PROVIDER_RUN_ID=$BUILD_ID",
     ]
     control_volume = {"name": "release-control", "path": "/eng-platform-control"}
