@@ -18,10 +18,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import quality_executor  # noqa: E402
 import quality_profiles  # noqa: E402
+import trusted_scanner  # noqa: E402
 import untrusted_command  # noqa: E402
 
 
 class QualityProfilesTest(unittest.TestCase):
+    def test_trivy_uses_only_the_pinned_exception_policy(self) -> None:
+        self.assertEqual(
+            ["fs", ".", "--ignorefile", "/opt/eng-platform/trivyignore.yaml"],
+            trusted_scanner._trusted_scan_args("trivy", ["fs", "."]),
+        )
+        with self.assertRaisesRegex(
+            trusted_scanner.TrustedScannerError, "server-owned"
+        ):
+            trusted_scanner._trusted_scan_args("trivy", ["--ignorefile=./own.yaml"])
+
     def test_hash_is_exact_canonical_shared_payload(self) -> None:
         document = quality_profiles.profile_document()
         for service in quality_profiles.available_services():

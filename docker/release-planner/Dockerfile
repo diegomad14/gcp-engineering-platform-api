@@ -12,4 +12,5 @@ RUN npm ci --omit=dev --ignore-scripts --legacy-peer-deps \
 COPY docker/release-planner/release_planner.mjs docker/release-planner/release_planner.test.mjs ./
 RUN npm test
 
+USER node
 ENTRYPOINT ["node", "/opt/eng-platform/release_planner.mjs"]

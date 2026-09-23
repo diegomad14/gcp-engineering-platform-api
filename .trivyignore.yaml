@@ -1,0 +1,11 @@
+# Bootstrap policy for the pre-cutover quality image. The next pinned image
+# enforces the same path-scoped exceptions from its immutable filesystem.
+misconfigurations:
+  - id: AVD-DS-0002
+    paths:
+      - docker/quality-executor/Dockerfile.python
+      - docker/quality-executor/Dockerfile.node
+    statement: >-
+      Pinned quality-supervisor images require root to seal scanner output
+      and launch PR commands as UID 65532. They run read-only, cap-limited,
+      and do not pass cloud credentials to the untrusted subprocess.

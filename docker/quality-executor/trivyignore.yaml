@@ -1,0 +1,9 @@
+misconfigurations:
+  - id: AVD-DS-0002
+    paths:
+      - docker/quality-executor/Dockerfile.python
+      - docker/quality-executor/Dockerfile.node
+    statement: >-
+      These pinned quality-supervisor images require root only to seal scanner
+      results and drop untrusted subprocesses to UID 65532. Runtime containers
+      are read-only, cap-limited, and do not pass cloud credentials to PR code.
