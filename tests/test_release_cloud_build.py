@@ -280,10 +280,7 @@ def test_pr_build_request_is_economical_fixed_and_source_pinned(configured):
             "/eng-platform-external",
         ],
         "env": quality["env"],
-        "volumes": [
-            {"name": "quality-output", "path": "/eng-platform-output"},
-            {"name": "quality-external", "path": "/eng-platform-external"},
-        ],
+        "volumes": [{"name": "quality-output", "path": "/eng-platform-output"}],
         "waitFor": ["prepare"],
     }
     assert publish == {
@@ -312,6 +309,13 @@ def test_pr_build_request_is_economical_fixed_and_source_pinned(configured):
     assert "ENG_PLATFORM_RELEASE_OPERATION=pr_quality" in quality["env"]
     assert "ENG_PLATFORM_PROVIDER_RUN_ID=$BUILD_ID" in quality["env"]
     assert all(volume["name"] != "release-control" for volume in quality["volumes"])
+    mounted_volume_names = [
+        volume["name"]
+        for step in request["steps"]
+        for volume in step.get("volumes", [])
+    ]
+    assert set(mounted_volume_names) == {"release-control", "quality-output"}
+    assert all(mounted_volume_names.count(name) >= 2 for name in mounted_volume_names)
     assert all(
         {"secretEnv", "retry", "retries"}.isdisjoint(step) for step in request["steps"]
     )
