@@ -23,6 +23,24 @@ import untrusted_command  # noqa: E402
 
 
 class QualityProfilesTest(unittest.TestCase):
+    def test_pinned_scanner_binary_has_safe_image_permissions(self) -> None:
+        if not Path("/usr/local/bin/trivy").exists():
+            self.skipTest("Trivy is only installed in the executor image")
+        self.assertEqual(
+            Path("/usr/local/bin/trivy"), trusted_scanner._trusted_binary("trivy")
+        )
+
+    def test_scanner_private_runtime_is_outside_root_only_gate_tmp(self) -> None:
+        with (
+            mock.patch.object(trusted_scanner.tempfile, "mkdtemp", return_value="/tmp/scanner-test") as make_dir,
+            mock.patch.object(trusted_scanner.os, "chown"),
+            mock.patch.object(trusted_scanner.os, "chmod"),
+        ):
+            environment = trusted_scanner._runtime_environment()
+        make_dir.assert_called_once_with(prefix="eng-platform-scanner-", dir="/tmp")
+        self.assertEqual("/tmp/scanner-test", environment["HOME"])
+        self.assertEqual("/tmp/scanner-test/.cache", environment["XDG_CACHE_HOME"])
+
     def test_trivy_uses_only_the_pinned_exception_policy(self) -> None:
         self.assertEqual(
             ["fs", ".", "--ignorefile", "/opt/eng-platform/trivyignore.yaml"],
