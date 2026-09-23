@@ -328,10 +328,20 @@ def test_main_build_splits_planner_from_trusted_plan_publisher(configured):
         "prepare",
         "quality",
         "publish-quality",
+        "prepare-planner-volume",
         "release-plan",
         "publish-release-plan",
     ]
-    planner = request["steps"][3]
+    permissions = request["steps"][3]
+    assert permissions["name"] == DIGEST
+    assert permissions["waitFor"] == ["publish-quality"]
+    assert permissions["volumes"] == [
+        {"name": "planner-output", "path": "/eng-platform-plan"},
+        {"name": "release-control", "path": "/eng-platform-control"},
+    ]
+    assert "chown -R 1000:1000" in permissions["args"][1]
+
+    planner = request["steps"][4]
     assert planner["name"] == PLANNER
     assert planner["args"] == [
         "--mode",
@@ -341,7 +351,7 @@ def test_main_build_splits_planner_from_trusted_plan_publisher(configured):
         "--output",
         "/eng-platform-plan/release-plan.json",
     ]
-    assert planner["waitFor"] == ["publish-quality"]
+    assert planner["waitFor"] == ["prepare-planner-volume"]
     assert planner["volumes"] == [
         {"name": "planner-output", "path": "/eng-platform-plan"}
     ]
@@ -349,7 +359,7 @@ def test_main_build_splits_planner_from_trusted_plan_publisher(configured):
     assert f"ENG_PLATFORM_RELEASE_PLANNER_HASH={PLANNER_HASH}" in planner["env"]
     assert f"ENG_PLATFORM_RELEASE_PLANNER_IMAGE={PLANNER}" in planner["env"]
 
-    publisher = request["steps"][4]
+    publisher = request["steps"][5]
     assert publisher["name"] == PLANNER
     assert publisher["args"] == [
         "--mode",

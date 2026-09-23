@@ -262,6 +262,18 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
         steps.extend(
             [
                 {
+                    "id": "prepare-planner-volume",
+                    "name": executor,
+                    "entrypoint": "/bin/bash",
+                    "args": [
+                        "-euc",
+                        "install -d -m 0700 /eng-platform-plan; "
+                        "chown -R 1000:1000 /eng-platform-plan /eng-platform-control",
+                    ],
+                    "volumes": [planner_volume, control_volume],
+                    "waitFor": ["publish-quality"],
+                },
+                {
                     "id": "release-plan",
                     "name": config.release_orchestrator.release_planner_image,
                     "args": [
@@ -274,7 +286,7 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
                     ],
                     "env": planner_env,
                     "volumes": [planner_volume],
-                    "waitFor": ["publish-quality"],
+                    "waitFor": ["prepare-planner-volume"],
                 },
                 {
                     "id": "publish-release-plan",
