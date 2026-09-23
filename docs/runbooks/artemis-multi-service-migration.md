@@ -13,8 +13,14 @@ and rollback. Never infer activity from the mere existence of a Cloud Run Job.
   repository names. New `principalSet` grants were added to the three existing
   SanPlat service accounts; the old grants remain. Verify these before rename.
 - Cloud SQL `cgm-sanplat-pg` is still the physical database. Its automated
-  backups remain disabled. On-demand backup `1790181514872` completed
-  successfully at 16:40 UTC; a restore test has **not** been performed.
+  backups remain disabled. On-demand backup `1790181514872` completed at
+  16:40 UTC. Restore operation `315d66ea-3e24-4ef7-89fa-d3b900000032`
+  reached `DONE` on a separate `db-f1-micro` instance at 17:42 UTC; that
+  instance was `RUNNABLE` and listed the same five databases as the source.
+  The temporary instance was deleted by operation
+  `038983b2-b0a4-4da9-a166-793800000032` (`DONE` at 17:48 UTC), and the
+  source remained `RUNNABLE`. This checks restore mechanics and database
+  inventory, not row-by-row equality. The backup remains available.
 - The live API revision changed during preparation. At 16:36 UTC,
   `cgm-sanplat-api-hist-98e6369` began serving 100% traffic. Its revision name,
   `commit-sha` label (`03990b9…`) and `APP_RELEASE_SHA` (`a03fb62…`) disagree.
@@ -25,8 +31,16 @@ and rollback. Never infer activity from the mere existence of a Cloud Run Job.
   for byte; `.gitignore` was the one tracked file excluded. This establishes
   source provenance while the label and env var remain stale drift. Do not
   use those metadata fields as the release authority.
-- Artemis catalog descriptors are staged with `deployment.enabled=false`.
-  No Artemis Cloud Run resources, GitHub renames or URL changes were made.
+- Artemis platform PR #62 merged as `da46f6a6` and API tag `v0.25.0` has
+  exact `oss-v2 PASSED` evidence (84.17% changed-line coverage). Deployment
+  `6620471675` completed through GitHub Actions without a Cloud Build and
+  now serves revision `eng-platform-api-ep-b092dbc54b` at 100% traffic. Its
+  digest `sha256:9cc6a47a…` equals the tag's Artifact Registry digest;
+  `/health` is healthy. The twelve Artemis catalog descriptors are visible
+  but `deployment.enabled=false`; no Artemis Cloud Run resource, GitHub
+  rename or public URL change was made. The revision's inherited
+  `commit-sha` label remains stale and must be corrected by a new pinned
+  release-executor image before it is used as provenance.
 - Private regional bucket `cgm-artemis-data` was created with uniform access,
   public access prevention and seven-day soft delete. Initial copies of
   `kpi_cgm.db`, `location-snapshots/`, `readings-universe/` and
@@ -50,13 +64,13 @@ and rollback. Never infer activity from the mere existence of a Cloud Run Job.
 
 1. Verify no deployment or release execution is active in either repository
    and freeze the old release workflows for the rename window.
-2. Reconfirm the serving API digest still points to the verified source
-   above, correct the mismatched SHA metadata in a future controlled release,
-   and capture its definition, traffic, digest and
-   rollback procedure. Confirm the latest SQL backup is restorable on an
-   isolated target; a successful backup operation alone is insufficient.
-3. Deploy the repository-ID alias code and callback checks to eng-platform.
-   Verify historical evidence and retries by old and new repository names.
+2. Correct the stale serving revision `commit-sha` label with a newly pinned
+   release executor, then capture traffic, digest and rollback procedure.
+   The SQL backup's independent restore test above is complete; still compare
+   selected production table counts before the data cut.
+3. Repository-ID alias code and callback checks are deployed to eng-platform.
+   Verify historical evidence and retries by old and new repository names
+   before the GitHub rename.
 4. Recheck WIF conditions and service-account bindings for both names, then
    rename the **existing** API repo and verify GitHub ID, tags, Releases,
    installation and webhook. Create the new Cloud Build 2nd-gen source link and

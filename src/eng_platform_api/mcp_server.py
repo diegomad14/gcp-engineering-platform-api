@@ -278,10 +278,13 @@ def get_deployment(deployment_id: str) -> dict[str, Any]:
     """Get a public deployment DTO by id."""
 
     def action():
-        item = deployment_store.get(deployment_id)
-        if item is None:
-            raise HTTPException(status_code=404, detail="Deployment not found")
-        return item
+        # GitHub Actions reports terminal state through its Deployment and run.
+        # The REST query performs the same verified reconciliation before
+        # returning a DTO; MCP must not leave an otherwise completed deploy
+        # permanently QUEUED until somebody opens the browser.
+        from .routers.deployments import get_deployment as get_rest_deployment
+
+        return get_rest_deployment(deployment_id)
 
     return _read("get_deployment", {"deployment_id": deployment_id}, action)
 

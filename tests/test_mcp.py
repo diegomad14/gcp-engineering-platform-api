@@ -18,6 +18,7 @@ from eng_platform_api.main import app
 from eng_platform_api import mcp_server
 from eng_platform_api.mcp_server import list_services, start_deployment
 from eng_platform_api.models import DeploymentItem, ReleaseTag, ReleaseTagPage
+from eng_platform_api.routers import deployments as deployment_routes
 from eng_platform_api.services import mcp_store
 from eng_platform_api.services.mcp_auth import provider
 
@@ -346,6 +347,13 @@ async def test_tools_return_only_public_dtos_and_audit_operations(monkeypatch):
         },
     )
     monkeypatch.setattr(mcp_server.deployment_store, "get", lambda _: item)
+    refreshed_deployments = []
+
+    def get_refreshed_deployment(deployment_id):
+        refreshed_deployments.append(deployment_id)
+        return item
+
+    monkeypatch.setattr(deployment_routes, "get_deployment", get_refreshed_deployment)
     monkeypatch.setattr(
         mcp_server.deployment_store,
         "list_for_service_with_total",
@@ -406,6 +414,7 @@ async def test_tools_return_only_public_dtos_and_audit_operations(monkeypatch):
         )
         assert "recent" in mcp_server.list_releases()
         assert mcp_server.get_deployment("deployment-1")["id"] == "deployment-1"
+        assert refreshed_deployments == ["deployment-1"]
         assert mcp_server.list_deployments("eng-platform-api")["total"] == 1
         assert (
             mcp_server.start_deployment(
