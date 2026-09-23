@@ -202,7 +202,11 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
         "name": executor,
         "args": quality_cli,
         "env": quality_env,
-        "volumes": [quality_volume, external_volume],
+        "volumes": (
+            [quality_volume, external_volume]
+            if profile.spec.get("container_smoke")
+            else [quality_volume]
+        ),
         "waitFor": quality_dependencies,
     }
     if profile.spec.get("postgres"):
