@@ -38,12 +38,13 @@ and rollback. Never infer activity from the mere existence of a Cloud Run Job.
   with immutable tags. Only the existing eng-platform release-executor service
   account was granted repository-level `artifactregistry.writer`; no images
   or Cloud Builds were created for this migration.
-- The backend branch depends on release-fallback PR #60. That PR is still
-  open and behind `main`; its normalized `oss-v2` gate failed with three SAST
-  findings, three Dockerfile misconfigurations and 72.43% changed-line
-  coverage against an 80% minimum. Do not merge or bypass this gate for the
-  Artemis rollout. The Artemis work is on `codex/artemis-platform`, based on
-  that branch, and is not deployed.
+- Release-fallback PR #60 passed all GitHub checks, including normalized
+  `oss-v2`, and merged to `main` as `a04421a3` at 17:27 UTC. The fix added
+  release-path tests (80.36% changed-line coverage locally), removed the
+  untrusted checkout from the credentialed portion of the PR workflow,
+  set the planner image to a non-root default, and documented two narrowly
+  scoped Trivy exceptions for the quality supervisors. The Artemis work is
+  on `codex/artemis-platform`, now merged with that `main`, and is not deployed.
 
 ## Gates before changing GitHub names
 
