@@ -17,7 +17,7 @@ RUN apt-get update \
         "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
         | tar -xz -C /usr/local/bin trivy \
     && curl --fail --location --silent --show-error \
-        "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_x86_64.tar.gz" \
+        "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
         | tar -xz -C /usr/local/bin actionlint
 
 COPY scripts/quality/quality_gate.py scripts/quality/differential_coverage.py /opt/eng-platform/
