@@ -28,6 +28,7 @@ def test_job_deploy_snapshots_before_mutation_and_does_not_execute(monkeypatch):
     monkeypatch.setenv("CGM_REGION", "us-central1")
     monkeypatch.setenv("CGM_PROJECT_ID", "cgm-assistant-prod")
     monkeypatch.setenv("CGM_EVIDENCE_BUCKET", "evidence-bucket")
+    monkeypatch.setenv("CGM_RELEASE_SHA", "a" * 40)
     monkeypatch.setattr(engine, "_job_definition", lambda: state["definition"])
     monkeypatch.setattr(engine, "_job_operational_spec", lambda definition: definition)
     monkeypatch.setattr(engine, "_job_image", lambda: state["image"])

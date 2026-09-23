@@ -3,6 +3,15 @@ run-name: eng-platform-tooling-${{ github.sha }}
 
 on:
   workflow_dispatch:
+    inputs:
+      component:
+        description: Immutable tooling image set to publish
+        required: true
+        type: choice
+        default: release-executor
+        options:
+          - release-executor
+          - all
 
 permissions:
   contents: read
@@ -25,7 +34,7 @@ jobs:
 
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
         with:
-          workload_identity_provider: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
+          workload_identity_provider: ${{ vars.GCP_RELEASE_TOOLING_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_RELEASE_TOOLING_SERVICE_ACCOUNT }}
 
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f
@@ -34,6 +43,7 @@ jobs:
         env:
           REGISTRY: us-central1-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.ENG_PLATFORM_TOOLING_REPOSITORY }}
           SOURCE_SHA: ${{ github.sha }}
+          COMPONENT: ${{ inputs.component }}
         run: |
           set -euo pipefail
           gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
@@ -41,8 +51,9 @@ jobs:
           build_and_push() {
             local name="$1"
             local dockerfile="$2"
+            local context="${3:-.}"
             local tag="$REGISTRY/$name:$SOURCE_SHA"
-            docker build --pull --file "$dockerfile" --tag "$tag" .
+            docker build --pull --file "$dockerfile" --tag "$tag" "$context"
             local push_output
             push_output="$(docker push "$tag")"
             printf '%s\n' "$push_output"
@@ -53,9 +64,13 @@ jobs:
           }
 
           : > "$RUNNER_TEMP/tooling-digests"
-          build_and_push quality-python docker/quality-executor/Dockerfile.python
-          build_and_push quality-node docker/quality-executor/Dockerfile.node
-          build_and_push release-planner docker/release-planner/Dockerfile
+          if [[ "$COMPONENT" == all ]]; then
+            build_and_push quality-python docker/quality-executor/Dockerfile.python
+            build_and_push quality-node docker/quality-executor/Dockerfile.node
+            build_and_push release-planner docker/release-planner/Dockerfile
+          fi
+          build_and_push eng-platform-release-executor \
+            docker/release-executor/Dockerfile docker/release-executor
 
           {
             echo '### Immutable release tooling'
