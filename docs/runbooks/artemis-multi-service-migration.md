@@ -52,7 +52,8 @@ and rollback. Never infer activity from the mere existence of a Cloud Run Job.
   `sha256:8032c7d3…` from GitHub Actions; a local unprivileged import also
   passed. The dedicated GitHub tooling WIF pool/provider is restricted to
   this repository, workflow, `main`, manual dispatch and the operator ID;
-  only the builder service account has Artifact Registry writer access.
+  that pool can impersonate only the builder service account, whose Artifact
+  Registry writer grant is repository-scoped.
 - `eng-platform-api v0.25.2` has exact `oss-v2 PASSED` evidence for
   `b7e89d33`. Deployment `6621352620` succeeded through GitHub Actions run
   `35902320296` and serves `eng-platform-api-ep-c9d405912f` at 100%.
