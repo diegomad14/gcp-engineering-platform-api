@@ -789,6 +789,35 @@ def test_submit_marks_terminal_failure_for_explicit_http_error(configured, monke
     )
 
 
+def test_submit_records_google_validation_error_privately(configured, monkeypatch):
+    execution = _execution()
+    monkeypatch.setattr(cloud_build.release_executions, "get", lambda _: execution)
+    monkeypatch.setattr(cloud_build, "_matching_build", lambda _: None)
+    monkeypatch.setattr(
+        cloud_build.release_executions, "claim_submission", lambda _: True
+    )
+    monkeypatch.setattr(cloud_build, "build_request", lambda *_: {})
+    session = mock.Mock()
+    session.post.return_value = Response(
+        status_code=400,
+        payload={"error": {"message": "Invalid build field: source revision"}},
+    )
+    monkeypatch.setattr(cloud_build, "_session", lambda: session)
+    save = mock.Mock()
+    monkeypatch.setattr(cloud_build.release_executions, "save", save)
+
+    with pytest.raises(cloud_build.ReleaseCloudBuildError, match="failed: 400") as err:
+        cloud_build.submit(execution["execution_id"], _service())
+
+    assert "source revision" not in str(err.value)
+    save.assert_called_once_with(
+        execution["execution_id"],
+        status="failed",
+        submission_status_code=400,
+        submission_error="Invalid build field: source revision",
+    )
+
+
 @pytest.mark.parametrize(
     "build",
     [

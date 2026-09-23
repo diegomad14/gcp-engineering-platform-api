@@ -108,6 +108,39 @@ def test_open_circuit_persists_then_propagates_to_private_repositories(monkeypat
     set_mode.assert_called_once_with(REPOSITORY, "cloud_build")
 
 
+def test_explicit_build_rejection_finishes_canonical_checks(monkeypatch):
+    execution = {
+        "execution_id": "execution-1",
+        "provider": "cloud_build",
+        "repository": REPOSITORY,
+        "head_sha": HEAD,
+        "check_ids": {"quality": 41, "workflows": 42, "title": 43},
+    }
+    monkeypatch.setattr(
+        orchestrator.release_cloud_build,
+        "submit",
+        lambda *_: (_ for _ in ()).throw(
+            orchestrator.release_cloud_build.ReleaseCloudBuildError("rejected")
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator.release_executions,
+        "get",
+        lambda _: {**execution, "status": "failed"},
+    )
+    upsert = mock.Mock()
+    monkeypatch.setattr(orchestrator.github_release_control, "upsert_check", upsert)
+
+    result = orchestrator._submit_if_managed(execution, _service())
+
+    assert result["status"] == "failed"
+    assert [call.kwargs["kind"] for call in upsert.call_args_list] == [
+        "quality",
+        "workflows",
+    ]
+    assert all(call.kwargs["conclusion"] == "failure" for call in upsert.call_args_list)
+
+
 def test_start_checks_uses_stable_external_ids_and_conventional_title(monkeypatch):
     checks = mock.Mock(side_effect=[11, 12, 13, 14, 15, 16, 17, 18, 19])
     save = mock.Mock()

@@ -108,6 +108,10 @@ def _open_circuit(*, repository: str, run_id: str, reason: str, evidence: str) -
         service.repository
         for service in catalog.get_services().services
         if service.repository
+        and (
+            not config.cloud_build.repositories
+            or getattr(service, "service_name", "") in config.cloud_build.repositories
+        )
     }
     for candidate in repositories:
         try:
@@ -269,7 +273,25 @@ def _start_checks(execution: dict[str, Any], *, pr_title: str = "") -> None:
 def _submit_if_managed(execution: dict[str, Any], service: CatalogService) -> dict:
     if execution.get("provider") != "cloud_build":
         return execution
-    result = release_cloud_build.submit(execution["execution_id"], service)
+    try:
+        result = release_cloud_build.submit(execution["execution_id"], service)
+    except release_cloud_build.ReleaseCloudBuildError:
+        current = release_executions.get(execution["execution_id"])
+        if current is None or current.get("status") != "failed":
+            raise
+        for kind, check_id in (current.get("check_ids") or {}).items():
+            if kind not in {"quality", "workflows"} or not check_id:
+                continue
+            github_release_control.upsert_check(
+                repository=execution["repository"],
+                head_sha=execution["head_sha"],
+                kind=kind,
+                status="completed",
+                conclusion="failure",
+                summary="Release quality could not start. No build was created.",
+                check_run_id=int(check_id),
+            )
+        return current
     check_ids = result.get("check_ids") or execution.get("check_ids") or {}
     for kind in ("quality", "workflows"):
         if check_ids.get(kind):

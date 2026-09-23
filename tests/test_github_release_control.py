@@ -75,6 +75,7 @@ def test_upsert_check_recovers_lost_create_by_external_id(monkeypatch):
     check.edit.assert_called_once()
     repo.create_check_run.assert_not_called()
     assert check.edit.call_args.kwargs["output"]["summary"] == "verified"
+    assert "details_url" not in check.edit.call_args.kwargs
 
 
 def test_upsert_check_creates_and_validates_status(monkeypatch):
@@ -91,6 +92,9 @@ def test_upsert_check_creates_and_validates_status(monkeypatch):
     assert (
         repo.create_check_run.call_args.kwargs["name"] == control.CHECK_NAMES["release"]
     )
+    assert "details_url" not in repo.create_check_run.call_args.kwargs
+    assert "conclusion" not in repo.create_check_run.call_args.kwargs
+    assert "external_id" not in repo.create_check_run.call_args.kwargs
     with pytest.raises(ValueError, match="Unknown Engineering Platform check"):
         control.upsert_check(
             repository="owner/repo", head_sha=HEAD, kind="other", status="queued"
@@ -103,6 +107,28 @@ def test_upsert_check_creates_and_validates_status(monkeypatch):
         control.upsert_check(
             repository="owner/repo", head_sha=HEAD, kind="quality", status="completed"
         )
+
+
+def test_upsert_check_includes_only_populated_optional_fields(monkeypatch):
+    repo = mock.Mock()
+    repo.get_commit.return_value.get_check_runs.return_value = []
+    repo.create_check_run.return_value = SimpleNamespace(id=73)
+    _repository(monkeypatch, repo)
+
+    control.upsert_check(
+        repository="owner/repo",
+        head_sha=HEAD,
+        kind="quality",
+        status="in_progress",
+        details_url="https://example.test/quality",
+        external_id="execution:quality",
+    )
+
+    fields = repo.create_check_run.call_args.kwargs
+    assert fields["details_url"] == "https://example.test/quality"
+    assert fields["external_id"] == "execution:quality"
+    assert "started_at" in fields
+    assert "completed_at" not in fields
 
 
 def _execution():

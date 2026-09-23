@@ -429,11 +429,21 @@ def submit(execution_id: str, service: CatalogService) -> dict[str, Any]:
         )
         raise ReleaseCloudBuildError("Release build submission is uncertain") from exc
     if response.status_code >= 300:
-        release_executions.save(
-            execution_id,
-            status="failed",
-            submission_status_code=int(response.status_code),
-        )
+        diagnostic = ""
+        if response.status_code == 400:
+            try:
+                error = response.json().get("error", {})
+                if isinstance(error, dict):
+                    diagnostic = str(error.get("message", ""))[:500]
+            except (TypeError, ValueError):
+                pass
+        fields: dict[str, Any] = {
+            "status": "failed",
+            "submission_status_code": int(response.status_code),
+        }
+        if diagnostic:
+            fields["submission_error"] = diagnostic
+        release_executions.save(execution_id, **fields)
         raise ReleaseCloudBuildError(
             f"Release build submission failed: {response.status_code}"
         )
