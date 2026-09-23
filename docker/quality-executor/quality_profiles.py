@@ -36,6 +36,22 @@ _PROFILE_FIELDS = {
     "extra",
 }
 _EXTRA_FIELDS = {"name", "category", "command", "blocking"}
+_BASE_CHECK_CATEGORIES = {
+    "setup",
+    "tests",
+    "build",
+    "lint",
+    "format",
+    "typecheck",
+    "sast",
+    "dependencies",
+    "secrets",
+    "misconfiguration",
+    "differential_coverage",
+    "identity",
+    "engine",
+    "container_smoke",
+}
 
 
 class QualityProfileError(RuntimeError):
@@ -89,9 +105,14 @@ def _validate_profile(service: str, raw: Any) -> dict[str, Any]:
         )
     if not all(isinstance(command, str) for command in commands.values()):
         raise QualityProfileError(f"{service}: commands must be strings")
+    required_commands = {"install", "tests", "lint", "typecheck"}
+    required_commands.add("build" if runtime == "node" else "format")
+    if any(not commands[name].strip() for name in required_commands):
+        raise QualityProfileError(f"{service}: required quality command is empty")
     extras = raw.get("extra")
     if not isinstance(extras, list):
         raise QualityProfileError(f"{service}: extra checks must be a list")
+    categories = set(_BASE_CHECK_CATEGORIES)
     for index, extra in enumerate(extras):
         if not isinstance(extra, dict) or set(extra) != _EXTRA_FIELDS:
             raise QualityProfileError(
@@ -105,6 +126,11 @@ def _validate_profile(service: str, raw: Any) -> dict[str, Any]:
             raise QualityProfileError(f"{service}: invalid extra[{index}]")
         if not extra["name"] or not extra["category"] or not extra["command"]:
             raise QualityProfileError(f"{service}: invalid empty extra[{index}]")
+        if extra["category"] in categories:
+            raise QualityProfileError(
+                f"{service}: extra[{index}] duplicates a quality check category"
+            )
+        categories.add(extra["category"])
         if not isinstance(extra.get("blocking"), bool):
             raise QualityProfileError(
                 f"{service}: extra[{index}].blocking must be boolean"

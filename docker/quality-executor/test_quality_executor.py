@@ -25,6 +25,28 @@ import untrusted_command  # noqa: E402
 
 
 class QualityProfilesTest(unittest.TestCase):
+    def test_every_profile_has_unique_checks_and_required_commands(self) -> None:
+        for service in quality_profiles.available_services():
+            profile = quality_profiles.profile_for(service)
+            self.assertEqual(
+                profile,
+                quality_profiles._validate_profile(service, profile),
+            )
+
+        web = quality_profiles.profile_for("cgm-sanplat-web")
+        web["extra"][0]["category"] = "tests"
+        with self.assertRaisesRegex(
+            quality_profiles.QualityProfileError, "duplicates a quality check"
+        ):
+            quality_profiles._validate_profile("cgm-sanplat-web", web)
+
+        web["extra"][0]["category"] = "proxy_contracts"
+        web["commands"]["typecheck"] = ""
+        with self.assertRaisesRegex(
+            quality_profiles.QualityProfileError, "required quality command"
+        ):
+            quality_profiles._validate_profile("cgm-sanplat-web", web)
+
     def test_trivy_uses_central_policy_only_for_pinned_executor(self) -> None:
         report_directory = Path("/tmp/quality-reports")
         trusted = quality_gate._defaults(
