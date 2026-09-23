@@ -17,9 +17,9 @@
         "typecheck": "mypy src --ignore-missing-imports"
       },
       "extra": [
-        {"name": "Bandit", "category": "sast", "command": "bandit -q -lll -r src", "blocking": true},
-        {"name": "Dependency audit", "category": "dependencies", "command": "pip-audit", "blocking": true},
-        {"name": "Workflow contracts", "category": "build", "command": "actionlint .github/workflows/*.yml templates/github-actions/*.yml examples/caller-workflows/*.yml", "blocking": true}
+        {"name": "Bandit", "category": "bandit", "command": "bandit -q -lll -r src", "blocking": true},
+        {"name": "Dependency audit", "category": "dependency_audit", "command": "pip-audit", "blocking": true},
+        {"name": "Workflow contracts", "category": "workflow_contracts", "command": "actionlint .github/workflows/*.yml templates/github-actions/*.yml examples/caller-workflows/*.yml", "blocking": true}
       ]
     },
     "eng-platform-web": {
@@ -35,10 +35,10 @@
         "build": "npm run build",
         "lint": "npx eslint . --max-warnings 0 -f json -o quality-reports/eslint.json",
         "format": "",
-        "typecheck": ""
+        "typecheck": "npx tsc --noEmit"
       },
       "extra": [
-        {"name": "Dependency audit", "category": "dependencies", "command": "npm audit --audit-level=high", "blocking": true}
+        {"name": "Dependency audit", "category": "dependency_audit", "command": "npm audit --audit-level=high", "blocking": true}
       ]
     },
     "communications-ms": {
@@ -71,12 +71,12 @@
         "build": "",
         "lint": "ruff check app tests --output-format json --output-file quality-reports/ruff.json",
         "format": "git diff --name-only -z --diff-filter=ACMR \"$ENG_PLATFORM_RELEASE_BASE_SHA\" \"$ENG_PLATFORM_RELEASE_HEAD_SHA\" -- 'app/**/*.py' 'tests/**/*.py' | xargs -0 -r ruff format --check --",
-        "typecheck": ""
+        "typecheck": "python -m compileall -q app"
       },
       "extra": [
-        {"name": "Bandit", "category": "sast", "command": "bandit -q -lll -r app", "blocking": true},
-        {"name": "Mypy advisory", "category": "typecheck", "command": "mypy app --ignore-missing-imports", "blocking": false},
-        {"name": "Dependency audit advisory", "category": "dependencies", "command": "pip-audit -r requirements.txt", "blocking": false}
+        {"name": "Bandit", "category": "bandit", "command": "bandit -q -lll -r app", "blocking": true},
+        {"name": "Mypy advisory", "category": "mypy_advisory", "command": "mypy app --ignore-missing-imports", "blocking": false},
+        {"name": "Dependency audit advisory", "category": "dependency_audit_advisory", "command": "pip-audit -r requirements.txt", "blocking": false}
       ]
     },
     "cgm-sanplat-web": {
@@ -95,7 +95,7 @@
         "typecheck": "npx tsc --noEmit"
       },
       "extra": [
-        {"name": "Proxy script contracts", "category": "tests", "command": "python3 -m unittest discover -s scripts -p \"test_*.py\"", "blocking": true}
+        {"name": "Proxy script contracts", "category": "proxy_contracts", "command": "python3 -m unittest discover -s scripts -p \"test_*.py\"", "blocking": true}
       ]
     },
     "cgm-sanplat-api": {
