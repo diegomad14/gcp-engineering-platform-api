@@ -91,30 +91,27 @@ def upsert_check(
             if str(getattr(existing, "external_id", "")) == external_id:
                 check_run_id = int(existing.id)
                 break
+    check_fields: dict[str, Any] = {
+        "name": CHECK_NAMES[kind],
+        "status": status,
+        "output": output,
+    }
+    if conclusion:
+        check_fields["conclusion"] = conclusion
+    if details_url:
+        check_fields["details_url"] = details_url
+    if status == "completed":
+        check_fields["completed_at"] = datetime.now(timezone.utc)
     if check_run_id:
         check = repo.get_check_run(check_run_id)
-        check.edit(  # type: ignore[arg-type]
-            name=CHECK_NAMES[kind],
-            status=status,
-            conclusion=conclusion,  # type: ignore[arg-type]
-            details_url=details_url or None,  # type: ignore[arg-type]
-            output=output,
-            completed_at=(  # type: ignore[arg-type]
-                datetime.now(timezone.utc) if status == "completed" else None  # type: ignore[arg-type]
-            ),
-        )
+        check.edit(**check_fields)  # type: ignore[arg-type]
         return int(check.id)
-    check = repo.create_check_run(  # type: ignore[arg-type]
-        name=CHECK_NAMES[kind],
-        head_sha=head_sha,
-        external_id=external_id or None,  # type: ignore[arg-type]
-        status=status,
-        conclusion=conclusion,  # type: ignore[arg-type]
-        details_url=details_url or None,  # type: ignore[arg-type]
-        output=output,  # type: ignore[arg-type]
-        started_at=datetime.now(timezone.utc) if status == "in_progress" else None,  # type: ignore[arg-type]
-        completed_at=datetime.now(timezone.utc) if status == "completed" else None,  # type: ignore[arg-type]
-    )
+    check_fields["head_sha"] = head_sha
+    if external_id:
+        check_fields["external_id"] = external_id
+    if status == "in_progress":
+        check_fields["started_at"] = datetime.now(timezone.utc)
+    check = repo.create_check_run(**check_fields)  # type: ignore[arg-type]
     return int(check.id)
 
 
