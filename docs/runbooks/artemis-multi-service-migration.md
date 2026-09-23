@@ -38,6 +38,12 @@ and rollback. Never infer activity from the mere existence of a Cloud Run Job.
   with immutable tags. Only the existing eng-platform release-executor service
   account was granted repository-level `artifactregistry.writer`; no images
   or Cloud Builds were created for this migration.
+- The backend branch depends on release-fallback PR #60. That PR is still
+  open and behind `main`; its normalized `oss-v2` gate failed with three SAST
+  findings, three Dockerfile misconfigurations and 72.43% changed-line
+  coverage against an 80% minimum. Do not merge or bypass this gate for the
+  Artemis rollout. The Artemis work is on `codex/artemis-platform`, based on
+  that branch, and is not deployed.
 
 ## Gates before changing GitHub names
 
