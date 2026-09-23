@@ -54,6 +54,11 @@ jobs:
             local context="${3:-.}"
             local tag="$REGISTRY/$name:$SOURCE_SHA"
             docker build --pull --file "$dockerfile" --tag "$tag" "$context"
+            if [[ "$name" == eng-platform-release-executor ]]; then
+              docker run --rm --entrypoint /usr/bin/python3 "$tag" \
+                -c 'import runpy, yaml; runpy.run_path("/opt/eng-platform/release_executor.py")'
+              docker run --rm --entrypoint gcloud "$tag" --version >/dev/null
+            fi
             local push_output
             push_output="$(docker push "$tag")"
             printf '%s\n' "$push_output"

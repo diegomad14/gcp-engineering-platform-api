@@ -18,4 +18,6 @@ ENV HOME=/tmp/release-executor
 # trivy:ignore:DS-0002
 USER root  # nosemgrep: dockerfile.security.last-user-is-root.last-user-is-root
 
-ENTRYPOINT ["python3", "/opt/eng-platform/release_executor.py"]
+# The Cloud SDK base also ships its own Python earlier on PATH. apk's py3-yaml
+# belongs to /usr/bin/python3, so pin the interpreter with the installed module.
+ENTRYPOINT ["/usr/bin/python3", "/opt/eng-platform/release_executor.py"]
