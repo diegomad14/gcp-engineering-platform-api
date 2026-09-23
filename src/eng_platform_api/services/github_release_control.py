@@ -205,7 +205,7 @@ def installation_read_token(repository: str) -> tuple[str, str]:
         raise RuntimeError("GitHub App authentication is not configured")
     repo = github_client().get_repo(repository)
     integration = GithubIntegration(int(settings.app_id), settings.private_key)
-    _, payload = integration._requester.requestJsonAndCheck(  # type: ignore[attr-defined]
+    _, payload = integration.requester.requestJsonAndCheck(
         "POST",
         f"/app/installations/{int(settings.installation_id)}/access_tokens",
         input={
