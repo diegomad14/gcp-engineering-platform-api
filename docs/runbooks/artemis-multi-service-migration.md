@@ -41,6 +41,14 @@ and rollback. Never infer activity from the mere existence of a Cloud Run Job.
   rename or public URL change was made. The revision's inherited
   `commit-sha` label remains stale and must be corrected by a new pinned
   release-executor image before it is used as provenance.
+- API PR #63 merged as `1aa8cba6`; tag `v0.25.1` has exact `oss-v2 PASSED`
+  evidence. Its first deployment `6620957836` failed before creating a
+  candidate because the newly published executor image could not import
+  `yaml`. No product image or traffic was changed by that deployment. The
+  executor image setting was restored to the previous digest in both GitHub
+  and the API's live revision; `eng-platform-api-ep-b092dbc54b` again serves
+  100%. This runbook's next gate is a container-level import smoke before
+  publishing another digest, followed by a fresh `v0.25.1` deployment.
 - Private regional bucket `cgm-artemis-data` was created with uniform access,
   public access prevention and seven-day soft delete. Initial copies of
   `kpi_cgm.db`, `location-snapshots/`, `readings-universe/` and
@@ -57,8 +65,7 @@ and rollback. Never infer activity from the mere existence of a Cloud Run Job.
   release-path tests (80.36% changed-line coverage locally), removed the
   untrusted checkout from the credentialed portion of the PR workflow,
   set the planner image to a non-root default, and documented two narrowly
-  scoped Trivy exceptions for the quality supervisors. The Artemis work is
-  on `codex/artemis-platform`, now merged with that `main`, and is not deployed.
+  scoped Trivy exceptions for the quality supervisors.
 
 ## Gates before changing GitHub names
 

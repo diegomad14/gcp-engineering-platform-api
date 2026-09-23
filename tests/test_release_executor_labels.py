@@ -103,3 +103,15 @@ def test_cloud_run_job_definition_gets_release_sha_label(engine, monkeypatch):
     assert (
         updates[0][updates[0].index("--update-labels") + 1] == "commit-sha=" + "a" * 40
     )
+
+
+def test_executor_dockerfile_uses_python_with_apk_yaml():
+    dockerfile = (
+        Path(__file__).resolve().parents[1] / "docker/release-executor/Dockerfile"
+    ).read_text(encoding="utf-8")
+    assert "apk add --no-cache docker-cli git python3 py3-yaml" in dockerfile
+    assert (
+        'ENTRYPOINT ["/usr/bin/python3", "/opt/eng-platform/release_executor.py"]'
+        in dockerfile
+    )
+    assert "\nUSER root\n" in dockerfile
