@@ -114,3 +114,4 @@ def test_executor_dockerfile_uses_python_with_apk_yaml():
         'ENTRYPOINT ["/usr/bin/python3", "/opt/eng-platform/release_executor.py"]'
         in dockerfile
     )
+    assert "\nUSER root\n" in dockerfile

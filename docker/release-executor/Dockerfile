@@ -16,7 +16,8 @@ ENV HOME=/tmp/release-executor
 # short-lived, allowlisted release command. GitHub Actions overrides the user
 # and group at runtime and executes the same digest unprivileged.
 # trivy:ignore:DS-0002
-USER root  # nosemgrep: dockerfile.security.last-user-is-root.last-user-is-root
+# nosemgrep: dockerfile.security.last-user-is-root.last-user-is-root
+USER root
 
 # The Cloud SDK base also ships its own Python earlier on PATH. apk's py3-yaml
 # belongs to /usr/bin/python3, so pin the interpreter with the installed module.
