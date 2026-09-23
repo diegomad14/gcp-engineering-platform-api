@@ -211,8 +211,16 @@ def _validate_scanner_result(scanner: str, value: dict[str, object]) -> None:
         or not paths["scanned"]
     ):
         raise TrustedScannerError("Semgrep did not scan any source files")
-    if value.get("errors"):
+    errors = value.get("errors", [])
+    if not isinstance(errors, list):
         raise TrustedScannerError("Semgrep reported scan errors")
+    # Semgrep reports parser limitations as PartialParsing even when the rest
+    # of the file was scanned. Preserve these in the sealed report, but fail
+    # closed on any scanner/runtime/configuration error.
+    for error in errors:
+        kind = error.get("type") if isinstance(error, dict) else None
+        if not isinstance(kind, list) or not kind or kind[0] != "PartialParsing":
+            raise TrustedScannerError("Semgrep reported scan errors")
 
 
 def _seal_output(target: Path, value: dict[str, object]) -> None:

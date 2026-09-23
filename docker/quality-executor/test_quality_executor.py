@@ -85,6 +85,23 @@ class QualityProfilesTest(unittest.TestCase):
         trusted_scanner._validate_scanner_result(
             "semgrep", {"paths": {"scanned": ["src/app.ts"]}, "errors": []}
         )
+        trusted_scanner._validate_scanner_result(
+            "semgrep",
+            {
+                "paths": {"scanned": ["src/app.ts"]},
+                "errors": [{"type": ["PartialParsing", []]}],
+            },
+        )
+        with self.assertRaisesRegex(
+            trusted_scanner.TrustedScannerError, "reported scan errors"
+        ):
+            trusted_scanner._validate_scanner_result(
+                "semgrep",
+                {
+                    "paths": {"scanned": ["src/app.ts"]},
+                    "errors": [{"type": ["SemgrepError", []]}],
+                },
+            )
 
     def test_pinned_scanner_binary_has_safe_image_permissions(self) -> None:
         if not Path("/usr/local/bin/trivy").exists():
@@ -483,6 +500,7 @@ while not os.path.exists(os.environ["ATTEMPT_MARKER"]):
             ),
             mock.patch.object(quality_executor, "_git", side_effect=fake_git),
         ):
+            (Path(directory) / ".git").mkdir()
             quality_executor._prepare_history(Path(directory), identity)
 
         fetch_args, fetch_environment = calls[0]
@@ -507,6 +525,93 @@ while not os.path.exists(os.environ["ATTEMPT_MARKER"]):
             base64.b64decode(encoded, validate=True).decode(),
         )
         self.assertEqual("false", fetch_environment["GIT_CONFIG_VALUE_1"])
+
+    def test_prepare_bootstraps_empty_source_volume_at_exact_head(self) -> None:
+        identity = {
+            "repository": "diegomad14/eng-platform-api",
+            "head_sha": "a" * 40,
+            "base_sha": "b" * 40,
+        }
+        calls: list[tuple[str, ...]] = []
+
+        def fake_git(_cwd: Path, *args: str, env: dict[str, str] | None = None) -> str:
+            calls.append(args)
+            return identity["base_sha"]
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(quality_executor, "_source_token", return_value="token"),
+            mock.patch.object(quality_executor, "_git", side_effect=fake_git),
+            mock.patch.object(quality_executor, "_verify_checkout") as verify,
+        ):
+            quality_executor._prepare_history(Path(directory), identity)
+            verify.assert_called_once()
+        self.assertEqual(calls[0], ("init", "--quiet"))
+        self.assertIn(
+            "+" + identity["head_sha"] + ":refs/heads/eng-platform-quality-head",
+            calls[1],
+        )
+        self.assertIn("checkout", calls[2])
+        self.assertIn("--detach", calls[2])
+
+    def test_prepare_bootstrap_checks_out_exact_head_from_repository(self) -> None:
+        def git(cwd: Path, *args: str) -> str:
+            return subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ).stdout.strip()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            git(repository, "init", "-q")
+            git(repository, "config", "user.email", "quality@example.test")
+            git(repository, "config", "user.name", "Quality Test")
+            (repository / "source.txt").write_text("base\n")
+            git(repository, "add", "source.txt")
+            git(repository, "commit", "-qm", "base")
+            base_sha = git(repository, "rev-parse", "HEAD")
+            (repository / "source.txt").write_text("head\n")
+            git(repository, "commit", "-qam", "head")
+            head_sha = git(repository, "rev-parse", "HEAD")
+            source = root / "source"
+            source.mkdir()
+            original_git = quality_executor._git
+
+            def local_git(
+                cwd: Path, *args: str, env: dict[str, str] | None = None
+            ) -> str:
+                local_args = tuple(
+                    repository.as_uri()
+                    if value == "https://github.com/diegomad14/eng-platform-api.git"
+                    else value
+                    for value in args
+                )
+                return original_git(cwd, *local_args, env=env)
+
+            with (
+                mock.patch.object(quality_executor, "_source_token", return_value="token"),
+                mock.patch.object(quality_executor, "_git", side_effect=local_git),
+            ):
+                quality_executor._prepare_history(
+                    source,
+                    {
+                        "repository": "diegomad14/eng-platform-api",
+                        "head_sha": head_sha,
+                        "base_sha": base_sha,
+                    },
+                )
+            self.assertEqual(head_sha, git(source, "rev-parse", "HEAD"))
+            self.assertEqual("head\n", (source / "source.txt").read_text())
+            self.assertEqual(
+                base_sha,
+                git(source, "rev-parse", "refs/heads/eng-platform-quality-base"),
+            )
 
     def test_shallow_source_keeps_fetched_base_in_isolated_clone(self) -> None:
         def git(cwd: Path, *args: str) -> str:
