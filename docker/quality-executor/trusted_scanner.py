@@ -68,7 +68,9 @@ def _deadline() -> float:
 
 
 def _runtime_environment() -> dict[str, str]:
-    runtime = Path(tempfile.mkdtemp(prefix="eng-platform-scanner-"))
+    # The gate's TMPDIR is root-only. Scanner processes drop to UID 65532,
+    # so their private runtime must have a traversable parent.
+    runtime = Path(tempfile.mkdtemp(prefix="eng-platform-scanner-", dir="/tmp"))
     os.chown(runtime, _UID, _GID, follow_symlinks=False)
     os.chmod(runtime, 0o700)
     return {

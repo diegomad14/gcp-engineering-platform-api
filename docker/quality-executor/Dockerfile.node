@@ -9,13 +9,15 @@ RUN apt-get update \
         pytest-cov==7.0.0 ruff==0.15.22 semgrep==1.136.0 \
     && curl --fail --location --silent --show-error \
         "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
-        | tar -xz -C /usr/local/bin trivy
+        | tar -xz -C /usr/local/bin trivy \
+    && chmod 0555 /usr/local/bin/trivy
 
 COPY scripts/quality/quality_gate.py scripts/quality/differential_coverage.py /opt/eng-platform/
 COPY docker/quality-executor/trivyignore.yaml /opt/eng-platform/trivyignore.yaml
 COPY docker/quality-executor/quality_executor.py docker/quality-executor/quality_profiles.py docker/quality-executor/untrusted_command.py docker/quality-executor/trusted_scanner.py docker/quality-executor/trusted_scanner.sh docker/quality-executor/test_quality_executor.py /opt/eng-platform/
 COPY src/eng_platform_api/release_quality_profiles.json /opt/eng-platform/release_quality_profiles.json
 RUN mkdir -p /opt/eng-platform/trusted-bin \
+    && chown 0:0 /usr/local/bin/trivy \
     && install -m 0555 /opt/eng-platform/trusted_scanner.sh /opt/eng-platform/trusted-bin/semgrep \
     && install -m 0555 /opt/eng-platform/trusted_scanner.sh /opt/eng-platform/trusted-bin/trivy \
     && chmod 0555 /opt/eng-platform/quality_executor.py /opt/eng-platform/untrusted_command.py /opt/eng-platform/trusted_scanner.py \
