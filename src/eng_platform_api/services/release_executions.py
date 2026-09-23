@@ -9,6 +9,7 @@ from threading import RLock
 from typing import Any, Literal
 
 from ..config import config
+from .repository_identity import aliases
 
 ReleaseOperation = Literal["pr_quality", "main_release"]
 ReleaseProvider = Literal["github_actions", "cloud_build"]
@@ -607,20 +608,23 @@ def _validate_status_change(current: dict[str, Any], changes: dict[str, Any]) ->
 
 
 def list_for_repository(repository: str, *, limit: int = 50) -> list[dict[str, Any]]:
+    repository_names = aliases(repository)
     collection = _collection()
     if collection is None:
         with _lock:
             values = [
                 dict(value)
                 for value in _memory.values()
-                if value.get("repository") == repository
+                if value.get("repository") in repository_names
             ]
     else:
         # Apply the limit only after deterministic ordering. Firestore's
         # unspecified pre-limit order can otherwise hide the newest execution
         # once a repository has accumulated historical terminal records.
-        query = collection.where("repository", "==", repository)
-        values = [snapshot.to_dict() for snapshot in query.stream()]
+        values = []
+        for name in repository_names:
+            query = collection.where("repository", "==", name)
+            values.extend(snapshot.to_dict() for snapshot in query.stream())
     values.sort(key=lambda value: value.get("created_at", ""), reverse=True)
     return values[:limit]
 

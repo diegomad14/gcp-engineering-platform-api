@@ -16,6 +16,7 @@ from typing import Optional
 from google.cloud import run_v2
 
 from ..config import config
+from .repository_identity import repository_id, same_repository
 from ..models import (
     CatalogResponse,
     CatalogService,
@@ -44,6 +45,11 @@ def _run_client() -> run_v2.ServicesClient:
     return run_v2.ServicesClient()
 
 
+@lru_cache(maxsize=1)
+def _job_client() -> run_v2.JobsClient:
+    return run_v2.JobsClient()
+
+
 def deployment_blockers(service: CatalogService) -> list[str]:
     """Return actionable reasons why a service cannot be deployed by the platform."""
     blockers: list[str] = []
@@ -56,8 +62,10 @@ def deployment_blockers(service: CatalogService) -> list[str]:
         ("deployment.image_name", deployment.image_name),
         ("deployment.artifact_repository", deployment.artifact_repository),
         ("deployment.build_context", deployment.build_context),
-        ("deployment.health_path", deployment.health_path),
+        ("deployment.dockerfile_path", deployment.dockerfile_path),
     ]
+    if deployment.runtime_kind == "cloud_run_service":
+        required_fields.append(("deployment.health_path", deployment.health_path))
     if not deployment.enabled:
         blockers.append("deployment.enabled is false")
     blockers.extend(
@@ -75,6 +83,20 @@ def _get_service_config() -> list[dict]:
 
 
 def _catalog_service(cfg: dict) -> CatalogService:
+    quality_cfg = dict(cfg.get("quality", {}))
+    deployment_cfg = dict(cfg.get("deployment", {}))
+    if cfg["service_name"].startswith("cgm-artemis-"):
+        owners = {
+            1306114845: ["cgm-artemis-api", "cgm-sanplat-api"],
+            1306114872: ["cgm-artemis-web", "cgm-sanplat-web"],
+        }
+        quality_cfg["evidence_services"] = owners.get(
+            repository_id(cfg["repository"]), []
+        )
+        if cfg["service_name"] not in {"cgm-artemis-api", "cgm-artemis-web"}:
+            deployment_cfg["private_runtime"] = (
+                deployment_cfg.get("runtime_kind") == "cloud_run_service"
+            )
     service = CatalogService(
         service_name=cfg["service_name"],
         repository=cfg["repository"],
@@ -88,8 +110,8 @@ def _catalog_service(cfg: dict) -> CatalogService:
         validation_targets=[
             ValidationTarget(**vt) for vt in cfg.get("validation_targets", [])
         ],
-        quality=ServiceQualityConfig(**cfg.get("quality", {})),
-        deployment=ServiceDeploymentConfig(**cfg.get("deployment", {})),
+        quality=ServiceQualityConfig(**quality_cfg),
+        deployment=ServiceDeploymentConfig(**deployment_cfg),
         finops=FinOpsLabels(**cfg.get("finops", {})),
         operational_secrets=cfg.get("operational_secrets", []),
     )
@@ -115,7 +137,7 @@ def get_services_by_repository(repository: str) -> list[CatalogService]:
     return [
         service
         for service in get_services().services
-        if service.repository == repository
+        if same_repository(service.repository, repository)
     ]
 
 
@@ -150,6 +172,30 @@ def get_service_detail(service_name: str) -> Optional[ServiceDetail]:
             return cached[1]
 
     try:
+        if service.deployment.runtime_kind == "cloud_run_job":
+            live_job = _job_client().get_job(
+                name=(
+                    f"projects/{service.project_id}/locations/{service.region}/"
+                    f"jobs/{service.service_name}"
+                )
+            )
+            ready = _is_ready(live_job) and not bool(live_job.reconciling)
+            latest = getattr(live_job, "latest_created_execution", None)
+            completion = getattr(getattr(latest, "completion_status", None), "name", "")
+            detail.status = (
+                "healthy"
+                if ready
+                and completion not in {"EXECUTION_FAILED", "EXECUTION_CANCELLED"}
+                else "degraded"
+            )
+            detail.latest_ready_revision = (
+                f"job-generation-{live_job.generation}" if ready else ""
+            )
+            if detail.status != "healthy":
+                detail.error = "Cloud Run Job is not Ready or its last execution failed"
+            with _detail_cache_lock:
+                _detail_cache[service_name] = (monotonic(), detail)
+            return detail
         client = _run_client()
         live = client.get_service(
             name=(

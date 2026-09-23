@@ -14,6 +14,7 @@ from ..config import config
 from ..models import CatalogService, DeploymentItem
 from . import deployment_executions
 from .release_profiles import profile_for
+from .repository_identity import aliases
 
 _API = "https://cloudbuild.googleapis.com/v1"
 
@@ -54,6 +55,12 @@ def fingerprint(item: DeploymentItem, service: CatalogService) -> str:
         "kind": item.kind,
         "profile": profile.name,
         "profile_hash": profile.fingerprint(),
+        "build_context": service.deployment.build_context,
+        "dockerfile_path": service.deployment.dockerfile_path,
+        "runtime_kind": service.deployment.runtime_kind,
+        "private_runtime": service.deployment.private_runtime,
+        "image_name": service.deployment.image_name,
+        "quality_evidence_services": service.quality.evidence_services,
     }
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
@@ -102,6 +109,7 @@ def build_request(item: DeploymentItem, service: CatalogService) -> dict[str, An
                     f"CGM_OPERATION={item.kind}",
                     f"CGM_SERVICE={service.service_name}",
                     f"CGM_REPOSITORY={service.repository}",
+                    f"CGM_REPOSITORY_ALIASES={','.join(aliases(service.repository))}",
                     f"CGM_RELEASE_TAG={item.tag}",
                     f"CGM_RELEASE_SHA={item.sha}",
                     f"CGM_PROFILE={profile.name}",
@@ -110,6 +118,10 @@ def build_request(item: DeploymentItem, service: CatalogService) -> dict[str, An
                     f"CGM_REQUEST_FINGERPRINT={request_fingerprint}",
                     f"CGM_IMAGE={substitutions['_IMAGE']}",
                     f"CGM_BUILD_CONTEXT={service.deployment.build_context}",
+                    f"CGM_DOCKERFILE_PATH={service.deployment.dockerfile_path}",
+                    f"CGM_RUNTIME_KIND={service.deployment.runtime_kind}",
+                    f"CGM_PRIVATE_RUNTIME={'true' if service.deployment.private_runtime else 'false'}",
+                    f"CGM_QUALITY_EVIDENCE_SERVICES={','.join(service.quality.evidence_services)}",
                     f"CGM_HEALTH_PATH={service.deployment.health_path}",
                     f"CGM_TARGET_REVISION={item.production_revision}",
                     f"CGM_PROJECT_ID={service.project_id}",
@@ -322,6 +334,9 @@ def _reconcile(item: DeploymentItem, build: dict[str, Any]) -> None:
     """Resolve a terminal build from real traffic when its callback was lost."""
     try:
         service = profile_for_service(item.service_name)
+        if service.deployment.runtime_kind == "cloud_run_job":
+            _reconcile_job(item, service, build)
+            return
         runtime = _runtime_service(item)
         traffic = runtime.get("trafficStatuses", [])
         hundred = next(
@@ -361,6 +376,47 @@ def _reconcile(item: DeploymentItem, build: dict[str, Any]) -> None:
         item.status = "UNKNOWN"
         item.current_stage = "reconcile"
         item.error = "Cloud Build completed but runtime state is indeterminate"
+
+
+def _reconcile_job(
+    item: DeploymentItem, service: CatalogService, build: dict[str, Any]
+) -> None:
+    """Require a successful build, immutable summary and actual Job image."""
+    if build.get("status") != "SUCCESS":
+        item.status = "UNKNOWN"
+        item.current_stage = "reconcile"
+        item.error = "Job build failed; restored definition needs verification"
+        return
+    from google.cloud import run_v2, storage
+
+    bucket = storage.Client(project=service.project_id).bucket(
+        config.cloud_build.evidence_bucket
+    )
+    blob = bucket.blob(f"deployment-summaries/{item.id}.json")
+    summary = json.loads(blob.download_as_text())
+    if (
+        summary.get("deployment_id") != item.id
+        or summary.get("fingerprint") != fingerprint(item, service)
+        or summary.get("service") != item.service_name
+        or summary.get("sha") != item.sha
+        or summary.get("tag") != item.tag
+        or not str(summary.get("production_revision", "")).startswith("job-")
+        or "@sha256:" not in str(summary.get("image_digest", ""))
+    ):
+        raise CloudBuildError("Job summary identity does not match build")
+    job = run_v2.JobsClient().get_job(
+        name=(
+            f"projects/{service.project_id}/locations/{service.region}/"
+            f"jobs/{service.service_name}"
+        )
+    )
+    containers = job.template.template.containers
+    if len(containers) != 1 or containers[0].image != summary["image_digest"]:
+        raise CloudBuildError("Job image does not match completed release")
+    item.production_revision = str(summary["production_revision"])
+    item.status = "ROLLED_BACK" if item.kind == "rollback" else "SUCCEEDED"
+    item.current_stage = "rollback" if item.kind == "rollback" else "complete"
+    item.error = ""
 
 
 def get_build(build_id: str) -> dict[str, Any]:

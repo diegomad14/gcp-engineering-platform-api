@@ -14,7 +14,10 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 import urllib.request
+
+import yaml
 
 
 ROOT = pathlib.Path("/workspace").resolve()
@@ -80,6 +83,39 @@ PROFILE_SPECS = {
         "rollback_mode": "corporate_api",
     },
 }
+
+for _name in (
+    "cgm-artemis-api",
+    "cgm-artemis-web",
+    "cgm-artemis-job-dispatcher",
+    "cgm-artemis-job-worker",
+    "cgm-artemis-sync-worker",
+    "cgm-artemis-clock-sync-worker",
+    "cgm-artemis-data-recovery-worker",
+    "cgm-artemis-fnd-ip-sync-worker",
+    "cgm-artemis-fnd-observation-worker",
+    "cgm-artemis-readings-export-worker",
+    "cgm-artemis-smarti-prevention-worker",
+    "cgm-artemis-wm-sweep-worker",
+):
+    PROFILE_SPECS[_name] = {
+        "name": _name,
+        "timeout_seconds": 3600,
+        "build_args": [],
+        "hooks": [],
+        "candidate_update_strategy": "merge",
+        "rollback_mode": (
+            "job_definition"
+            if _name
+            in {
+                "cgm-artemis-fnd-observation-worker",
+                "cgm-artemis-readings-export-worker",
+                "cgm-artemis-smarti-prevention-worker",
+                "cgm-artemis-wm-sweep-worker",
+            }
+            else "traffic"
+        ),
+    }
 
 
 class AutomaticRollback(RuntimeError):
@@ -156,9 +192,8 @@ def assert_source() -> None:
         raise RuntimeError("Cloud Build source must be a connected repository checkout")
     # Cloud Build owns the connected-repository checkout with a different UID
     # than the non-root executor. Trust only this exact workspace, never '*'.
-    if (
-        run("git", "-c", f"safe.directory={ROOT}", "rev-parse", "HEAD")
-        != env("CGM_RELEASE_SHA")
+    if run("git", "-c", f"safe.directory={ROOT}", "rev-parse", "HEAD") != env(
+        "CGM_RELEASE_SHA"
     ):
         raise RuntimeError(
             "connected repository checkout does not match authorized SHA"
@@ -185,10 +220,20 @@ def verify_quality() -> None:
         report.get("repository"),
         report.get("commit_sha"),
     )
-    if identity != (
-        env("CGM_SERVICE"),
-        env("CGM_REPOSITORY"),
-        env("CGM_RELEASE_SHA"),
+    allowed_owners = {env("CGM_SERVICE")}
+    allowed_owners.update(
+        value
+        for value in os.getenv("CGM_QUALITY_EVIDENCE_SERVICES", "").split(",")
+        if value
+    )
+    if (
+        identity[0] not in allowed_owners
+        or identity[1]
+        not in {
+            env("CGM_REPOSITORY"),
+            *os.getenv("CGM_REPOSITORY_ALIASES", "").split(","),
+        }
+        or identity[2] != env("CGM_RELEASE_SHA")
     ):
         raise RuntimeError("quality evidence identity does not match release")
     if (
@@ -206,31 +251,49 @@ def image_for_tag() -> str:
     run("gcloud", "auth", "configure-docker", registry, "--quiet")
     try:
         run("docker", "pull", image)
+    except subprocess.CalledProcessError:
+        existing = False
+    else:
+        existing = True
+    if existing:
         labels = run("docker", "inspect", "--format", "{{json .Config.Labels}}", image)
         data = json.loads(labels or "{}")
-        if data.get("org.opencontainers.image.revision") == env(
-            "CGM_RELEASE_SHA"
-        ) and data.get("org.opencontainers.image.source") == env("CGM_REPOSITORY"):
-            digest = run(
-                "gcloud",
-                "artifacts",
-                "docker",
-                "images",
-                "describe",
-                image,
-                "--format=value(image_summary.digest)",
-            )
-            if not digest.startswith("sha256:"):
-                raise RuntimeError("existing release image has no immutable digest")
-            return f"{image.rsplit(':', 1)[0]}@{digest}"
-    except subprocess.CalledProcessError:
-        pass
+        allowed_sources = {env("CGM_REPOSITORY")}
+        allowed_sources.update(
+            value
+            for value in os.getenv("CGM_REPOSITORY_ALIASES", "").split(",")
+            if value
+        )
+        if (
+            data.get("org.opencontainers.image.revision") != env("CGM_RELEASE_SHA")
+            or data.get("org.opencontainers.image.source") not in allowed_sources
+        ):
+            raise RuntimeError("existing release image tag has conflicting provenance")
+        digest = run(
+            "gcloud",
+            "artifacts",
+            "docker",
+            "images",
+            "describe",
+            image,
+            "--format=value(image_summary.digest)",
+        )
+        if not digest.startswith("sha256:"):
+            raise RuntimeError("existing release image has no immutable digest")
+        return f"{image.rsplit(':', 1)[0]}@{digest}"
     context = (ROOT / env("CGM_BUILD_CONTEXT")).resolve()
     if ROOT not in context.parents and context != ROOT:
         raise RuntimeError("build context escapes repository")
+    dockerfile = (ROOT / os.getenv("CGM_DOCKERFILE_PATH", "Dockerfile")).resolve()
+    if (
+        ROOT not in dockerfile.parents and dockerfile != ROOT
+    ) or not dockerfile.is_file():
+        raise RuntimeError("Dockerfile is absent or escapes repository")
     args = [
         "docker",
         "build",
+        "--file",
+        str(dockerfile),
         "--label",
         f"org.opencontainers.image.revision={env('CGM_RELEASE_SHA')}",
         "--label",
@@ -242,18 +305,22 @@ def image_for_tag() -> str:
         args.extend(["--build-arg", f"APP_VERSION={env('CGM_RELEASE_TAG')}"])
     cache = os.getenv("CGM_CACHE_IMAGE", "").strip()
     if not cache:
-        cache = run(
-            "gcloud",
-            "run",
-            "services",
-            "describe",
-            env("CGM_SERVICE"),
-            "--region",
-            env("CGM_REGION"),
-            "--project",
-            env("CGM_PROJECT_ID"),
-            "--format=value(spec.template.spec.containers[0].image)",
-        )
+        try:
+            cache = run(
+                "gcloud",
+                "run",
+                "services",
+                "describe",
+                env("CGM_SERVICE"),
+                "--region",
+                env("CGM_REGION"),
+                "--project",
+                env("CGM_PROJECT_ID"),
+                "--format=value(spec.template.spec.containers[0].image)",
+            )
+        except subprocess.CalledProcessError:
+            # A new Artemis runtime has no prior Cloud Run resource yet.
+            cache = ""
     if cache:
         subprocess.run(["docker", "pull", cache], check=False, capture_output=True)
         args.extend(["--cache-from", cache])
@@ -346,9 +413,17 @@ def _service_url(service: str, region: str, project: str) -> str:
 
 def _smoke(url: str) -> None:
     target = url.rstrip("/") + "/" + env("CGM_HEALTH_PATH").lstrip("/")
+    headers: dict[str, str] = {}
+    if os.getenv("CGM_PRIVATE_RUNTIME") == "true":
+        audience = _service_url(
+            env("CGM_SERVICE"), env("CGM_REGION"), env("CGM_PROJECT_ID")
+        )
+        token = run("gcloud", "auth", "print-identity-token", f"--audiences={audience}")
+        headers["Authorization"] = f"Bearer {token}"
     for attempt in range(5):
         try:
-            with urllib.request.urlopen(target, timeout=30) as response:
+            request = urllib.request.Request(target, headers=headers)
+            with urllib.request.urlopen(request, timeout=30) as response:
                 if 200 <= response.status < 300:
                     return
         except Exception:
@@ -488,6 +563,8 @@ def deploy(image: str) -> dict[str, str]:
 
 
 def rollback() -> dict[str, str]:
+    if os.getenv("CGM_RUNTIME_KIND") == "cloud_run_job":
+        return rollback_job()
     target = env("CGM_TARGET_REVISION")
     emit("rollback", "running")
     run(
@@ -511,6 +588,197 @@ def rollback() -> dict[str, str]:
             env("CGM_SERVICE"), env("CGM_REGION"), env("CGM_PROJECT_ID")
         ),
     }
+
+
+def _job_definition() -> str:
+    """Export a restorable definition, not a status-bearing API response."""
+    return (
+        run(
+            "gcloud",
+            "run",
+            "jobs",
+            "describe",
+            env("CGM_SERVICE"),
+            "--region",
+            env("CGM_REGION"),
+            "--project",
+            env("CGM_PROJECT_ID"),
+            "--format=export",
+        )
+        + "\n"
+    )
+
+
+def _job_operational_spec(definition: str) -> dict:
+    payload = yaml.safe_load(definition)
+    if (
+        not isinstance(payload, dict)
+        or payload.get("kind") != "Job"
+        or payload.get("metadata", {}).get("name") != env("CGM_SERVICE")
+    ):
+        raise RuntimeError("Job snapshot does not match authorized resource")
+    spec = payload.get("spec")
+    if not isinstance(spec, dict):
+        raise RuntimeError("Job snapshot lacks a specification")
+    metadata = spec.get("template", {}).get("metadata", {})
+    if isinstance(metadata, dict):
+        for key in ("annotations", "labels"):
+            values = metadata.get(key)
+            if isinstance(values, dict):
+                for volatile in (
+                    "run.googleapis.com/client-name",
+                    "run.googleapis.com/client-version",
+                    "client.knative.dev/nonce",
+                ):
+                    values.pop(volatile, None)
+    return spec
+
+
+def _job_image() -> str:
+    payload = json.loads(
+        run(
+            "gcloud",
+            "run",
+            "jobs",
+            "describe",
+            env("CGM_SERVICE"),
+            "--region",
+            env("CGM_REGION"),
+            "--project",
+            env("CGM_PROJECT_ID"),
+            "--format=json",
+        )
+    )
+    containers = (
+        payload.get("spec", {})
+        .get("template", {})
+        .get("spec", {})
+        .get("template", {})
+        .get("spec", {})
+        .get("containers", [])
+    )
+    if len(containers) != 1 or not containers[0].get("image"):
+        raise RuntimeError("Job must have exactly one configured container")
+    return str(containers[0]["image"])
+
+
+def _job_snapshot_uri(revision: str) -> str:
+    if not re.fullmatch(r"job-[0-9a-f]{64}", revision):
+        raise RuntimeError("invalid Job snapshot fingerprint")
+    bucket = env("CGM_EVIDENCE_BUCKET")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{2,222}", bucket):
+        raise RuntimeError("invalid evidence bucket")
+    return f"gs://{bucket}/job-definitions/{env('CGM_SERVICE')}/{revision}.yaml"
+
+
+def _replace_job(definition: str) -> None:
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", encoding="utf-8"
+    ) as file:
+        file.write(definition)
+        file.flush()
+        run(
+            "gcloud",
+            "run",
+            "jobs",
+            "replace",
+            file.name,
+            "--region",
+            env("CGM_REGION"),
+            "--project",
+            env("CGM_PROJECT_ID"),
+            "--quiet",
+        )
+
+
+def _save_job_definition(definition: str) -> str:
+    revision = "job-" + hashlib.sha256(definition.encode()).hexdigest()
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", encoding="utf-8"
+    ) as file:
+        file.write(definition)
+        file.flush()
+        run("gcloud", "storage", "cp", file.name, _job_snapshot_uri(revision))
+    return revision
+
+
+def deploy_job(image: str) -> dict[str, str]:
+    """Update one pre-provisioned Job without running business work."""
+    if "@sha256:" not in image:
+        raise RuntimeError("Job deployment requires an immutable image")
+    before = _job_definition()
+    _job_operational_spec(before)
+    _job_image()  # Refuse a malformed/multi-container Job before any mutation.
+    _save_job_definition(before)  # Durable recovery before touching the Job.
+    emit("deploy-candidate", "running")
+    emit("deploy-candidate", "succeeded", candidate_revision=image, image_digest=image)
+    emit("validate-candidate", "running")
+    emit("validate-candidate", "succeeded", candidate_revision=image)
+    emit("promote", "running")
+    try:
+        run(
+            "gcloud",
+            "run",
+            "jobs",
+            "update",
+            env("CGM_SERVICE"),
+            "--image",
+            image,
+            "--region",
+            env("CGM_REGION"),
+            "--project",
+            env("CGM_PROJECT_ID"),
+            "--quiet",
+        )
+        if _job_image() != image:
+            raise RuntimeError("updated Job image does not match authorized digest")
+        definition = _job_definition()
+        revision = _save_job_definition(definition)
+        emit("promote", "succeeded", production_revision=revision)
+        emit("validate-production", "running")
+        emit("validate-production", "succeeded", production_revision=revision)
+        return {
+            "candidate_revision": image,
+            "production_revision": revision,
+            "image_digest": image,
+        }
+    except Exception:
+        try:
+            _replace_job(before)
+        except Exception as restore_exc:
+            emit("rollback", "failed", error="Job definition restoration failed")
+            raise RuntimeError(
+                "Job update failed and prior definition could not be restored"
+            ) from restore_exc
+        emit("rollback", "succeeded")
+        raise AutomaticRollback("Job update failed; prior definition was restored")
+
+
+def rollback_job() -> dict[str, str]:
+    """Restore a previously deployed Job definition after checksum validation."""
+    target_revision = env("CGM_TARGET_REVISION")
+    if not re.fullmatch(r"job-[0-9a-f]{64}", target_revision):
+        raise RuntimeError("invalid target Job definition fingerprint")
+    before = _job_definition()
+    emit("rollback", "running")
+    with tempfile.NamedTemporaryFile(
+        mode="w+", suffix=".yaml", encoding="utf-8"
+    ) as file:
+        run("gcloud", "storage", "cp", _job_snapshot_uri(target_revision), file.name)
+        file.seek(0)
+        target = file.read()
+    if "job-" + hashlib.sha256(target.encode()).hexdigest() != target_revision:
+        raise RuntimeError("target Job definition fingerprint mismatch")
+    expected_spec = _job_operational_spec(target)
+    try:
+        _replace_job(target)
+        if _job_operational_spec(_job_definition()) != expected_spec:
+            raise RuntimeError("restored Job definition differs from target")
+    except Exception:
+        _replace_job(before)
+        raise
+    emit("rollback", "succeeded", production_revision=target_revision)
+    return {"production_revision": target_revision, "image_digest": _job_image()}
 
 
 def write_summary(values: dict[str, str]) -> None:
@@ -548,7 +816,10 @@ def main() -> None:
     emit("build", "running")
     image = image_for_tag()
     emit("build", "succeeded", image_digest=image)
-    write_summary(deploy(image))
+    if os.getenv("CGM_RUNTIME_KIND") == "cloud_run_job":
+        write_summary(deploy_job(image))
+    else:
+        write_summary(deploy(image))
 
 
 if __name__ == "__main__":

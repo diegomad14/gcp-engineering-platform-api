@@ -1,6 +1,390 @@
 {
   "services": [
     {
+      "service_name": "cgm-artemis-api",
+      "repository": "diegomad14/cgm-artemis-api",
+      "owner": "cgm",
+      "cost_center": "cgm",
+      "project_id": "cgm-assistant-prod",
+      "region": "us-central1",
+      "environment": "prod",
+      "quality": {
+        "enabled": true,
+        "profile": "python",
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
+      },
+      "deployment": {
+        "enabled": false,
+        "workflow_file": "platform-deploy.yml",
+        "runtime_kind": "cloud_run_service",
+        "image_name": "cgm-artemis-api",
+        "artifact_repository": "cgm-artemis-repo",
+        "build_context": ".",
+        "dockerfile_path": "Dockerfile",
+        "health_path": "/health"
+      },
+      "finops": {
+        "service": "cgm-artemis-api",
+        "env": "prod",
+        "owner": "cgm",
+        "cost_center": "cgm"
+      }
+    },
+    {
+      "service_name": "cgm-artemis-job-dispatcher",
+      "repository": "diegomad14/cgm-artemis-api",
+      "owner": "cgm",
+      "cost_center": "cgm",
+      "project_id": "cgm-assistant-prod",
+      "region": "us-central1",
+      "environment": "prod",
+      "quality": {
+        "enabled": true,
+        "profile": "python",
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
+      },
+      "deployment": {
+        "enabled": false,
+        "workflow_file": "platform-deploy.yml",
+        "runtime_kind": "cloud_run_service",
+        "image_name": "cgm-artemis-api",
+        "artifact_repository": "cgm-artemis-repo",
+        "build_context": ".",
+        "dockerfile_path": "Dockerfile",
+        "health_path": "/ready"
+      },
+      "finops": {
+        "service": "cgm-artemis-job-dispatcher",
+        "env": "prod",
+        "owner": "cgm",
+        "cost_center": "cgm"
+      }
+    },
+    {
+      "service_name": "cgm-artemis-job-worker",
+      "repository": "diegomad14/cgm-artemis-api",
+      "owner": "cgm",
+      "cost_center": "cgm",
+      "project_id": "cgm-assistant-prod",
+      "region": "us-central1",
+      "environment": "prod",
+      "quality": {
+        "enabled": true,
+        "profile": "python",
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
+      },
+      "deployment": {
+        "enabled": false,
+        "workflow_file": "platform-deploy.yml",
+        "runtime_kind": "cloud_run_service",
+        "image_name": "cgm-artemis-api",
+        "artifact_repository": "cgm-artemis-repo",
+        "build_context": ".",
+        "dockerfile_path": "Dockerfile",
+        "health_path": "/ready"
+      },
+      "finops": {
+        "service": "cgm-artemis-job-worker",
+        "env": "prod",
+        "owner": "cgm",
+        "cost_center": "cgm"
+      }
+    },
+    {
+      "service_name": "cgm-artemis-sync-worker",
+      "repository": "diegomad14/cgm-artemis-api",
+      "owner": "cgm",
+      "cost_center": "cgm",
+      "project_id": "cgm-assistant-prod",
+      "region": "us-central1",
+      "environment": "prod",
+      "quality": {
+        "enabled": true,
+        "profile": "python",
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
+      },
+      "deployment": {
+        "enabled": false,
+        "workflow_file": "platform-deploy.yml",
+        "runtime_kind": "cloud_run_service",
+        "image_name": "cgm-artemis-api",
+        "artifact_repository": "cgm-artemis-repo",
+        "build_context": ".",
+        "dockerfile_path": "Dockerfile",
+        "health_path": "/ready"
+      },
+      "finops": {
+        "service": "cgm-artemis-sync-worker",
+        "env": "prod",
+        "owner": "cgm",
+        "cost_center": "cgm"
+      }
+    },
+    {
+      "service_name": "cgm-artemis-clock-sync-worker",
+      "repository": "diegomad14/cgm-artemis-api",
+      "owner": "cgm",
+      "cost_center": "cgm",
+      "project_id": "cgm-assistant-prod",
+      "region": "us-central1",
+      "environment": "prod",
+      "quality": {
+        "enabled": true,
+        "profile": "python",
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
+      },
+      "deployment": {
+        "enabled": false,
+        "workflow_file": "platform-deploy.yml",
+        "runtime_kind": "cloud_run_service",
+        "image_name": "cgm-artemis-api",
+        "artifact_repository": "cgm-artemis-repo",
+        "build_context": ".",
+        "dockerfile_path": "Dockerfile",
+        "health_path": "/ready"
+      },
+      "finops": {
+        "service": "cgm-artemis-clock-sync-worker",
+        "env": "prod",
+        "owner": "cgm",
+        "cost_center": "cgm"
+      }
+    },
+    {
+      "service_name": "cgm-artemis-data-recovery-worker",
+      "repository": "diegomad14/cgm-artemis-api",
+      "owner": "cgm",
+      "cost_center": "cgm",
+      "project_id": "cgm-assistant-prod",
+      "region": "us-central1",
+      "environment": "prod",
+      "quality": {
+        "enabled": true,
+        "profile": "python",
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
+      },
+      "deployment": {
+        "enabled": false,
+        "workflow_file": "platform-deploy.yml",
+        "runtime_kind": "cloud_run_service",
+        "image_name": "cgm-artemis-api",
+        "artifact_repository": "cgm-artemis-repo",
+        "build_context": ".",
+        "dockerfile_path": "Dockerfile",
+        "health_path": "/ready"
+      },
+      "finops": {
+        "service": "cgm-artemis-data-recovery-worker",
+        "env": "prod",
+        "owner": "cgm",
+        "cost_center": "cgm"
+      }
+    },
+    {
+      "service_name": "cgm-artemis-fnd-ip-sync-worker",
+      "repository": "diegomad14/cgm-artemis-api",
+      "owner": "cgm",
+      "cost_center": "cgm",
+      "project_id": "cgm-assistant-prod",
+      "region": "us-central1",
+      "environment": "prod",
+      "quality": {
+        "enabled": true,
+        "profile": "python",
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
+      },
+      "deployment": {
+        "enabled": false,
+        "workflow_file": "platform-deploy.yml",
+        "runtime_kind": "cloud_run_service",
+        "image_name": "cgm-artemis-api",
+        "artifact_repository": "cgm-artemis-repo",
+        "build_context": ".",
+        "dockerfile_path": "Dockerfile",
+        "health_path": "/ready"
+      },
+      "finops": {
+        "service": "cgm-artemis-fnd-ip-sync-worker",
+        "env": "prod",
+        "owner": "cgm",
+        "cost_center": "cgm"
+      }
+    },
+    {
+      "service_name": "cgm-artemis-fnd-observation-worker",
+      "repository": "diegomad14/cgm-artemis-api",
+      "owner": "cgm",
+      "cost_center": "cgm",
+      "project_id": "cgm-assistant-prod",
+      "region": "us-central1",
+      "environment": "prod",
+      "quality": {
+        "enabled": true,
+        "profile": "python",
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
+      },
+      "deployment": {
+        "enabled": false,
+        "workflow_file": "platform-deploy.yml",
+        "runtime_kind": "cloud_run_job",
+        "image_name": "cgm-artemis-api",
+        "artifact_repository": "cgm-artemis-repo",
+        "build_context": ".",
+        "dockerfile_path": "Dockerfile",
+        "health_path": ""
+      },
+      "finops": {
+        "service": "cgm-artemis-fnd-observation-worker",
+        "env": "prod",
+        "owner": "cgm",
+        "cost_center": "cgm"
+      }
+    },
+    {
+      "service_name": "cgm-artemis-readings-export-worker",
+      "repository": "diegomad14/cgm-artemis-api",
+      "owner": "cgm",
+      "cost_center": "cgm",
+      "project_id": "cgm-assistant-prod",
+      "region": "us-central1",
+      "environment": "prod",
+      "quality": {
+        "enabled": true,
+        "profile": "python",
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
+      },
+      "deployment": {
+        "enabled": false,
+        "workflow_file": "platform-deploy.yml",
+        "runtime_kind": "cloud_run_job",
+        "image_name": "cgm-artemis-api",
+        "artifact_repository": "cgm-artemis-repo",
+        "build_context": ".",
+        "dockerfile_path": "Dockerfile",
+        "health_path": ""
+      },
+      "finops": {
+        "service": "cgm-artemis-readings-export-worker",
+        "env": "prod",
+        "owner": "cgm",
+        "cost_center": "cgm"
+      }
+    },
+    {
+      "service_name": "cgm-artemis-smarti-prevention-worker",
+      "repository": "diegomad14/cgm-artemis-api",
+      "owner": "cgm",
+      "cost_center": "cgm",
+      "project_id": "cgm-assistant-prod",
+      "region": "us-central1",
+      "environment": "prod",
+      "quality": {
+        "enabled": true,
+        "profile": "python",
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
+      },
+      "deployment": {
+        "enabled": false,
+        "workflow_file": "platform-deploy.yml",
+        "runtime_kind": "cloud_run_job",
+        "image_name": "cgm-artemis-api",
+        "artifact_repository": "cgm-artemis-repo",
+        "build_context": ".",
+        "dockerfile_path": "Dockerfile",
+        "health_path": ""
+      },
+      "finops": {
+        "service": "cgm-artemis-smarti-prevention-worker",
+        "env": "prod",
+        "owner": "cgm",
+        "cost_center": "cgm"
+      }
+    },
+    {
+      "service_name": "cgm-artemis-wm-sweep-worker",
+      "repository": "diegomad14/cgm-artemis-api",
+      "owner": "cgm",
+      "cost_center": "cgm",
+      "project_id": "cgm-assistant-prod",
+      "region": "us-central1",
+      "environment": "prod",
+      "quality": {
+        "enabled": true,
+        "profile": "python",
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
+      },
+      "deployment": {
+        "enabled": false,
+        "workflow_file": "platform-deploy.yml",
+        "runtime_kind": "cloud_run_job",
+        "image_name": "cgm-artemis-api",
+        "artifact_repository": "cgm-artemis-repo",
+        "build_context": ".",
+        "dockerfile_path": "Dockerfile",
+        "health_path": ""
+      },
+      "finops": {
+        "service": "cgm-artemis-wm-sweep-worker",
+        "env": "prod",
+        "owner": "cgm",
+        "cost_center": "cgm"
+      }
+    },
+    {
+      "service_name": "cgm-artemis-web",
+      "repository": "diegomad14/cgm-artemis-web",
+      "owner": "cgm",
+      "cost_center": "cgm",
+      "project_id": "cgm-assistant-prod",
+      "region": "us-central1",
+      "environment": "prod",
+      "quality": {
+        "enabled": true,
+        "profile": "node",
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
+      },
+      "deployment": {
+        "enabled": false,
+        "workflow_file": "platform-deploy.yml",
+        "runtime_kind": "cloud_run_service",
+        "image_name": "cgm-artemis-web",
+        "artifact_repository": "cgm-artemis-repo",
+        "build_context": ".",
+        "dockerfile_path": "Dockerfile",
+        "health_path": "/"
+      },
+      "finops": {
+        "service": "cgm-artemis-web",
+        "env": "prod",
+        "owner": "cgm",
+        "cost_center": "cgm"
+      }
+    },
+    {
       "service_name": "cgm-sanplat-api",
       "operational_secrets": [
         {"key": "WM_BASE_URL", "secret_id": "wm-base-url", "description": "URL HTTPS de WM", "required": true, "editable": true},

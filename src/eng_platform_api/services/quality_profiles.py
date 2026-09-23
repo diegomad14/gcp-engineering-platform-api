@@ -72,8 +72,14 @@ _PROFILES = {
 
 
 def profile_for(service: CatalogService) -> QualityProfile:
+    # A GitHub rename does not change the quality contract of the same source
+    # repository. Derived runtimes consume this one repo-level execution.
+    legacy_name = {
+        "cgm-artemis-api": "cgm-sanplat-api",
+        "cgm-artemis-web": "cgm-sanplat-web",
+    }.get(service.service_name, service.service_name)
     try:
-        profile = _PROFILES[service.service_name]
+        profile = _PROFILES[legacy_name]
     except KeyError as exc:
         raise ValueError(
             f"No quality profile is defined for {service.service_name!r}"

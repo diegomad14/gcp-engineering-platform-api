@@ -107,6 +107,8 @@ def should_use_cloud_build(service_name: str, repository: str) -> bool:
         return False
     if service_name not in config.cloud_build.enabled_services:
         return False
+    if service_name in config.cloud_build.cloud_build_only_services:
+        return True
     if config.cloud_build.mode == "cloud_build":
         return True
     if config.cloud_build.mode == "github_actions":

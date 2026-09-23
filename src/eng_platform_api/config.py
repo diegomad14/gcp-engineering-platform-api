@@ -70,6 +70,7 @@ class CloudBuildConfig:
     repositories: dict[str, str] = field(default_factory=dict)
     callback_service_account: str = ""
     enabled_services: tuple[str, ...] = ()
+    cloud_build_only_services: tuple[str, ...] = ()
 
 
 @dataclass
@@ -266,7 +267,18 @@ def load_config() -> PlatformConfig:
             ).split(",")
             if service.strip()
         ),
+        cloud_build_only_services=tuple(
+            service.strip()
+            for service in os.getenv(
+                "ENG_PLATFORM_CLOUD_BUILD_ONLY_SERVICES", ""
+            ).split(",")
+            if service.strip()
+        ),
     )
+    if not set(cloud_build.cloud_build_only_services).issubset(
+        cloud_build.enabled_services
+    ):
+        raise ValueError("Cloud Build-only services must be enabled services")
     if cloud_build.enabled:
         if not (
             cloud_build.project_id

@@ -97,10 +97,23 @@ def register_quality_report(payload: QualityReportCreate):
 def get_quality_report(service_name: str, commit_sha: str, for_release: bool = False):
     """Return the exact evidence used to authorize a deployment."""
     report = quality_store.get_report(service_name, commit_sha)
+    service = catalog.get_service(service_name)
+    if report is None and service is not None:
+        for owner in service.quality.evidence_services:
+            report = quality_store.get_report(owner, commit_sha)
+            if report is not None:
+                break
     if report is None:
         raise HTTPException(status_code=404, detail="Quality report not found")
     if for_release:
-        errors = policy_errors(report, catalog.get_service(service_name))
+        if report.service_name not in {
+            service_name,
+            *(service.quality.evidence_services if service else []),
+        }:
+            raise HTTPException(
+                status_code=409, detail="Evidence owner is not allowlisted"
+            )
+        errors = policy_errors(report, service)
         if errors:
             raise HTTPException(status_code=409, detail={"quality_errors": errors})
     if _is_stale(report):

@@ -68,6 +68,27 @@ _PROFILES: dict[str, ReleaseProfile] = {
     ),
 }
 
+_ARTEMIS_SERVICES = (
+    "cgm-artemis-api",
+    "cgm-artemis-web",
+    "cgm-artemis-job-dispatcher",
+    "cgm-artemis-job-worker",
+    "cgm-artemis-sync-worker",
+    "cgm-artemis-clock-sync-worker",
+    "cgm-artemis-data-recovery-worker",
+    "cgm-artemis-fnd-ip-sync-worker",
+)
+_ARTEMIS_JOBS = (
+    "cgm-artemis-fnd-observation-worker",
+    "cgm-artemis-readings-export-worker",
+    "cgm-artemis-smarti-prevention-worker",
+    "cgm-artemis-wm-sweep-worker",
+)
+for _name in _ARTEMIS_SERVICES:
+    _PROFILES[_name] = ReleaseProfile(_name, 3600)
+for _name in _ARTEMIS_JOBS:
+    _PROFILES[_name] = ReleaseProfile(_name, 3600, rollback_mode="job_definition")
+
 
 def profile_for(service: CatalogService) -> ReleaseProfile:
     """Return the only profile permitted for a catalogued service."""

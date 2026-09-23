@@ -24,6 +24,7 @@ from . import (
     release_workflow_identity,
 )
 from .quality_profiles import executor_image, planner_hash, profile_for
+from .repository_identity import repository_id
 
 logger = logging.getLogger(__name__)
 _SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -47,6 +48,14 @@ def _owner(repository: str) -> str:
 
 def _service_enabled(service: CatalogService) -> bool:
     settings = config.release_orchestrator
+    # One quality/release execution per source repository. Derived Artemis
+    # runtimes consume the API repo's exact evidence instead of triggering
+    # one build per worker on the same SHA.
+    if (
+        service.quality.evidence_services
+        and service.service_name not in service.quality.evidence_services
+    ):
+        return False
     return settings.enabled and service.service_name in {
         *settings.enabled_services,
         *settings.canary_services,
@@ -54,11 +63,21 @@ def _service_enabled(service: CatalogService) -> bool:
 
 
 def _services(repository: str) -> list[CatalogService]:
-    return [
+    eligible = [
         service
         for service in catalog.get_services_by_repository(repository)
         if _service_enabled(service)
     ]
+    by_repository: dict[str, CatalogService] = {}
+    for service in eligible:
+        key = str(repository_id(service.repository) or service.repository.casefold())
+        previous = by_repository.get(key)
+        if previous is None or (
+            service.service_name.startswith("cgm-artemis-")
+            and not previous.service_name.startswith("cgm-artemis-")
+        ):
+            by_repository[key] = service
+    return list(by_repository.values())
 
 
 def _policy_hash(service: CatalogService) -> str:
@@ -142,6 +161,31 @@ def _reserve(
     image = executor_image(profile)
     plan_hash = planner_hash() if operation == "main_release" else ""
     policy_hash = _policy_hash(service)
+    previous = next(
+        (
+            item
+            for item in release_executions.list_for_repository(
+                service.repository, limit=200
+            )
+            if item.get("service_name")
+            in {
+                service.service_name,
+                *service.quality.evidence_services,
+            }
+            and item.get("operation") == operation
+            and item.get("head_sha") == head_sha.lower()
+            and item.get("base_sha") == base_sha.lower()
+            and item.get("profile_hash") == profile.fingerprint()
+            and item.get("executor_digest") == image
+            and item.get("policy_hash") == policy_hash
+            and item.get("planner_hash", "") == plan_hash
+        ),
+        None,
+    )
+    if previous:
+        # The original fingerprint and repository spelling are immutable.
+        # A GitHub rename must not reserve another build for the same intent.
+        return previous, False
     fingerprint_value = release_executions.fingerprint(
         repository=service.repository,
         service_name=service.service_name,
