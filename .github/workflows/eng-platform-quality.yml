@@ -19,15 +19,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
-      # pull_request_target keeps this workflow and its OIDC identity on main.
-      # The untrusted PR head is only mounted into credential-free containers.
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          repository: ${{ github.event.pull_request.head.repo.full_name }}
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
       - name: Resolve authorized execution
         id: execution
         env:
@@ -85,6 +76,26 @@ jobs:
             echo "Google credential file remained in the source checkout" >&2
             exit 1
           fi
+
+      - name: Fetch exact PR source after credential cleanup
+        env:
+          SOURCE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ steps.execution.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_LFS_SKIP_SMUDGE=1
+          git init --quiet "$GITHUB_WORKSPACE"
+          git -C "$GITHUB_WORKSPACE" fetch --quiet --no-tags \
+            "https://github.com/${SOURCE_REPOSITORY}.git" "$SOURCE_SHA"
+          git -C "$GITHUB_WORKSPACE" fetch --quiet --no-tags \
+            "https://github.com/${GITHUB_REPOSITORY}.git" "$BASE_SHA"
+          git -C "$GITHUB_WORKSPACE" -c filter.lfs.smudge= \
+            -c filter.lfs.required=false checkout --quiet --detach "$SOURCE_SHA"
+          test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$SOURCE_SHA"
 
       - name: Prepare isolated result volumes
         id: paths

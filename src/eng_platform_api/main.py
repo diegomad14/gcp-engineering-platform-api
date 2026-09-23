@@ -11,6 +11,7 @@ from time import monotonic
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.routing import BaseRoute, Match, NoMatchFound
 
@@ -166,6 +167,33 @@ async def root():
         "version": "0.5.0",
         "docs": "/docs",
     }
+
+
+@app.get("/.well-known/oauth-authorization-server", include_in_schema=False)
+async def oauth_authorization_server_metadata():
+    """Publish metadata matching the public-PKCE DCR provider contract."""
+    if not config.mcp.enabled:
+        return Response(status_code=404)
+    issuer = (config.mcp.issuer_url or config.mcp.public_base_url).rstrip("/")
+    return JSONResponse(
+        {
+            "issuer": issuer + "/",
+            "authorization_endpoint": issuer + "/authorize",
+            "token_endpoint": issuer + "/token",
+            "registration_endpoint": issuer + "/register",
+            "scopes_supported": [
+                "eng-platform.deploy",
+                "eng-platform.read",
+                "eng-platform.rollback",
+            ],
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "token_endpoint_auth_methods_supported": ["none"],
+            "revocation_endpoint": issuer + "/revoke",
+            "revocation_endpoint_auth_methods_supported": ["none"],
+            "code_challenge_methods_supported": ["S256"],
+        }
+    )
 
 
 # The MCP SDK provides RFC 9728 metadata, DCR, authorization, token,

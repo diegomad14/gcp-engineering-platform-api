@@ -241,6 +241,7 @@ def run(scanner: str, args: list[str]) -> int:
     if args == ["--version"] or args == ["version"]:
         return _run_process(binary, args, None)
     cleaned, target = _output_argument(scanner, args)
+    cleaned = _trusted_scan_args(scanner, cleaned)
     _validate_target(target)
     staging = _staging_directory()
     descriptor, capture_name = tempfile.mkstemp(
@@ -256,6 +257,14 @@ def run(scanner: str, args: list[str]) -> int:
         return returncode
     finally:
         capture_path.unlink(missing_ok=True)
+
+
+def _trusted_scan_args(scanner: str, args: list[str]) -> list[str]:
+    if scanner != "trivy":
+        return args
+    if any(item == "--ignorefile" or item.startswith("--ignorefile=") for item in args):
+        raise TrustedScannerError("Scanner ignore policy is server-owned")
+    return [*args, "--ignorefile", "/opt/eng-platform/trivyignore.yaml"]
 
 
 def main() -> int:
