@@ -53,6 +53,32 @@ def test_execution_variable_is_private_only_and_recovers_missing_variable(monkey
         control.set_repository_execution_mode("owner/repo", "other")
 
 
+def test_source_token_uses_public_integration_requester_and_read_only_scope(
+    monkeypatch,
+):
+    _repository(monkeypatch, SimpleNamespace(id=123))
+    monkeypatch.setattr(control.config.github, "app_id", "4321207")
+    monkeypatch.setattr(control.config.github, "installation_id", "159121904")
+    monkeypatch.setattr(control.config.github, "private_key", "test-key")
+    requester = mock.Mock()
+    requester.requestJsonAndCheck.return_value = (
+        {},
+        {"token": "read-token", "expires_at": "2026-09-23T21:00:00Z"},
+    )
+    integration = SimpleNamespace(requester=requester)
+    monkeypatch.setattr(control, "GithubIntegration", lambda *_: integration)
+
+    token, expires_at = control.installation_read_token("owner/repo")
+
+    assert token == "read-token"
+    assert expires_at == "2026-09-23T21:00:00Z"
+    requester.requestJsonAndCheck.assert_called_once_with(
+        "POST",
+        "/app/installations/159121904/access_tokens",
+        input={"repository_ids": [123], "permissions": {"contents": "read"}},
+    )
+
+
 def test_upsert_check_recovers_lost_create_by_external_id(monkeypatch):
     existing = SimpleNamespace(id=71, external_id="execution:quality")
     check = SimpleNamespace(id=71, edit=mock.Mock())
