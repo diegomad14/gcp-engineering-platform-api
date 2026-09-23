@@ -15,7 +15,9 @@ from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts/quality"))
 
+import quality_gate  # noqa: E402
 import quality_executor  # noqa: E402
 import quality_profiles  # noqa: E402
 import trusted_scanner  # noqa: E402
@@ -23,6 +25,19 @@ import untrusted_command  # noqa: E402
 
 
 class QualityProfilesTest(unittest.TestCase):
+    def test_trivy_uses_central_policy_only_for_pinned_executor(self) -> None:
+        report_directory = Path("/tmp/quality-reports")
+        trusted = quality_gate._defaults(
+            "node", report_directory, trusted_scanner_policy=True
+        )["trivy"]
+        legacy = quality_gate._defaults("node", report_directory)["trivy"]
+        self.assertNotIn("--ignorefile", trusted)
+        self.assertIn("--ignorefile .trivyignore.yaml", legacy)
+        self.assertIn(
+            "--ignorefile /opt/eng-platform/trivyignore.yaml",
+            " ".join(trusted_scanner._trusted_scan_args("trivy", trusted.split())),
+        )
+
     def test_pinned_scanner_binary_has_safe_image_permissions(self) -> None:
         if not Path("/usr/local/bin/trivy").exists():
             self.skipTest("Trivy is only installed in the executor image")
@@ -32,7 +47,9 @@ class QualityProfilesTest(unittest.TestCase):
 
     def test_scanner_private_runtime_is_outside_root_only_gate_tmp(self) -> None:
         with (
-            mock.patch.object(trusted_scanner.tempfile, "mkdtemp", return_value="/tmp/scanner-test") as make_dir,
+            mock.patch.object(
+                trusted_scanner.tempfile, "mkdtemp", return_value="/tmp/scanner-test"
+            ) as make_dir,
             mock.patch.object(trusted_scanner.os, "chown"),
             mock.patch.object(trusted_scanner.os, "chmod"),
         ):
@@ -480,8 +497,19 @@ while not os.path.exists(os.environ["ATTEMPT_MARKER"]):
                 f"+{base_sha}:refs/heads/eng-platform-quality-base",
             )
             isolated = root / "isolated"
-            git(root, "clone", "-q", "--local", "--no-single-branch", "--no-checkout", str(shallow), str(isolated))
-            self.assertEqual(base_sha, git(isolated, "rev-parse", f"{base_sha}^{{commit}}"))
+            git(
+                root,
+                "clone",
+                "-q",
+                "--local",
+                "--no-single-branch",
+                "--no-checkout",
+                str(shallow),
+                str(isolated),
+            )
+            self.assertEqual(
+                base_sha, git(isolated, "rev-parse", f"{base_sha}^{{commit}}")
+            )
 
     def test_prepare_rejects_repository_url_injection(self) -> None:
         identity = {
