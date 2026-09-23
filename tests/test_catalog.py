@@ -1,8 +1,11 @@
 """Tests for the flat service catalog."""
 
 from fastapi.testclient import TestClient
+from types import SimpleNamespace
 
 from eng_platform_api.main import app
+from eng_platform_api.services import catalog
+from eng_platform_api.config import config
 
 client = TestClient(app)
 
@@ -11,11 +14,22 @@ def test_list_services():
     response = client.get("/api/catalog/services")
     assert response.status_code == 200
     data = response.json()
-    assert data["total"] == 6
-    assert len(data["services"]) == 6
+    assert data["total"] == 18
+    assert len(data["services"]) == 18
     assert all("display_name" not in service for service in data["services"])
     names = {service["service_name"] for service in data["services"]}
     assert {"cgm-sanplat-api", "cgm-sanplat-web", "eng-platform-api"} <= names
+    artemis = [
+        service
+        for service in data["services"]
+        if service["service_name"].startswith("cgm-artemis-")
+    ]
+    assert len(artemis) == 12
+    assert all(not service["deployment_ready"] for service in artemis)
+    assert all(
+        service["repository"].startswith("diegomad14/cgm-artemis-")
+        for service in artemis
+    )
 
 
 def test_each_service_points_to_its_own_repository():
@@ -50,3 +64,29 @@ def test_get_service_not_found():
 
 def test_application_endpoints_are_removed():
     assert client.get("/api/catalog/apps").status_code == 404
+
+
+def test_job_health_reads_job_runtime_not_service_runtime(monkeypatch):
+    monkeypatch.setattr(config, "mock_mode", False)
+    monkeypatch.setattr(catalog, "_detail_cache", {})
+    job = SimpleNamespace(
+        terminal_condition=SimpleNamespace(
+            state=SimpleNamespace(name="CONDITION_SUCCEEDED")
+        ),
+        reconciling=False,
+        latest_created_execution=SimpleNamespace(
+            completion_status=SimpleNamespace(name="EXECUTION_SUCCEEDED")
+        ),
+        generation=7,
+    )
+    monkeypatch.setattr(
+        catalog, "_job_client", lambda: SimpleNamespace(get_job=lambda **kwargs: job)
+    )
+    monkeypatch.setattr(
+        catalog,
+        "_run_client",
+        lambda: (_ for _ in ()).throw(AssertionError("Service client used")),
+    )
+    detail = catalog.get_service_detail("cgm-artemis-wm-sweep-worker")
+    assert detail.status == "healthy"
+    assert detail.latest_ready_revision == "job-generation-7"

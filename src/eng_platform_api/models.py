@@ -21,6 +21,7 @@ class ServiceQualityConfig(BaseModel):
     coverage_threshold: float = 70.0
     policy_version: str = "oss-v2"
     differential_threshold: float = 80.0
+    evidence_services: list[str] = Field(default_factory=list)
 
 
 class ServiceDeploymentConfig(BaseModel):
@@ -29,6 +30,9 @@ class ServiceDeploymentConfig(BaseModel):
     image_name: str = ""
     artifact_repository: str = "cgm-sanplat-repo"
     build_context: str = "."
+    dockerfile_path: str = "Dockerfile"
+    runtime_kind: Literal["cloud_run_service", "cloud_run_job"] = "cloud_run_service"
+    private_runtime: bool = False
     health_path: str = "/"
     api_base_url: str = ""
     api_candidate_base_url: str = ""

@@ -6,6 +6,22 @@ from eng_platform_api.services import github_actions_quota as quota
 from eng_platform_api.services import github_deployments
 
 
+def test_artemis_cloud_build_only_policy_is_backend_owned(monkeypatch):
+    monkeypatch.setattr(quota.config.cloud_build, "enabled", True)
+    monkeypatch.setattr(
+        quota.config.cloud_build, "enabled_services", ("cgm-artemis-sync-worker",)
+    )
+    monkeypatch.setattr(
+        quota.config.cloud_build,
+        "cloud_build_only_services",
+        ("cgm-artemis-sync-worker",),
+    )
+    monkeypatch.setattr(quota.config.cloud_build, "mode", "auto")
+    assert quota.should_use_cloud_build(
+        "cgm-artemis-sync-worker", "diegomad14/cgm-artemis-api"
+    )
+
+
 def test_public_repository_never_uses_cloud_build(monkeypatch):
     monkeypatch.setattr(quota.config.cloud_build, "enabled", True)
     monkeypatch.setattr(quota.config.cloud_build, "enabled_services", ("public",))

@@ -8,6 +8,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 
 from ..config import config
 from ..services import catalog, github_webhooks, release_orchestrator
+from ..services.repository_identity import verify_webhook_identity
 
 router = APIRouter(prefix="/api/internal/github", tags=["internal"])
 
@@ -43,6 +44,10 @@ async def github_event(
     repository = str(payload.get("repository", {}).get("full_name", ""))
     if not repository or not catalog.get_services_by_repository(repository):
         raise HTTPException(status_code=403, detail="Repository is not managed")
+    if not config.mock_mode and not verify_webhook_identity(
+        repository, payload.get("repository", {}).get("id")
+    ):
+        raise HTTPException(status_code=403, detail="GitHub repository ID mismatch")
     installation_id = str(payload.get("installation", {}).get("id", ""))
     if config.github.installation_id and installation_id != str(
         config.github.installation_id

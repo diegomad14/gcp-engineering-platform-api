@@ -5,6 +5,7 @@ import math
 import re
 
 from ..models import CatalogService, QualityReportCreate
+from .repository_identity import same_repository
 
 POLICY_VERSION = "oss-v2"
 _REQUIRED = {
@@ -26,7 +27,7 @@ def policy_errors(
         return ["Unknown catalog service"]
     errors = []
     if (
-        report.repository != service.repository
+        not same_repository(report.repository, service.repository)
         or report.profile != service.quality.profile
     ):
         errors.append("Repository or profile does not match the catalog")
