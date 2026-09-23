@@ -11,6 +11,7 @@ on:
         default: release-executor
         options:
           - release-executor
+          - quality
           - all
 
 permissions:
@@ -69,13 +70,15 @@ jobs:
           }
 
           : > "$RUNNER_TEMP/tooling-digests"
-          if [[ "$COMPONENT" == all ]]; then
+          if [[ "$COMPONENT" == all || "$COMPONENT" == quality ]]; then
             build_and_push quality-python docker/quality-executor/Dockerfile.python
             build_and_push quality-node docker/quality-executor/Dockerfile.node
             build_and_push release-planner docker/release-planner/Dockerfile
           fi
-          build_and_push eng-platform-release-executor \
-            docker/release-executor/Dockerfile docker/release-executor
+          if [[ "$COMPONENT" == all || "$COMPONENT" == release-executor ]]; then
+            build_and_push eng-platform-release-executor \
+              docker/release-executor/Dockerfile docker/release-executor
+          fi
 
           {
             echo '### Immutable release tooling'
