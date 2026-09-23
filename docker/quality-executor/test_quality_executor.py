@@ -404,6 +404,10 @@ while not os.path.exists(os.environ["ATTEMPT_MARKER"]):
 
         fetch_args, fetch_environment = calls[0]
         self.assertIn("https://github.com/diegomad14/eng-platform-api.git", fetch_args)
+        self.assertIn(
+            "+" + identity["base_sha"] + ":refs/heads/eng-platform-quality-base",
+            fetch_args,
+        )
         self.assertNotIn("origin", fetch_args)
         self.assertIsNotNone(fetch_environment)
         assert fetch_environment is not None
@@ -420,6 +424,46 @@ while not os.path.exists(os.environ["ATTEMPT_MARKER"]):
             base64.b64decode(encoded, validate=True).decode(),
         )
         self.assertEqual("false", fetch_environment["GIT_CONFIG_VALUE_1"])
+
+    def test_shallow_source_keeps_fetched_base_in_isolated_clone(self) -> None:
+        def git(cwd: Path, *args: str) -> str:
+            return subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ).stdout.strip()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            git(repository, "init", "-q")
+            git(repository, "config", "user.email", "quality@example.test")
+            git(repository, "config", "user.name", "Quality Test")
+            (repository / "source.txt").write_text("base\n")
+            git(repository, "add", "source.txt")
+            git(repository, "commit", "-qm", "base")
+            base_sha = git(repository, "rev-parse", "HEAD")
+            (repository / "source.txt").write_text("head\n")
+            git(repository, "commit", "-qam", "head")
+            head_sha = git(repository, "rev-parse", "HEAD")
+
+            shallow = root / "shallow"
+            git(root, "clone", "-q", "--depth=1", repository.as_uri(), str(shallow))
+            self.assertEqual(head_sha, git(shallow, "rev-parse", "HEAD"))
+            git(
+                shallow,
+                "fetch",
+                "-q",
+                repository.as_uri(),
+                f"+{base_sha}:refs/heads/eng-platform-quality-base",
+            )
+            isolated = root / "isolated"
+            git(root, "clone", "-q", "--local", "--no-single-branch", "--no-checkout", str(shallow), str(isolated))
+            self.assertEqual(base_sha, git(isolated, "rev-parse", f"{base_sha}^{{commit}}"))
 
     def test_prepare_rejects_repository_url_injection(self) -> None:
         identity = {

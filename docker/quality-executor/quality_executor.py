@@ -307,7 +307,7 @@ def _prepare_history(source: Path, identity: dict[str, str]) -> None:
             "--force",
             "--no-recurse-submodules",
             repository_url,
-            identity["base_sha"],
+            f"+{identity['base_sha']}:refs/heads/eng-platform-quality-base",
             "+refs/tags/*:refs/tags/*",
             env=environment,
         )
@@ -354,6 +354,7 @@ def _isolated_checkout(
             f"safe.directory={source}",
             "clone",
             "--local",
+            "--no-single-branch",
             "--no-hardlinks",
             "--no-checkout",
             "--no-recurse-submodules",
