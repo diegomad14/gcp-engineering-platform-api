@@ -173,6 +173,7 @@ def _defaults(profile: str, report_dir: Path) -> dict[str, str]:
         ),
         "trivy": (
             "trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL "
+            "--ignorefile .trivyignore.yaml "
             f"--skip-dirs {shlex.quote(str(report_dir))} "
             f"--exit-code 1 --format json --output {shlex.quote(str(trivy_file))} ."
         ),

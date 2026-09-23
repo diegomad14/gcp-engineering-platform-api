@@ -11,6 +11,14 @@ from eng_platform_api.services import github_deployments
 
 
 FINGERPRINT = "a" * 64
+REPOSITORY_RESOURCE = (
+    "projects/cgm-assistant-prod/locations/us-central1/"
+    "connections/github/repositories/eng-platform-api"
+)
+SERVICE_ACCOUNT = (
+    "projects/cgm-assistant-prod/serviceAccounts/"
+    "release@example.iam.gserviceaccount.com"
+)
 
 
 def _item(*, kind: str = "deploy") -> DeploymentItem:
@@ -49,6 +57,16 @@ def callback_mocks(monkeypatch):
     }
     monkeypatch.setattr(deployment_events, "_verify_identity", lambda _: None)
     monkeypatch.setattr(
+        deployment_events.config.cloud_build,
+        "repositories",
+        {item.service_name: REPOSITORY_RESOURCE},
+    )
+    monkeypatch.setattr(
+        deployment_events.config.cloud_build,
+        "service_account",
+        SERVICE_ACCOUNT,
+    )
+    monkeypatch.setattr(
         deployment_events.deployment_executions, "get", lambda _: execution
     )
     monkeypatch.setattr(deployment_events.deployment_store, "get", lambda _: item)
@@ -56,11 +74,23 @@ def callback_mocks(monkeypatch):
         deployment_events.cloud_build,
         "get_build",
         lambda _: {
+            "id": "build-1",
+            "source": {
+                "connectedRepository": {
+                    "repository": REPOSITORY_RESOURCE,
+                    "revision": item.sha,
+                }
+            },
+            "serviceAccount": SERVICE_ACCOUNT,
             "substitutions": {
                 "_REQUEST_FINGERPRINT": FINGERPRINT,
                 "_DEPLOYMENT_ID": item.id,
+                "_SERVICE_NAME": item.service_name,
+                "_REPOSITORY": item.repository,
+                "_RELEASE_TAG": item.tag,
                 "_RELEASE_SHA": item.sha,
-            }
+                "_OPERATION": item.kind,
+            },
         },
     )
     monkeypatch.setattr(
@@ -184,6 +214,54 @@ def test_callback_rejects_build_substitution_mismatch(callback_mocks, monkeypatc
         "get_build",
         lambda _: {"substitutions": {"_RELEASE_SHA": "wrong"}},
     )
+    with pytest.raises(HTTPException) as mismatch:
+        deployment_events.accept_event(item.id, _payload(), authorization="Bearer test")
+    assert mismatch.value.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "build_change",
+    [
+        {"id": "different-build"},
+        {
+            "source": {
+                "connectedRepository": {
+                    "repository": REPOSITORY_RESOURCE,
+                    "revision": "c" * 40,
+                }
+            }
+        },
+        {"serviceAccount": "projects/example/serviceAccounts/other@example.com"},
+    ],
+)
+def test_callback_rejects_actual_build_identity_mismatch(
+    callback_mocks, monkeypatch, build_change
+):
+    item, _execution, _saved, _status = callback_mocks
+    build = {
+        "id": "build-1",
+        "source": {
+            "connectedRepository": {
+                "repository": REPOSITORY_RESOURCE,
+                "revision": item.sha,
+            }
+        },
+        "serviceAccount": SERVICE_ACCOUNT,
+        "substitutions": {
+            "_REQUEST_FINGERPRINT": FINGERPRINT,
+            "_DEPLOYMENT_ID": item.id,
+            "_SERVICE_NAME": item.service_name,
+            "_REPOSITORY": item.repository,
+            "_RELEASE_TAG": item.tag,
+            "_RELEASE_SHA": item.sha,
+            "_OPERATION": item.kind,
+        },
+    }
+    build.update(build_change)
+    monkeypatch.setattr(
+        deployment_events.cloud_build, "get_build", lambda _build_id: build
+    )
+
     with pytest.raises(HTTPException) as mismatch:
         deployment_events.accept_event(item.id, _payload(), authorization="Bearer test")
     assert mismatch.value.status_code == 403

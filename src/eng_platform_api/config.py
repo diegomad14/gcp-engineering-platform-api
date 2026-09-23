@@ -9,6 +9,12 @@ import os
 from dataclasses import dataclass, field
 
 
+def _service_account_subject(value: str) -> str:
+    """Normalize a Cloud Build resource name to the OIDC email subject."""
+    marker = "/serviceAccounts/"
+    return value.rsplit(marker, 1)[-1] if marker in value else value
+
+
 @dataclass
 class BillingConfig:
     enabled: bool = False
@@ -67,6 +73,36 @@ class CloudBuildConfig:
 
 
 @dataclass
+class ReleaseOrchestratorConfig:
+    """Private CI/release fallback configuration.
+
+    This plane is intentionally separate from the deployment executor: quality
+    images never receive deployment permissions and the deployment image does
+    not grow test or scanner tooling.
+    """
+
+    enabled: bool = False
+    execution_collection: str = "release_executions"
+    circuit_collection: str = "executor_circuits"
+    webhook_delivery_collection: str = "github_webhook_deliveries"
+    webhook_secret: str = ""
+    enabled_services: tuple[str, ...] = ()
+    canary_services: tuple[str, ...] = ()
+    service_account: str = ""
+    callback_service_account: str = ""
+    reconciler_service_account: str = ""
+    quality_node_image: str = ""
+    quality_python_image: str = ""
+    release_planner_image: str = ""
+    postgres_image: str = ""
+    github_mode_variable: str = "ENG_PLATFORM_CI_EXECUTOR"
+    github_health_repository: str = ""
+    github_health_workflow: str = "eng-platform-actions-health.yml"
+    build_minute_price_usd: float = 0.006
+    usage_alert_minutes: tuple[int, ...] = (2000, 2250, 2500)
+
+
+@dataclass
 class AuthConfig:
     github_client_id: str = ""
     github_client_secret: str = ""
@@ -113,6 +149,9 @@ class PlatformConfig:
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
     cloud_build: CloudBuildConfig = field(default_factory=CloudBuildConfig)
+    release_orchestrator: ReleaseOrchestratorConfig = field(
+        default_factory=ReleaseOrchestratorConfig
+    )
     auth: AuthConfig = field(default_factory=AuthConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
     sonarqube: SonarQubeConfig = field(default_factory=SonarQubeConfig)
@@ -228,6 +267,173 @@ def load_config() -> PlatformConfig:
             if service.strip()
         ),
     )
+    if cloud_build.enabled:
+        if not (
+            cloud_build.project_id
+            and cloud_build.service_account
+            and cloud_build.callback_service_account
+            and cloud_build.evidence_bucket
+        ):
+            raise ValueError(
+                "Cloud Build project, build/callback identity and evidence bucket are required"
+            )
+        if "@sha256:" not in cloud_build.executor_image:
+            raise ValueError(
+                "Cloud Build release executor image must be pinned by digest"
+            )
+        if _service_account_subject(cloud_build.service_account) != (
+            _service_account_subject(cloud_build.callback_service_account)
+        ):
+            raise ValueError(
+                "Cloud Build callback and build service accounts must identify the same account"
+            )
+
+    release_orchestrator = ReleaseOrchestratorConfig(
+        enabled=os.getenv("ENG_PLATFORM_RELEASE_ORCHESTRATOR_ENABLED", "false").lower()
+        == "true",
+        execution_collection=os.getenv(
+            "ENG_PLATFORM_RELEASE_EXECUTION_FIRESTORE_COLLECTION",
+            "release_executions",
+        ).strip(),
+        circuit_collection=os.getenv(
+            "ENG_PLATFORM_EXECUTOR_CIRCUIT_FIRESTORE_COLLECTION",
+            "executor_circuits",
+        ).strip(),
+        webhook_delivery_collection=os.getenv(
+            "ENG_PLATFORM_GITHUB_WEBHOOK_DELIVERY_FIRESTORE_COLLECTION",
+            "github_webhook_deliveries",
+        ).strip(),
+        webhook_secret=os.getenv("ENG_PLATFORM_GITHUB_WEBHOOK_SECRET", ""),
+        enabled_services=tuple(
+            service.strip()
+            for service in os.getenv("ENG_PLATFORM_RELEASE_ENABLED_SERVICES", "").split(
+                ","
+            )
+            if service.strip()
+        ),
+        canary_services=tuple(
+            service.strip()
+            for service in os.getenv("ENG_PLATFORM_RELEASE_CANARY_SERVICES", "").split(
+                ","
+            )
+            if service.strip()
+        ),
+        service_account=os.getenv(
+            "ENG_PLATFORM_RELEASE_QUALITY_SERVICE_ACCOUNT",
+            os.getenv("ENG_PLATFORM_CLOUD_BUILD_SERVICE_ACCOUNT", ""),
+        ).strip(),
+        callback_service_account=os.getenv(
+            "ENG_PLATFORM_RELEASE_CALLBACK_SERVICE_ACCOUNT",
+            os.getenv("ENG_PLATFORM_CLOUD_BUILD_CALLBACK_SERVICE_ACCOUNT", ""),
+        ).strip(),
+        reconciler_service_account=os.getenv(
+            "ENG_PLATFORM_RELEASE_RECONCILER_SERVICE_ACCOUNT", ""
+        ).strip(),
+        quality_node_image=os.getenv("ENG_PLATFORM_QUALITY_NODE_IMAGE", "").strip(),
+        quality_python_image=os.getenv("ENG_PLATFORM_QUALITY_PYTHON_IMAGE", "").strip(),
+        release_planner_image=os.getenv(
+            "ENG_PLATFORM_RELEASE_PLANNER_IMAGE", ""
+        ).strip(),
+        postgres_image=os.getenv("ENG_PLATFORM_RELEASE_POSTGRES_IMAGE", "").strip(),
+        github_mode_variable=os.getenv(
+            "ENG_PLATFORM_GITHUB_MODE_VARIABLE", "ENG_PLATFORM_CI_EXECUTOR"
+        ).strip(),
+        github_health_repository=os.getenv(
+            "ENG_PLATFORM_GITHUB_HEALTH_REPOSITORY", ""
+        ).strip(),
+        github_health_workflow=os.getenv(
+            "ENG_PLATFORM_GITHUB_HEALTH_WORKFLOW",
+            "eng-platform-actions-health.yml",
+        ).strip(),
+        build_minute_price_usd=float(
+            os.getenv("ENG_PLATFORM_CLOUD_BUILD_MINUTE_PRICE_USD", "0.006")
+        ),
+        usage_alert_minutes=tuple(
+            int(value.strip())
+            for value in os.getenv(
+                "ENG_PLATFORM_CLOUD_BUILD_USAGE_ALERT_MINUTES", "2000,2250,2500"
+            ).split(",")
+            if value.strip()
+        ),
+    )
+    if release_orchestrator.enabled:
+        if not release_orchestrator.webhook_secret:
+            raise ValueError(
+                "ENG_PLATFORM_GITHUB_WEBHOOK_SECRET is required for release orchestration"
+            )
+        if not release_orchestrator.service_account:
+            raise ValueError("ENG_PLATFORM_RELEASE_QUALITY_SERVICE_ACCOUNT is required")
+        if not release_orchestrator.callback_service_account:
+            raise ValueError(
+                "ENG_PLATFORM_RELEASE_CALLBACK_SERVICE_ACCOUNT is required"
+            )
+        if not release_orchestrator.reconciler_service_account:
+            raise ValueError(
+                "ENG_PLATFORM_RELEASE_RECONCILER_SERVICE_ACCOUNT is required"
+            )
+        if _service_account_subject(
+            release_orchestrator.callback_service_account
+        ) != _service_account_subject(release_orchestrator.service_account):
+            raise ValueError(
+                "Release callback and quality build service accounts must match"
+            )
+        if _service_account_subject(
+            release_orchestrator.reconciler_service_account
+        ) in {
+            _service_account_subject(release_orchestrator.service_account),
+            _service_account_subject(release_orchestrator.callback_service_account),
+        }:
+            raise ValueError(
+                "Release reconciler service account must be separate from the build identity"
+            )
+        if _service_account_subject(
+            release_orchestrator.service_account
+        ) == _service_account_subject(cloud_build.service_account):
+            raise ValueError(
+                "Release quality and deployment builds require separate service accounts"
+            )
+        if not (github.app_id and github.installation_id and github.private_key):
+            raise ValueError(
+                "GitHub App credentials are required for release orchestration"
+            )
+        if not github.platform_api_url:
+            raise ValueError(
+                "ENG_PLATFORM_API_URL is required for release orchestration"
+            )
+        if not cloud_build.enabled or not cloud_build.project_id:
+            raise ValueError("Cloud Build must be configured for release fallback")
+        if not cloud_build.evidence_bucket:
+            raise ValueError("Cloud Build evidence bucket is required")
+        quality_bucket = os.getenv("ENG_PLATFORM_QUALITY_BUCKET", "").strip()
+        if not quality_bucket or quality_bucket != cloud_build.evidence_bucket:
+            raise ValueError(
+                "Release orchestration requires one shared Cloud Build/quality evidence bucket"
+            )
+        missing_repositories = (
+            set(release_orchestrator.enabled_services)
+            | set(release_orchestrator.canary_services)
+        ).difference(cloud_build.repositories)
+        if missing_repositories:
+            raise ValueError(
+                "Connected repositories are missing for release services: "
+                + ", ".join(sorted(missing_repositories))
+            )
+        images = (
+            release_orchestrator.quality_node_image,
+            release_orchestrator.quality_python_image,
+            release_orchestrator.release_planner_image,
+        )
+        if any("@sha256:" not in image for image in images):
+            raise ValueError("Release orchestrator images must be pinned by digest")
+        overlap = set(release_orchestrator.enabled_services).intersection(
+            release_orchestrator.canary_services
+        )
+        if overlap:
+            raise ValueError("Release services cannot be both canary and auto")
+        if release_orchestrator.build_minute_price_usd < 0:
+            raise ValueError("Cloud Build minute price cannot be negative")
+        if any(value <= 0 for value in release_orchestrator.usage_alert_minutes):
+            raise ValueError("Cloud Build usage alert thresholds must be positive")
 
     auth = AuthConfig(
         github_client_id=os.getenv("ENG_PLATFORM_GITHUB_OAUTH_CLIENT_ID", ""),
@@ -292,6 +498,7 @@ def load_config() -> PlatformConfig:
         monitoring=monitoring,
         github=github,
         cloud_build=cloud_build,
+        release_orchestrator=release_orchestrator,
         auth=auth,
         mcp=mcp,
         sonarqube=sonarqube,

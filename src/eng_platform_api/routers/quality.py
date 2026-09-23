@@ -83,7 +83,10 @@ def _project(report: QualityReport) -> QualityProject:
 )
 def register_quality_report(payload: QualityReportCreate):
     """Register an idempotent quality result for one service and commit."""
-    report = quality_store.save_report(payload)
+    try:
+        report = quality_store.save_report(payload)
+    except quality_store.QualityEvidenceConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     _invalidate_summary_cache()
     return report
 

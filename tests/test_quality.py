@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 from unittest import mock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from eng_platform_api.main import app
@@ -11,7 +12,9 @@ from eng_platform_api.models import (
     CatalogService,
     QualityProject,
     QualityReport,
+    QualityReportCreate,
 )
+from eng_platform_api.services import quality_store
 
 client = TestClient(app)
 
@@ -77,6 +80,57 @@ def test_quality_report_is_idempotent_and_queryable(tmp_path, monkeypatch):
     history = client.get("/api/quality/services/test-api/reports")
     assert history.status_code == 200
     assert len(history.json()) == 1
+
+
+def test_legacy_report_cannot_be_adopted_as_orchestrated_evidence(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("ENG_PLATFORM_QUALITY_STORE_PATH", str(tmp_path))
+    report = QualityReportCreate.model_validate(_payload())
+    quality_store.save_report(report)
+
+    with pytest.raises(
+        quality_store.QualityEvidenceConflict,
+        match="Legacy quality evidence cannot authorize",
+    ):
+        quality_store.save_immutable_report(
+            report,
+            fingerprint="f" * 64,
+            provider="cloud_build",
+            provider_run_id="build-1",
+            executor_digest="image@sha256:" + "1" * 64,
+            profile_hash="2" * 64,
+            policy_hash="3" * 64,
+            operation="main_release",
+        )
+
+
+def test_orchestrated_report_is_idempotent_and_blocks_legacy_overwrite(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("ENG_PLATFORM_QUALITY_STORE_PATH", str(tmp_path))
+    report = QualityReportCreate.model_validate(_payload())
+    arguments = {
+        "fingerprint": "f" * 64,
+        "provider": "cloud_build",
+        "provider_run_id": "build-1",
+        "executor_digest": "image@sha256:" + "1" * 64,
+        "profile_hash": "2" * 64,
+        "policy_hash": "3" * 64,
+        "operation": "main_release",
+    }
+
+    first, first_hash = quality_store.save_immutable_report(report, **arguments)
+    second, second_hash = quality_store.save_immutable_report(report, **arguments)
+
+    assert first_hash == second_hash
+    assert first.model_dump() == second.model_dump()
+    conflicting = report.model_copy(update={"generated_at": "2026-09-22T00:00:00Z"})
+    with pytest.raises(
+        quality_store.QualityEvidenceConflict,
+        match="cannot be overwritten",
+    ):
+        quality_store.save_report(conflicting)
 
 
 def test_coverage_below_threshold_fails_gate(tmp_path, monkeypatch):

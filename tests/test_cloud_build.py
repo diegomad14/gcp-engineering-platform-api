@@ -1,6 +1,7 @@
 """Economic, immutable Cloud Build request and idempotency contracts."""
 
 import json
+import copy
 from unittest import mock
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -115,6 +116,95 @@ def test_conflicting_executor_image_settings_fail_closed(monkeypatch):
         load_config()
 
 
+def _release_orchestrator_environment(monkeypatch):
+    quality_email = "quality@test-project.iam.gserviceaccount.com"
+    quality_identity = "projects/test-project/serviceAccounts/" + quality_email
+    deploy_email = "deploy@test-project.iam.gserviceaccount.com"
+    deploy_identity = "projects/test-project/serviceAccounts/" + deploy_email
+    values = {
+        "ENG_PLATFORM_RELEASE_ORCHESTRATOR_ENABLED": "true",
+        "ENG_PLATFORM_GITHUB_WEBHOOK_SECRET": "webhook-secret",
+        "ENG_PLATFORM_RELEASE_QUALITY_SERVICE_ACCOUNT": quality_identity,
+        "ENG_PLATFORM_RELEASE_CALLBACK_SERVICE_ACCOUNT": quality_email,
+        "ENG_PLATFORM_GITHUB_APP_ID": "123",
+        "ENG_PLATFORM_GITHUB_INSTALLATION_ID": "456",
+        "ENG_PLATFORM_GITHUB_PRIVATE_KEY": "private-key",
+        "ENG_PLATFORM_API_URL": "https://api.example.test",
+        "ENG_PLATFORM_CLOUD_BUILD_ENABLED": "true",
+        "ENG_PLATFORM_CLOUD_BUILD_PROJECT_ID": "test-project",
+        "ENG_PLATFORM_CLOUD_BUILD_SERVICE_ACCOUNT": deploy_identity,
+        "ENG_PLATFORM_CLOUD_BUILD_CALLBACK_SERVICE_ACCOUNT": deploy_email,
+        "ENG_PLATFORM_RELEASE_EXECUTOR_IMAGE": "registry/release@sha256:" + "4" * 64,
+        "ENG_PLATFORM_CLOUD_BUILD_EVIDENCE_BUCKET": "evidence-bucket",
+        "ENG_PLATFORM_QUALITY_BUCKET": "evidence-bucket",
+        "ENG_PLATFORM_QUALITY_NODE_IMAGE": "registry/node@sha256:" + "1" * 64,
+        "ENG_PLATFORM_QUALITY_PYTHON_IMAGE": "registry/python@sha256:" + "2" * 64,
+        "ENG_PLATFORM_RELEASE_PLANNER_IMAGE": "registry/planner@sha256:" + "3" * 64,
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("ENG_PLATFORM_RELEASE_RECONCILER_SERVICE_ACCOUNT", raising=False)
+    return quality_email
+
+
+def test_release_orchestrator_requires_dedicated_reconciler_identity(monkeypatch):
+    _release_orchestrator_environment(monkeypatch)
+
+    with pytest.raises(
+        ValueError, match="ENG_PLATFORM_RELEASE_RECONCILER_SERVICE_ACCOUNT"
+    ):
+        load_config()
+
+
+def test_release_reconciler_identity_cannot_equal_untrusted_build_identity(
+    monkeypatch,
+):
+    quality_identity = _release_orchestrator_environment(monkeypatch)
+    monkeypatch.setenv(
+        "ENG_PLATFORM_RELEASE_RECONCILER_SERVICE_ACCOUNT", quality_identity
+    )
+
+    with pytest.raises(ValueError, match="must be separate from the build identity"):
+        load_config()
+
+
+def test_release_orchestrator_accepts_resource_and_email_for_same_build_account(
+    monkeypatch,
+):
+    _release_orchestrator_environment(monkeypatch)
+    reconciler = "reconciler@test-project.iam.gserviceaccount.com"
+    monkeypatch.setenv("ENG_PLATFORM_RELEASE_RECONCILER_SERVICE_ACCOUNT", reconciler)
+
+    loaded = load_config()
+
+    assert loaded.release_orchestrator.service_account.startswith(
+        "projects/test-project/serviceAccounts/quality@"
+    )
+    assert (
+        loaded.release_orchestrator.callback_service_account
+        == "quality@test-project.iam.gserviceaccount.com"
+    )
+    assert loaded.release_orchestrator.reconciler_service_account == reconciler
+
+
+def test_quality_and_deployment_builds_cannot_share_identity(monkeypatch):
+    quality_email = _release_orchestrator_environment(monkeypatch)
+    monkeypatch.setenv(
+        "ENG_PLATFORM_RELEASE_RECONCILER_SERVICE_ACCOUNT",
+        "reconciler@test-project.iam.gserviceaccount.com",
+    )
+    monkeypatch.setenv(
+        "ENG_PLATFORM_CLOUD_BUILD_SERVICE_ACCOUNT",
+        "projects/test-project/serviceAccounts/" + quality_email,
+    )
+    monkeypatch.setenv(
+        "ENG_PLATFORM_CLOUD_BUILD_CALLBACK_SERVICE_ACCOUNT", quality_email
+    )
+
+    with pytest.raises(ValueError, match="require separate service accounts"):
+        load_config()
+
+
 def test_build_request_has_fixed_economy_contract():
     service = catalog.get_service("eng-platform-api")
     assert service is not None
@@ -176,6 +266,41 @@ def test_submit_reuses_matching_build_instead_of_posting_twice(monkeypatch):
     assert result.logs_url == existing["logUrl"]
     session.post.assert_not_called()
     assert deployment_executions.get(item.id)["build_id"] == "build-1"
+
+
+def test_submission_reconciliation_requires_exact_source_and_service_account(
+    monkeypatch,
+):
+    service = catalog.get_service("eng-platform-api")
+    assert service is not None
+    item = _item()
+    request = cloud_build.build_request(item, service)
+    expected = {
+        "id": "expected-build",
+        "source": request["source"],
+        "serviceAccount": request["serviceAccount"],
+        "substitutions": request["substitutions"],
+    }
+    wrong_source = copy.deepcopy(expected)
+    wrong_source["id"] = "wrong-source"
+    wrong_source["source"]["connectedRepository"]["revision"] = "c" * 40
+    wrong_account = copy.deepcopy(expected)
+    wrong_account["id"] = "wrong-account"
+    wrong_account["serviceAccount"] = (
+        "projects/cgm-assistant-prod/serviceAccounts/other@example.com"
+    )
+    response = mock.MagicMock(status_code=200)
+    response.json.return_value = {"builds": [wrong_source, wrong_account, expected]}
+    session = mock.MagicMock()
+    session.get.return_value = response
+    monkeypatch.setattr(cloud_build, "_session", lambda: session)
+
+    assert (
+        cloud_build._matching_build(
+            item, request["substitutions"]["_REQUEST_FINGERPRINT"]
+        )
+        == expected
+    )
 
 
 def test_submit_claim_allows_only_one_external_post(monkeypatch):

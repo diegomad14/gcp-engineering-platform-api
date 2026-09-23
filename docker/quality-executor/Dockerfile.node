@@ -1,0 +1,26 @@
+FROM node:22.19.0-bookworm-slim
+
+ARG TRIVY_VERSION=0.72.0
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl git python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m pip install --break-system-packages --no-cache-dir \
+        pytest-cov==7.0.0 ruff==0.15.22 semgrep==1.136.0 \
+    && curl --fail --location --silent --show-error \
+        "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+        | tar -xz -C /usr/local/bin trivy
+
+COPY scripts/quality/quality_gate.py scripts/quality/differential_coverage.py /opt/eng-platform/
+COPY docker/quality-executor/trivyignore.yaml /opt/eng-platform/trivyignore.yaml
+COPY docker/quality-executor/quality_executor.py docker/quality-executor/quality_profiles.py docker/quality-executor/untrusted_command.py docker/quality-executor/trusted_scanner.py docker/quality-executor/trusted_scanner.sh docker/quality-executor/test_quality_executor.py /opt/eng-platform/
+COPY src/eng_platform_api/release_quality_profiles.json /opt/eng-platform/release_quality_profiles.json
+RUN mkdir -p /opt/eng-platform/trusted-bin \
+    && install -m 0555 /opt/eng-platform/trusted_scanner.sh /opt/eng-platform/trusted-bin/semgrep \
+    && install -m 0555 /opt/eng-platform/trusted_scanner.sh /opt/eng-platform/trusted-bin/trivy \
+    && chmod 0555 /opt/eng-platform/quality_executor.py /opt/eng-platform/untrusted_command.py /opt/eng-platform/trusted_scanner.py \
+    && chmod 0444 /opt/eng-platform/release_quality_profiles.json /opt/eng-platform/trivyignore.yaml \
+    && cd /opt/eng-platform \
+    && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_quality_executor.py
+
+ENTRYPOINT ["python3", "/opt/eng-platform/quality_executor.py"]

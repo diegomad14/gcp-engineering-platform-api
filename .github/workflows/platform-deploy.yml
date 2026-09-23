@@ -1,4 +1,5 @@
 name: Platform Deploy
+run-name: eng-platform-deploy-${{ inputs.github_deployment_id }}
 
 on:
   workflow_dispatch:

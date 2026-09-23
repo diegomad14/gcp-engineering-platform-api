@@ -1,0 +1,25 @@
+name: Engineering Platform Actions Health
+run-name: eng-platform-health-${{ inputs.probe_nonce }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      probe_nonce:
+        description: Opaque probe correlation
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Confirm a private hosted runner actually started
+        env:
+          PROBE_NONCE: ${{ inputs.probe_nonce }}
+        run: |
+          set -euo pipefail
+          [[ "$PROBE_NONCE" =~ ^[A-Za-z0-9._-]{1,64}$ ]]
+          echo "GitHub-hosted runner started successfully."

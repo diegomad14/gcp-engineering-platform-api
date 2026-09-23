@@ -116,12 +116,48 @@ def should_use_cloud_build(service_name: str, repository: str) -> bool:
             return False
     except Exception:
         return False
+    from . import executor_circuits
+
+    owner = config.github.billing_owner or repository.split("/", 1)[0]
+    if executor_circuits.is_open(owner):
+        return True
     usage = current_usage()
-    return bool(usage and usage.exhausted)
+    if usage and usage.exhausted:
+        executor_circuits.open_circuit(
+            owner,
+            reason="included_private_minutes_exhausted",
+            repository=repository,
+            evidence=f"private_linux_minutes={usage.private_linux_minutes}",
+        )
+        return True
+    return False
 
 
 def is_quota_error(error: BaseException | str) -> bool:
-    text = str(error).lower()
+    # A GitHubDispatchError deliberately keeps its public message generic.
+    # Classify only the original ``workflow_dispatch`` response retained on
+    # the exception; failures before dispatch (status creation, auth, etc.)
+    # must never switch providers even when their text happens to mention
+    # billing.
+    dispatch_attempted = getattr(error, "dispatch_attempted", None)
+    if dispatch_attempted is False:
+        return False
+    dispatch_detail = str(getattr(error, "dispatch_error_detail", "") or "")
+    text = dispatch_detail or str(error)
+    if not dispatch_detail and isinstance(error, BaseException):
+        cause = error.__cause__ or error.__context__
+        if cause is not None:
+            data = getattr(cause, "data", None)
+            response = getattr(cause, "response", None)
+            response_text = (
+                getattr(response, "text", "") if response is not None else ""
+            )
+            text = "\n".join(
+                part
+                for part in (str(cause), str(data or ""), str(response_text or ""))
+                if part
+            )
+    text = text.lower()
     return any(marker in text for marker in _QUOTA_MARKERS)
 
 
@@ -148,7 +184,7 @@ def is_reactive_quota_failure(run: Any, item: Any) -> bool:
         return False
     if item.service_name not in config.cloud_build.enabled_services:
         return False
-    if getattr(run, "head_sha", "") != item.sha:
+    if item.kind != "rollback" and getattr(run, "head_sha", "") != item.sha:
         return False
     if getattr(run, "event", "") != "workflow_dispatch":
         return False
@@ -156,9 +192,33 @@ def is_reactive_quota_failure(run: Any, item: Any) -> bool:
         jobs = list(run.jobs())
     except Exception:
         return False
-    if item.candidate_revision or item.production_revision:
+    if item.kind != "rollback" and (
+        item.candidate_revision or item.production_revision
+    ):
         return False
     if _job_annotations_are_quota_failure(item.repository, jobs):
+        return True
+    if getattr(run, "conclusion", "") != "startup_failure" or jobs:
+        return False
+    usage = current_usage(force=True)
+    return bool(usage and usage.exhausted)
+
+
+def is_release_quota_failure(run: Any, *, repository: str, expected_sha: str) -> bool:
+    """Classify PR/push startup rejection without treating code failures as quota."""
+    event = getattr(run, "event", "")
+    if event == "pull_request_target":
+        if getattr(run, "display_title", "") != f"eng-platform-quality-{expected_sha}":
+            return False
+    elif getattr(run, "head_sha", "") != expected_sha:
+        return False
+    if event not in {"push", "pull_request_target"}:
+        return False
+    try:
+        jobs = list(run.jobs())
+    except Exception:
+        return False
+    if _job_annotations_are_quota_failure(repository, jobs):
         return True
     if getattr(run, "conclusion", "") != "startup_failure" or jobs:
         return False

@@ -22,10 +22,13 @@ from .routers import (
     costs,
     deployments,
     deployment_events,
+    github_events,
     health,
     metrics,
     quality,
     release_authorizations,
+    release_execution_events,
+    release_operations,
     releases,
     service_factory,
     secrets as operational_secrets_router,
@@ -124,6 +127,9 @@ app.include_router(catalog.router)
 app.include_router(releases.router)
 app.include_router(deployments.router)
 app.include_router(deployment_events.router)
+app.include_router(github_events.router)
+app.include_router(release_execution_events.router)
+app.include_router(release_operations.router)
 app.include_router(metrics.router)
 app.include_router(costs.router)
 app.include_router(quality.router)

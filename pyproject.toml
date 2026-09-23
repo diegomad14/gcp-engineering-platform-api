@@ -42,6 +42,9 @@ build-backend = "setuptools.build_meta"
 package-dir = { "" = "src" }
 packages = ["eng_platform_api", "eng_platform_api.services", "eng_platform_api.routers"]
 
+[tool.setuptools.package-data]
+eng_platform_api = ["*.json", "static_examples/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

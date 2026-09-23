@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   validate:
+    if: ${{ vars.ENG_PLATFORM_RELEASE_ORCHESTRATOR_ENABLED != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6
