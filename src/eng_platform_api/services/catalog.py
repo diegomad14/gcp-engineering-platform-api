@@ -90,8 +90,9 @@ def _catalog_service(cfg: dict) -> CatalogService:
             1306114845: ["cgm-artemis-api", "cgm-sanplat-api"],
             1306114872: ["cgm-artemis-web", "cgm-sanplat-web"],
         }
-        quality_cfg["evidence_services"] = owners.get(
-            repository_id(cfg["repository"]), []
+        identity = repository_id(cfg["repository"])
+        quality_cfg["evidence_services"] = (
+            owners.get(identity, []) if identity is not None else []
         )
         if cfg["service_name"] not in {"cgm-artemis-api", "cgm-artemis-web"}:
             deployment_cfg["private_runtime"] = (
