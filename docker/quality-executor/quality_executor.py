@@ -912,6 +912,7 @@ def _run_quality(
         "main" if identity["operation"] == "main_release" else "pull-request",
         "--profile",
         profile["runtime"],
+        "--trusted-scanner-policy",
         "--working-directory",
         str(cwd),
         "--coverage-threshold",

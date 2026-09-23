@@ -159,12 +159,17 @@ def _check(
     }
 
 
-def _defaults(profile: str, report_dir: Path) -> dict[str, str]:
+def _defaults(
+    profile: str, report_dir: Path, *, trusted_scanner_policy: bool = False
+) -> dict[str, str]:
     coverage_file = report_dir / "coverage.json"
     ruff_file = report_dir / "ruff.json"
     eslint_file = report_dir / "eslint.json"
     semgrep_file = report_dir / "semgrep.json"
     trivy_file = report_dir / "trivy.json"
+    trivy_ignorefile = (
+        "" if trusted_scanner_policy else "--ignorefile .trivyignore.yaml "
+    )
     common = {
         "semgrep": (
             "semgrep scan --config auto --severity ERROR --error "
@@ -173,8 +178,8 @@ def _defaults(profile: str, report_dir: Path) -> dict[str, str]:
         ),
         "trivy": (
             "trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL "
-            "--ignorefile .trivyignore.yaml "
-            f"--skip-dirs {shlex.quote(str(report_dir))} "
+            + trivy_ignorefile
+            + f"--skip-dirs {shlex.quote(str(report_dir))} "
             f"--exit-code 1 --format json --output {shlex.quote(str(trivy_file))} ."
         ),
     }
@@ -236,12 +241,17 @@ def main() -> int:
     parser.add_argument("--lint-command")
     parser.add_argument("--format-command")
     parser.add_argument("--typecheck-command")
+    parser.add_argument("--trusted-scanner-policy", action="store_true")
     args = parser.parse_args()
 
     cwd = Path(args.working_directory).resolve()
     report_dir = (cwd / args.report_directory).resolve()
     report_dir.mkdir(parents=True, exist_ok=True)
-    defaults = _defaults(args.profile, report_dir)
+    defaults = _defaults(
+        args.profile,
+        report_dir,
+        trusted_scanner_policy=args.trusted_scanner_policy,
+    )
     commands = {
         "install": args.install_command
         if args.install_command is not None
