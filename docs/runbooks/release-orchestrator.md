@@ -245,6 +245,13 @@ ENG_PLATFORM_CLOUD_BUILD_MINUTE_PRICE_USD=<current applicable rate>
 ENG_PLATFORM_CLOUD_BUILD_USAGE_ALERT_MINUTES=2000,2250,2500
 ```
 
+`ENG_PLATFORM_QUALITY_BUCKET` stores immutable `oss-v2` evidence and must be
+configured. It may differ from `ENG_PLATFORM_CLOUD_BUILD_EVIDENCE_BUCKET`, which
+holds deployment summaries; do not repoint either existing bucket during
+activation or historical reconciliation can lose its source. Apply 30-day
+retention only to transient `quality/pending/release-executions/` and
+`quality/summaries/release-executions/` objects, never to the evidence prefix.
+
 The release executor obtains its Google OIDC token from the Cloud Build metadata
 server as the service account attached to the build. Therefore the callback
 email must identify the same account as the full Cloud Build service-account

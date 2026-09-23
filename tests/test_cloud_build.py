@@ -187,6 +187,32 @@ def test_release_orchestrator_accepts_resource_and_email_for_same_build_account(
     assert loaded.release_orchestrator.reconciler_service_account == reconciler
 
 
+def test_release_quality_and_deployment_evidence_buckets_may_differ(monkeypatch):
+    _release_orchestrator_environment(monkeypatch)
+    monkeypatch.setenv(
+        "ENG_PLATFORM_RELEASE_RECONCILER_SERVICE_ACCOUNT",
+        "reconciler@test-project.iam.gserviceaccount.com",
+    )
+    monkeypatch.setenv("ENG_PLATFORM_QUALITY_BUCKET", "historical-quality-bucket")
+
+    loaded = load_config()
+
+    assert loaded.quality.bucket == "historical-quality-bucket"
+    assert loaded.cloud_build.evidence_bucket == "evidence-bucket"
+
+
+def test_release_orchestrator_requires_quality_evidence_bucket(monkeypatch):
+    _release_orchestrator_environment(monkeypatch)
+    monkeypatch.setenv(
+        "ENG_PLATFORM_RELEASE_RECONCILER_SERVICE_ACCOUNT",
+        "reconciler@test-project.iam.gserviceaccount.com",
+    )
+    monkeypatch.delenv("ENG_PLATFORM_QUALITY_BUCKET")
+
+    with pytest.raises(ValueError, match="quality evidence bucket"):
+        load_config()
+
+
 def test_quality_and_deployment_builds_cannot_share_identity(monkeypatch):
     quality_email = _release_orchestrator_environment(monkeypatch)
     monkeypatch.setenv(
