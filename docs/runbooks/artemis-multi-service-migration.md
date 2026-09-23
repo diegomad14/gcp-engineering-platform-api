@@ -34,21 +34,35 @@ and rollback. Never infer activity from the mere existence of a Cloud Run Job.
 - Artemis platform PR #62 merged as `da46f6a6` and API tag `v0.25.0` has
   exact `oss-v2 PASSED` evidence (84.17% changed-line coverage). Deployment
   `6620471675` completed through GitHub Actions without a Cloud Build and
-  now serves revision `eng-platform-api-ep-b092dbc54b` at 100% traffic. Its
+  served revision `eng-platform-api-ep-b092dbc54b` at 100% traffic. Its
   digest `sha256:9cc6a47a…` equals the tag's Artifact Registry digest;
-  `/health` is healthy. The twelve Artemis catalog descriptors are visible
-  but `deployment.enabled=false`; no Artemis Cloud Run resource, GitHub
-  rename or public URL change was made. The revision's inherited
-  `commit-sha` label remains stale and must be corrected by a new pinned
-  release-executor image before it is used as provenance.
+  `/health` was healthy. The revision inherited a stale `commit-sha` label;
+  this was corrected in the subsequent deploy below.
 - API PR #63 merged as `1aa8cba6`; tag `v0.25.1` has exact `oss-v2 PASSED`
   evidence. Its first deployment `6620957836` failed before creating a
   candidate because the newly published executor image could not import
   `yaml`. No product image or traffic was changed by that deployment. The
   executor image setting was restored to the previous digest in both GitHub
-  and the API's live revision; `eng-platform-api-ep-b092dbc54b` again serves
-  100%. This runbook's next gate is a container-level import smoke before
-  publishing another digest, followed by a fresh `v0.25.1` deployment.
+  and the API's live revision while the image was repaired.
+- PR #64 merged as `b7e89d33`. Its release-executor Dockerfile pins
+  `/usr/bin/python3` for the `apk`-installed YAML module, uses a parseable
+  `USER root` directive, and has a narrowly path-scoped Trivy exception for
+  the short-lived Cloud Build executor. The publisher ran an import and
+  `gcloud` smoke *inside the built container before pushing* digest
+  `sha256:8032c7d3…` from GitHub Actions; a local unprivileged import also
+  passed. The dedicated GitHub tooling WIF pool/provider is restricted to
+  this repository, workflow, `main`, manual dispatch and the operator ID;
+  that pool can impersonate only the builder service account, whose Artifact
+  Registry writer grant is repository-scoped.
+- `eng-platform-api v0.25.2` has exact `oss-v2 PASSED` evidence for
+  `b7e89d33`. Deployment `6621352620` succeeded through GitHub Actions run
+  `35902320296` and serves `eng-platform-api-ep-c9d405912f` at 100%.
+  Its image digest `sha256:7e271e64…` matches Artifact Registry, revision
+  label `commit-sha=b7e89d33…` matches the tag, `/health` is healthy, and
+  MCP `get_deployment` returned `SUCCEEDED` without a REST/browser refresh.
+  An unauthenticated `/mcp` call still returns 401. All twelve Artemis
+  descriptors remain `deployment.enabled=false`; no Artemis Cloud Run
+  runtime, GitHub repo rename or public URL cut has occurred.
 - Private regional bucket `cgm-artemis-data` was created with uniform access,
   public access prevention and seven-day soft delete. Initial copies of
   `kpi_cgm.db`, `location-snapshots/`, `readings-universe/` and
@@ -58,8 +72,14 @@ and rollback. Never infer activity from the mere existence of a Cloud Run Job.
   This is a baseline copy only: new writes still go to the SanPlat bucket.
 - Docker Artifact Registry `cgm-artemis-repo` was created in `us-central1`
   with immutable tags. Only the existing eng-platform release-executor service
-  account was granted repository-level `artifactregistry.writer`; no images
-  or Cloud Builds were created for this migration.
+  account was granted repository-level `artifactregistry.writer`; no Artemis
+  image or Cloud Build was created for this migration.
+- Source branches `codex/artemis-api` and `codex/artemis-web` remain on the
+  original private repositories without PRs or deployments. Local API tests
+  passed (`1108 passed, 79 skipped`) after installing the existing optional
+  PostgreSQL test dependency; Web tests (`284 passed`) and production build
+  passed. Private-repository quality/release orchestration is still disabled,
+  so opening those PRs now would hit the unresolved GitHub Billing gate.
 - Release-fallback PR #60 passed all GitHub checks, including normalized
   `oss-v2`, and merged to `main` as `a04421a3` at 17:27 UTC. The fix added
   release-path tests (80.36% changed-line coverage locally), removed the
@@ -71,10 +91,12 @@ and rollback. Never infer activity from the mere existence of a Cloud Run Job.
 
 1. Verify no deployment or release execution is active in either repository
    and freeze the old release workflows for the rename window.
-2. Correct the stale serving revision `commit-sha` label with a newly pinned
-   release executor, then capture traffic, digest and rollback procedure.
-   The SQL backup's independent restore test above is complete; still compare
-   selected production table counts before the data cut.
+2. The eng-platform release executor and its own revision label are corrected.
+   The *SanPlat API* serving revision still has stale SHA metadata; rely on
+   the verified source archive/digest above until a separately authorized
+   deployment can replace it. Capture its current traffic and rollback
+   procedure. The SQL backup restore test is complete; still compare selected
+   production table counts before the data cut.
 3. Repository-ID alias code and callback checks are deployed to eng-platform.
    Verify historical evidence and retries by old and new repository names
    before the GitHub rename.
