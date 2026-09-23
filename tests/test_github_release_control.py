@@ -82,16 +82,27 @@ def test_upsert_check_creates_and_validates_status(monkeypatch):
     repo.create_check_run.return_value = SimpleNamespace(id=72)
     _repository(monkeypatch, repo)
 
-    assert control.upsert_check(
-        repository="owner/repo", head_sha=HEAD, kind="release", status="queued"
-    ) == 72
-    assert repo.create_check_run.call_args.kwargs["name"] == control.CHECK_NAMES["release"]
+    assert (
+        control.upsert_check(
+            repository="owner/repo", head_sha=HEAD, kind="release", status="queued"
+        )
+        == 72
+    )
+    assert (
+        repo.create_check_run.call_args.kwargs["name"] == control.CHECK_NAMES["release"]
+    )
     with pytest.raises(ValueError, match="Unknown Engineering Platform check"):
-        control.upsert_check(repository="owner/repo", head_sha=HEAD, kind="other", status="queued")
+        control.upsert_check(
+            repository="owner/repo", head_sha=HEAD, kind="other", status="queued"
+        )
     with pytest.raises(ValueError, match="Invalid check status"):
-        control.upsert_check(repository="owner/repo", head_sha=HEAD, kind="quality", status="other")
+        control.upsert_check(
+            repository="owner/repo", head_sha=HEAD, kind="quality", status="other"
+        )
     with pytest.raises(ValueError, match="valid conclusion"):
-        control.upsert_check(repository="owner/repo", head_sha=HEAD, kind="quality", status="completed")
+        control.upsert_check(
+            repository="owner/repo", head_sha=HEAD, kind="quality", status="completed"
+        )
 
 
 def _execution():
@@ -125,15 +136,21 @@ def test_publish_release_completes_partial_tag_without_creating_second_tag(monke
     assert repo.create_git_release.call_args.kwargs["target_commitish"] == HEAD
 
 
-def test_publish_release_is_idempotent_for_annotated_tag_and_existing_release(monkeypatch):
+def test_publish_release_is_idempotent_for_annotated_tag_and_existing_release(
+    monkeypatch,
+):
     repo = mock.Mock()
     repo.get_git_ref.return_value = SimpleNamespace(
         object=SimpleNamespace(sha="b" * 40, type="tag")
     )
     repo.get_git_tag.return_value = SimpleNamespace(object=SimpleNamespace(sha=HEAD))
     repo.get_release.return_value = SimpleNamespace(
-        tag_name="v1.2.3", draft=False, prerelease=False,
-        body="Release notes", id=33, html_url="https://github.test/release/33",
+        tag_name="v1.2.3",
+        draft=False,
+        prerelease=False,
+        body="Release notes",
+        id=33,
+        html_url="https://github.test/release/33",
     )
     _repository(monkeypatch, repo)
     monkeypatch.setattr(control, "current_default_sha", lambda _: HEAD)
