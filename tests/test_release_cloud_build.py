@@ -224,7 +224,10 @@ def test_pr_build_request_is_economical_fixed_and_source_pinned(configured):
         "substitutionOption": "ALLOW_LOOSE",
     }
     assert request["timeout"] == "1800s"
-    assert "ENG_PLATFORM_EVIDENCE_BUCKET=test-quality-evidence" in request["steps"][0]["env"]
+    assert (
+        "ENG_PLATFORM_EVIDENCE_BUCKET=test-quality-evidence"
+        in request["steps"][0]["env"]
+    )
     assert request["serviceAccount"].startswith("release-quality@")
     assert {
         "images",
