@@ -134,13 +134,8 @@ class QualityProfilesTest(unittest.TestCase):
             trusted_scanner._trusted_scan_args("trivy", ["--ignorefile=./own.yaml"])
 
     def test_hash_is_exact_canonical_shared_payload(self) -> None:
-        document = quality_profiles.profile_document()
         for service in quality_profiles.available_services():
-            payload = {
-                "schema_version": document["schema_version"],
-                "service_name": service,
-                "profile": document["profiles"][service],
-            }
+            payload = quality_profiles.profile_payload(service)
             expected = hashlib.sha256(
                 json.dumps(
                     payload,
