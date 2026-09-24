@@ -109,13 +109,56 @@ _ARTEMIS_JOBS = (
     "cgm-artemis-smarti-prevention-worker",
     "cgm-artemis-wm-sweep-worker",
 )
+_ARTEMIS_TASK_WORKERS = {
+    "cgm-artemis-sync-worker": "sync",
+    "cgm-artemis-clock-sync-worker": "clock-sync",
+    "cgm-artemis-data-recovery-worker": "data-recovery",
+    "cgm-artemis-fnd-ip-sync-worker": "fnd-ip-sync",
+}
+_ARTEMIS_DISPATCHER_ENV = (
+    ("JOB_WORKER_PREFIX", "cgm-artemis"),
+    (
+        "JOB_TASK_OIDC_SERVICE_ACCOUNT",
+        "artemis-tasks-invoker@cgm-assistant-prod.iam.gserviceaccount.com",
+    ),
+    ("ARTEMIS_SYNC_QUEUE", "cgm-artemis-sync"),
+    ("ARTEMIS_SYNC_WORKER_URL", "{service_uri:cgm-artemis-sync-worker}"),
+    ("ARTEMIS_CLOCK_SYNC_QUEUE", "cgm-artemis-clock-sync"),
+    (
+        "ARTEMIS_CLOCK_SYNC_WORKER_URL",
+        "{service_uri:cgm-artemis-clock-sync-worker}",
+    ),
+    ("ARTEMIS_DATA_RECOVERY_QUEUE", "cgm-artemis-data-recovery"),
+    (
+        "ARTEMIS_DATA_RECOVERY_WORKER_URL",
+        "{service_uri:cgm-artemis-data-recovery-worker}",
+    ),
+    ("ARTEMIS_FND_IP_SYNC_QUEUE", "cgm-artemis-fnd-ip-sync"),
+    (
+        "ARTEMIS_FND_IP_SYNC_WORKER_URL",
+        "{service_uri:cgm-artemis-fnd-ip-sync-worker}",
+    ),
+)
 for _name in _ARTEMIS_SERVICES:
     _PROFILES[_name] = ReleaseProfile(
         _name,
         3600,
-        candidate_env_vars=(("APP_RELEASE_SHA", "{sha}"),)
-        if _name != "cgm-artemis-web"
-        else (),
+        build_args=(("APP_VERSION", "{tag}"),) if _name == "cgm-artemis-web" else (),
+        candidate_env_vars=(
+            (("APP_RELEASE_SHA", "{sha}"),) if _name != "cgm-artemis-web" else ()
+        )
+        + (
+            (("APP_BACKGROUND_TASKS_ENABLED", "false"),)
+            if _name == "cgm-artemis-api"
+            else _ARTEMIS_DISPATCHER_ENV
+            if _name == "cgm-artemis-job-dispatcher"
+            else ()
+        )
+        + (
+            (("ARTEMIS_WORKER_TYPE", _ARTEMIS_TASK_WORKERS[_name]),)
+            if _name in _ARTEMIS_TASK_WORKERS
+            else ()
+        ),
     )
 for _name in _ARTEMIS_JOBS:
     _PROFILES[_name] = ReleaseProfile(

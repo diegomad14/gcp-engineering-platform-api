@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 import urllib.request
 
 import yaml
@@ -129,9 +130,63 @@ for _name in (
     PROFILE_SPECS[_name] = {
         "name": _name,
         "timeout_seconds": 3600,
-        "build_args": [],
+        "build_args": [["APP_VERSION", "{tag}"]] if _name == "cgm-artemis-web" else [],
         "candidate_env_vars": (
             [] if _name == "cgm-artemis-web" else [["APP_RELEASE_SHA", "{sha}"]]
+        )
+        + (
+            [["APP_BACKGROUND_TASKS_ENABLED", "false"]]
+            if _name == "cgm-artemis-api"
+            else [
+                ["JOB_WORKER_PREFIX", "cgm-artemis"],
+                [
+                    "JOB_TASK_OIDC_SERVICE_ACCOUNT",
+                    "artemis-tasks-invoker@cgm-assistant-prod.iam.gserviceaccount.com",
+                ],
+                ["ARTEMIS_SYNC_QUEUE", "cgm-artemis-sync"],
+                [
+                    "ARTEMIS_SYNC_WORKER_URL",
+                    "{service_uri:cgm-artemis-sync-worker}",
+                ],
+                ["ARTEMIS_CLOCK_SYNC_QUEUE", "cgm-artemis-clock-sync"],
+                [
+                    "ARTEMIS_CLOCK_SYNC_WORKER_URL",
+                    "{service_uri:cgm-artemis-clock-sync-worker}",
+                ],
+                ["ARTEMIS_DATA_RECOVERY_QUEUE", "cgm-artemis-data-recovery"],
+                [
+                    "ARTEMIS_DATA_RECOVERY_WORKER_URL",
+                    "{service_uri:cgm-artemis-data-recovery-worker}",
+                ],
+                ["ARTEMIS_FND_IP_SYNC_QUEUE", "cgm-artemis-fnd-ip-sync"],
+                [
+                    "ARTEMIS_FND_IP_SYNC_WORKER_URL",
+                    "{service_uri:cgm-artemis-fnd-ip-sync-worker}",
+                ],
+            ]
+            if _name == "cgm-artemis-job-dispatcher"
+            else []
+        )
+        + (
+            [
+                [
+                    "ARTEMIS_WORKER_TYPE",
+                    {
+                        "cgm-artemis-sync-worker": "sync",
+                        "cgm-artemis-clock-sync-worker": "clock-sync",
+                        "cgm-artemis-data-recovery-worker": "data-recovery",
+                        "cgm-artemis-fnd-ip-sync-worker": "fnd-ip-sync",
+                    }[_name],
+                ]
+            ]
+            if _name
+            in {
+                "cgm-artemis-sync-worker",
+                "cgm-artemis-clock-sync-worker",
+                "cgm-artemis-data-recovery-worker",
+                "cgm-artemis-fnd-ip-sync-worker",
+            }
+            else []
         ),
         "pre_candidate_hooks": [],
         "candidate_hooks": [],
@@ -431,14 +486,86 @@ def run_hooks(phase: str) -> None:
 
 def candidate_env_args() -> list[str]:
     """Render only server-owned release variables, never caller-supplied names."""
-    rows = PROFILE_SPECS[env("CGM_PROFILE")]["candidate_env_vars"]
+    profile_name = env("CGM_PROFILE")
+    rows = PROFILE_SPECS[profile_name]["candidate_env_vars"]
     if not rows:
         return []
     values = []
     for name, template in rows:
-        if template != "{sha}" or name != "APP_RELEASE_SHA":
+        if template == "{sha}" and name == "APP_RELEASE_SHA":
+            value = env("CGM_RELEASE_SHA")
+        elif name == "ARTEMIS_WORKER_TYPE" and template in {
+            "sync",
+            "clock-sync",
+            "data-recovery",
+            "fnd-ip-sync",
+        }:
+            expected = {
+                "cgm-artemis-sync-worker": "sync",
+                "cgm-artemis-clock-sync-worker": "clock-sync",
+                "cgm-artemis-data-recovery-worker": "data-recovery",
+                "cgm-artemis-fnd-ip-sync-worker": "fnd-ip-sync",
+            }.get(profile_name)
+            if template != expected:
+                raise RuntimeError("task worker type does not match release profile")
+            value = template
+        elif template.startswith("{service_uri:") and template.endswith("}"):
+            target = template[len("{service_uri:") : -1]
+            allowed_routes = {
+                "cgm-artemis-sync-worker": "ARTEMIS_SYNC_WORKER_URL",
+                "cgm-artemis-clock-sync-worker": "ARTEMIS_CLOCK_SYNC_WORKER_URL",
+                "cgm-artemis-data-recovery-worker": "ARTEMIS_DATA_RECOVERY_WORKER_URL",
+                "cgm-artemis-fnd-ip-sync-worker": "ARTEMIS_FND_IP_SYNC_WORKER_URL",
+            }
+            if (
+                profile_name != "cgm-artemis-job-dispatcher"
+                or allowed_routes.get(target) != name
+            ):
+                raise RuntimeError("service URL is not allowed by dispatcher profile")
+            value = _service_url(target, env("CGM_REGION"), env("CGM_PROJECT_ID"))
+            host = urllib.parse.urlsplit(value)
+            expected_host = re.compile(
+                rf"{re.escape(target)}-(?:[0-9]{{12}}\.{re.escape(env('CGM_REGION'))}"
+                r"|[a-z0-9]{10}-uc)\.a\.run\.app"
+            )
+            if (
+                host.scheme != "https"
+                or not expected_host.fullmatch(host.hostname or "")
+                or host.path not in {"", "/"}
+                or host.query
+                or host.fragment
+                or host.username
+                or host.port is not None
+            ):
+                raise RuntimeError("Cloud Run returned an invalid Artemis worker URL")
+        elif (
+            profile_name == "cgm-artemis-api"
+            and name == "APP_BACKGROUND_TASKS_ENABLED"
+            and template == "false"
+        ):
+            value = template
+        elif profile_name == "cgm-artemis-job-dispatcher" and (
+            (name == "JOB_WORKER_PREFIX" and template == "cgm-artemis")
+            or (
+                name == "JOB_TASK_OIDC_SERVICE_ACCOUNT"
+                and template
+                == "artemis-tasks-invoker@cgm-assistant-prod.iam.gserviceaccount.com"
+            )
+            or (
+                name
+                in {
+                    "ARTEMIS_SYNC_QUEUE",
+                    "ARTEMIS_CLOCK_SYNC_QUEUE",
+                    "ARTEMIS_DATA_RECOVERY_QUEUE",
+                    "ARTEMIS_FND_IP_SYNC_QUEUE",
+                }
+                and template.startswith("cgm-artemis-")
+            )
+        ):
+            value = template
+        else:
             raise RuntimeError("unsupported candidate environment template")
-        values.append(f"{name}={env('CGM_RELEASE_SHA')}")
+        values.append(f"{name}={value}")
     return ["--update-env-vars", ",".join(values)]
 
 
