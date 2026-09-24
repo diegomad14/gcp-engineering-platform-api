@@ -36,6 +36,10 @@ _PROFILE_FIELDS = {
     "extra",
 }
 _EXTRA_FIELDS = {"name", "category", "command", "blocking"}
+_PROFILE_ALIASES = {
+    "cgm-artemis-api": "cgm-sanplat-api",
+    "cgm-artemis-web": "cgm-sanplat-web",
+}
 _BASE_CHECK_CATEGORIES = {
     "setup",
     "tests",
@@ -164,21 +168,26 @@ def profile_document() -> dict[str, Any]:
 
 
 def available_services() -> tuple[str, ...]:
-    return tuple(sorted(profile_document()["profiles"]))
+    return tuple(sorted({*profile_document()["profiles"], *_PROFILE_ALIASES}))
 
 
 def profile_for(service: str) -> dict[str, Any]:
+    canonical_service = _PROFILE_ALIASES.get(service, service)
     try:
-        return copy.deepcopy(profile_document()["profiles"][service])
+        return copy.deepcopy(profile_document()["profiles"][canonical_service])
     except KeyError as exc:
         raise QualityProfileError(f"No quality profile for {service!r}") from exc
 
 
 def profile_payload(service: str) -> dict[str, Any]:
     document = profile_document()
+    canonical_service = _PROFILE_ALIASES.get(service, service)
     return {
         "schema_version": document["schema_version"],
-        "service_name": service,
+        # Artemis is a GitHub rename, not a change to the repo-level quality
+        # contract. Keep its profile hash stable so historical exact evidence
+        # can be reused under the stable repository identity.
+        "service_name": canonical_service,
         "profile": profile_for(service),
     }
 
