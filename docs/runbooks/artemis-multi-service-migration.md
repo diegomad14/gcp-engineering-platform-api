@@ -4,7 +4,54 @@ This rollout is deliberately gated. The old `cgm-sanplat-*` resources remain
 authoritative until each new runtime has an independently verified deployment
 and rollback. Never infer activity from the mere existence of a Cloud Run Job.
 
-## Current preparation (2026-09-23 UTC)
+## Current status (2026-09-24 UTC)
+
+- The existing GitHub repositories have been renamed in place: API ID
+  `1306114845` is `diegomad14/cgm-artemis-api`; Web ID `1306114872` is
+  `diegomad14/cgm-artemis-web`. History, tags and releases were preserved.
+  Cloud Build v2 links for both new names exist and exact-ref discovery was
+  verified. Historical records continue to resolve through the stable IDs and
+  old-name aliases.
+- Central PR #92 merged as `5d13f0d`. It raises Semgrep's per-rule timeout to
+  30 seconds without excluding rules and adds a single-image `quality-python`
+  publisher option. GitHub Actions published
+  `quality-python@sha256:05a100de20959ccd8c5f3ad338ab8a1959e10ceb70cbb2d940d2c3fffdd0656d`.
+  The exact Semgrep 1.136.0 binary scanned the API PR checkout with zero
+  findings; existing GitHub Actions YAML `PartialParsing` warnings remain
+  visible and are accepted by the trusted scanner.
+- `eng-platform-api-semgrep30` now serves 100% traffic. It differs from the
+  previous revision only in `ENG_PLATFORM_QUALITY_PYTHON_IMAGE`; `/health`
+  returned 200 before and after promotion. The former revision
+  `eng-platform-api-ep-a2157abce4` remains available at 0% for rollback.
+- API PR #120 is open at head `85245215f29e100e188eae94b5922dcb2fa25be6`.
+  Its Cloud Build PR-quality canary is
+  `1739df8a-19ab-4082-8022-6365975d57c7`; no exact-SHA evidence is claimed
+  until the build completes successfully and the backend publishes its report.
+  The preceding canary ran 1,190 tests (5 skipped), Ruff, compile and Trivy,
+  but failed the full gate on the old Semgrep timeout and a workflow-pattern
+  finding. The current PR head documents the verified credential isolation for
+  that specific workflow finding.
+- `gs://cgm-artemis-data/kpi_cgm.db` was refreshed from the authoritative
+  SanPlat object. Source generation `1790283727562435` and target generation
+  `1790286356815430` are both 76,107,776 bytes and have matching MD5
+  `ad4q52gyOwkOiMfaROen3A==`. The prior target object was retained under
+  `migration-baselines/2026-09-24/`. This is only a point-in-time copy, not
+  write mirroring or cutover parity.
+- No Artemis Cloud Run Service or Job exists. All 12 Artemis catalog entries
+  remain `deployment.enabled=false` and not deployment-ready. Profiles do not
+  yet contain complete per-runtime commands, limits, identities, environment
+  and secret mappings; the executor updates existing Run resources instead of
+  provisioning absent ones. Do not enable descriptors or route schedulers or
+  queues to Artemis yet.
+- Production Run traffic, tasks, schedulers and the physical database still
+  use SanPlat names. No Artemis queues or schedulers have been created. The
+  SQL restore-mechanics test is complete and its temporary instance deleted;
+  row-level production data parity remains outstanding.
+
+The following preparation snapshot is historical; statements about old GitHub
+names and earlier bucket generations are superseded by the current status above.
+
+## Historical preparation snapshot (2026-09-23 UTC)
 
 - The two GitHub repositories still have their old names and immutable IDs
   `1306114845` (API) and `1306114872` (Web). Neither was renamed.
@@ -87,25 +134,20 @@ and rollback. Never infer activity from the mere existence of a Cloud Run Job.
   set the planner image to a non-root default, and documented two narrowly
   scoped Trivy exceptions for the quality supervisors.
 
-## Gates before changing GitHub names
+## Identity checks after changing GitHub names
 
-1. Verify no deployment or release execution is active in either repository
-   and freeze the old release workflows for the rename window.
-2. The eng-platform release executor and its own revision label are corrected.
-   The *SanPlat API* serving revision still has stale SHA metadata; rely on
-   the verified source archive/digest above until a separately authorized
-   deployment can replace it. Capture its current traffic and rollback
-   procedure. The SQL backup restore test is complete; still compare selected
-   production table counts before the data cut.
-3. Repository-ID alias code and callback checks are deployed to eng-platform.
-   Verify historical evidence and retries by old and new repository names
-   before the GitHub rename.
-4. Recheck WIF conditions and service-account bindings for both names, then
-   rename the **existing** API repo and verify GitHub ID, tags, Releases,
-   installation and webhook. Create the new Cloud Build 2nd-gen source link and
-   verify `fetchGitRefs` for exact SHA before switching backend mapping.
-5. Repeat for Web. If WIF or source link fails, restore the previous repository
-   name before migrating any runtime; never create a replacement repo.
+1. Verify no deployment or release execution is active before changing release
+   workflows or publishing a service tag.
+2. Continue using stable repository IDs and alias-aware evidence lookup. Do not
+   rewrite historical releases, deployments, fingerprints or audit records.
+3. Recheck both-name WIF conditions, principal bindings, GitHub App installation
+   and webhook delivery for the renamed repositories before promoting workflows.
+4. Verify Cloud Build `fetchGitRefs` for the exact source SHA whenever a new
+   connection is used. The rename itself is complete; do not create replacement
+   GitHub repositories or revert names as part of runtime work.
+5. The serving SanPlat API revision still has mismatched SHA metadata. Continue
+   to rely on verified source provenance and image digest, not its stale label
+   or `APP_RELEASE_SHA`, until a separately verified release replaces it.
 
 ## Runtime rollout
 
