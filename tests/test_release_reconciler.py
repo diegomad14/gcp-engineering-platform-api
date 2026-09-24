@@ -963,6 +963,61 @@ def test_reconcile_submits_reserved_cloud_build_execution(monkeypatch):
     submit.assert_called_once_with("execution-1", service)
 
 
+def test_reconcile_preserves_failed_submission_result(monkeypatch):
+    execution = _execution(status="submission_pending", build_id="")
+    failed = {
+        **execution,
+        "status": "failed",
+        "check_ids": {"quality": 10, "workflows": 11},
+    }
+    reads = iter((execution, failed))
+    monkeypatch.setattr(reconciler.release_executions, "get", lambda _: next(reads))
+    service = object()
+    monkeypatch.setattr(reconciler.catalog, "get_service", lambda _: service)
+    monkeypatch.setattr(
+        reconciler.release_cloud_build,
+        "submit",
+        mock.Mock(
+            side_effect=reconciler.release_cloud_build.ReleaseCloudBuildError(
+                "submit failed"
+            )
+        ),
+    )
+    complete = mock.Mock()
+    monkeypatch.setattr(reconciler, "_complete_check", complete)
+
+    result = reconciler.reconcile("execution-1")
+
+    assert result is failed
+    assert complete.call_args_list == [
+        mock.call(
+            failed,
+            "quality",
+            "failure",
+            "Release quality could not start. No build was created.",
+        ),
+        mock.call(
+            failed,
+            "workflows",
+            "failure",
+            "Release quality could not start. No build was created.",
+        ),
+    ]
+
+
+def test_reconcile_fails_if_reserved_service_disappeared(monkeypatch):
+    execution = _execution(status="submission_pending", build_id="")
+    monkeypatch.setattr(reconciler.release_executions, "get", lambda _: execution)
+    monkeypatch.setattr(reconciler.catalog, "get_service", lambda _: None)
+    submit = mock.Mock()
+    monkeypatch.setattr(reconciler.release_cloud_build, "submit", submit)
+
+    with pytest.raises(ValueError, match="Release service disappeared"):
+        reconciler.reconcile("execution-1")
+
+    submit.assert_not_called()
+
+
 def test_reconcile_stops_after_quality_policy_failure(monkeypatch):
     execution = _execution(operation="main_release")
     reads = iter((execution, execution))
