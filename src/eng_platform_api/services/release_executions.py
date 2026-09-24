@@ -79,6 +79,19 @@ def planner_retry_candidate(
 ) -> bool:
     """Whether one safe planner-only recovery is available for this execution."""
     retry_count = int(value.get("planner_retry_count", 0) or 0)
+    remediation_image = str(value.get("planner_remediation_retry_image", ""))
+    remediation_hash = str(value.get("planner_remediation_retry_hash", ""))
+    image_digest = (
+        remediation_image.rsplit("@sha256:", 1)[-1]
+        if "@sha256:" in remediation_image
+        else ""
+    )
+    remediation_is_pinned = len(image_digest) == 64 and all(
+        char in "0123456789abcdef" for char in image_digest
+    )
+    remediation_hash_is_valid = len(remediation_hash) == 64 and all(
+        char in "0123456789abcdef" for char in remediation_hash
+    )
     attempt_available = (
         (retry_count == 0 and not value.get("planner_retry_checked"))
         or (
@@ -92,6 +105,8 @@ def planner_retry_candidate(
             and retry_count == 2
             and value.get("planner_remediation_retry_checked")
             and not value.get("planner_contract_retry_checked")
+            and remediation_is_pinned
+            and remediation_hash_is_valid
         )
     )
     return bool(
