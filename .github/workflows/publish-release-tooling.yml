@@ -12,6 +12,7 @@ on:
         options:
           - release-executor
           - release-planner
+          - quality-python
           - quality
           - all
 
@@ -71,8 +72,11 @@ jobs:
           }
 
           : > "$RUNNER_TEMP/tooling-digests"
-          if [[ "$COMPONENT" == all || "$COMPONENT" == quality ]]; then
+          if [[ "$COMPONENT" == all || "$COMPONENT" == quality || \
+                "$COMPONENT" == quality-python ]]; then
             build_and_push quality-python docker/quality-executor/Dockerfile.python
+          fi
+          if [[ "$COMPONENT" == all || "$COMPONENT" == quality ]]; then
             build_and_push quality-node docker/quality-executor/Dockerfile.node
           fi
           if [[ "$COMPONENT" == all || \

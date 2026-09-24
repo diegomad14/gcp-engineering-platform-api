@@ -68,6 +68,7 @@ class QualityProfilesTest(unittest.TestCase):
         legacy = quality_gate._defaults("node", report_directory)["semgrep"]
         self.assertIn("--no-git-ignore", trusted)
         self.assertIn("--exclude node_modules", trusted)
+        self.assertIn("--timeout 30", trusted)
         self.assertNotIn("--no-git-ignore", legacy)
 
         with self.assertRaisesRegex(

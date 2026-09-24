@@ -178,7 +178,7 @@ def _defaults(
     )
     common = {
         "semgrep": (
-            "semgrep scan --config auto --severity ERROR --error "
+            "semgrep scan --config auto --severity ERROR --error --timeout 30 "
             + semgrep_targeting
             + f"--exclude {shlex.quote(report_dir.name)} "
             f"--json --output {shlex.quote(str(semgrep_file))} ."
