@@ -120,6 +120,9 @@ def _verify_cloud_build(execution: dict, provider_run_id: str) -> dict:
                 "_PLANNER_DIGEST": config.release_orchestrator.release_planner_image,
             }
         )
+        retry_count = int(execution.get("planner_retry_count", 0) or 0)
+        if retry_count:
+            expected["_PLANNER_RETRY_ATTEMPT"] = str(retry_count)
     if any(substitutions.get(key) != value for key, value in expected.items()):
         raise HTTPException(status_code=403, detail="Cloud Build source mismatch")
     account = str(build.get("serviceAccount", ""))
@@ -404,7 +407,9 @@ def issue_source_token(
     if payload.fingerprint != execution.get("fingerprint"):
         raise HTTPException(status_code=403, detail="Execution fingerprint mismatch")
     _verify_provider(execution, payload.provider_run_id, authorization)
-    if not release_executions.claim_source_token(execution_id):
+    if not release_executions.claim_source_token(
+        execution_id, provider_run_id=payload.provider_run_id
+    ):
         raise HTTPException(status_code=409, detail="Source token was already issued")
     try:
         access_token, expires_at = github_release_control.installation_read_token(
@@ -433,6 +438,10 @@ def issue_event_token(
     _verify_provider(execution, payload.provider_run_id, authorization)
     event_token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(event_token.encode()).hexdigest()
-    if not release_executions.claim_event_token(execution_id, token_hash=token_hash):
+    if not release_executions.claim_event_token(
+        execution_id,
+        provider_run_id=payload.provider_run_id,
+        token_hash=token_hash,
+    ):
         raise HTTPException(status_code=409, detail="Event token was already issued")
     return {"event_token": event_token}

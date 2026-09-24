@@ -78,6 +78,9 @@ def _verify_build(execution: dict[str, Any], build: dict[str, Any]) -> None:
                 "_PLANNER_DIGEST": config.release_orchestrator.release_planner_image,
             }
         )
+        retry_count = int(execution.get("planner_retry_count", 0) or 0)
+        if retry_count:
+            expected["_PLANNER_RETRY_ATTEMPT"] = str(retry_count)
     if any(substitutions.get(key) != value for key, value in expected.items()):
         raise ValueError("Cloud Build release identity does not match execution")
     if build.get("serviceAccount") != config.release_orchestrator.service_account:
@@ -113,14 +116,34 @@ def _record_build_timing(execution_id: str, build: dict[str, Any]) -> None:
         except ValueError:
             queue_seconds = 0.0
     minutes = seconds / 60
+    execution = release_executions.get(execution_id) or {}
+    attempt = {
+        "build_id": str(build.get("id", "")),
+        "duration_seconds": round(seconds, 3),
+        "queue_seconds": round(queue_seconds, 3),
+        "minutes": round(minutes, 3),
+        "estimated_cost_usd": round(
+            minutes * config.release_orchestrator.build_minute_price_usd, 6
+        ),
+        "finished_at": finished,
+    }
+    attempts = [
+        item
+        for item in execution.get("build_attempts", [])
+        if item.get("build_id") != attempt["build_id"]
+    ]
+    attempts.append(attempt)
+    total_minutes = round(sum(float(item.get("minutes", 0)) for item in attempts), 3)
+    total_cost = round(
+        sum(float(item.get("estimated_cost_usd", 0)) for item in attempts), 6
+    )
     release_executions.save(
         execution_id,
         build_duration_seconds=round(seconds, 3),
         build_queue_seconds=round(queue_seconds, 3),
-        build_minutes_estimate=round(minutes, 3),
-        estimated_compute_cost_usd=round(
-            minutes * config.release_orchestrator.build_minute_price_usd, 6
-        ),
+        build_attempts=attempts,
+        build_minutes_estimate=total_minutes,
+        estimated_compute_cost_usd=total_cost,
         build_minute_price_usd=config.release_orchestrator.build_minute_price_usd,
         cost_category="release_quality",
         build_finished_at=finished,
@@ -166,6 +189,12 @@ def _provider_success(execution: dict[str, Any]) -> bool:
     state = str(build.get("status", ""))
     if state == "SUCCESS":
         _record_build_timing(str(execution["execution_id"]), build)
+        if execution.get("planner_retry_pending"):
+            release_executions.save(
+                str(execution["execution_id"]),
+                planner_retry_pending=False,
+                planner_retry_completed_at=datetime.now().isoformat(),
+            )
         return True
     if state in _FAILED_BUILD_STATES:
         if (
@@ -183,13 +212,23 @@ def _provider_success(execution: dict[str, Any]) -> bool:
             )
             and execution.get("pending_report_hash")
         ):
-            release_executions.save(
-                str(execution["execution_id"]),
-                release_engine_failed=True,
-                release_error=str(
+            failed_step = next(
+                (
+                    str(step.get("id", ""))
+                    for step in build.get("steps", [])
+                    if str(step.get("status", "")) in _FAILED_BUILD_STATES
+                ),
+                "",
+            )
+            changes: dict[str, Any] = {
+                "release_engine_failed": True,
+                "release_error": str(
                     execution.get("release_error") or "Release planner failed"
                 ),
-            )
+            }
+            if failed_step:
+                changes["release_failed_step"] = failed_step
+            release_executions.save(str(execution["execution_id"]), **changes)
             _record_build_timing(str(execution["execution_id"]), build)
             return True
         release_executions.save(
@@ -301,6 +340,49 @@ def _publish_if_allowed(execution: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _retry_planner_after_verified_step_failure(
+    execution: dict[str, Any],
+) -> dict[str, Any]:
+    if not release_executions.planner_retry_candidate(execution):
+        return execution
+    try:
+        build = release_cloud_build.get_build(str(execution["build_id"]))
+        _verify_build(execution, build)
+    except Exception as exc:
+        logger.warning(
+            "release_planner_retry_inspection_failed execution_id=%s error=%s",
+            execution.get("execution_id"),
+            str(exc)[:500],
+        )
+        return execution
+    failed_plan = str(build.get("status", "")) in _FAILED_BUILD_STATES and any(
+        str(step.get("id", "")) == "release-plan"
+        and str(step.get("status", "")) in _FAILED_BUILD_STATES
+        for step in build.get("steps", [])
+    )
+    if not failed_plan:
+        return release_executions.save(
+            str(execution["execution_id"]), planner_retry_checked=True
+        )
+    _record_build_timing(str(execution["execution_id"]), build)
+    try:
+        staged = release_executions.stage_planner_retry(
+            str(execution["execution_id"]),
+            failed_build_id=str(execution["build_id"]),
+        )
+        service = catalog.get_service(str(staged["service_name"]))
+        if service is None:
+            raise ValueError("Release service disappeared before planner retry")
+        return release_cloud_build.submit(str(staged["execution_id"]), service)
+    except Exception as exc:
+        logger.warning(
+            "release_planner_retry_submission_pending execution_id=%s error=%s",
+            execution.get("execution_id"),
+            str(exc)[:500],
+        )
+        return release_executions.get(str(execution["execution_id"])) or execution
+
+
 def reconcile(execution_id: str) -> dict[str, Any]:
     execution = release_executions.get(execution_id)
     if execution is None:
@@ -309,9 +391,10 @@ def reconcile(execution_id: str) -> dict[str, Any]:
         "quality_failed",
         "no_release",
         "released",
-        "failed",
     }:
         return execution
+    if execution.get("status") == "failed":
+        return _retry_planner_after_verified_step_failure(execution)
     if execution.get("status") == "unknown" and execution.get("publication_uncertain"):
         return _publish_if_allowed(execution)
     if execution.get("status") in {"release_planned", "publish_pending"}:
@@ -354,8 +437,10 @@ def reconcile(execution_id: str) -> dict[str, Any]:
             return latest
     if not _provider_success(execution):
         return release_executions.get(execution_id) or execution
-    execution = _commit_quality(release_executions.get(execution_id) or execution)
-    if execution.get("status") != "quality_passed":
+    execution = release_executions.get(execution_id) or execution
+    if not execution.get("evidence_committed"):
+        execution = _commit_quality(execution)
+    if execution.get("status") not in {"quality_passed", "running_quality"}:
         return execution
     if execution.get("operation") == "pr_quality":
         return execution
@@ -373,7 +458,7 @@ def reconcile(execution_id: str) -> dict[str, Any]:
             "failure",
             str(result.get("error") or "Release planner failed")[:500],
         )
-        return result
+        return _retry_planner_after_verified_step_failure(result)
     plan = execution.get("release_plan") or {}
     if (
         execution.get("engine_event_status") == "no_release"

@@ -71,6 +71,22 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def planner_retry_candidate(value: dict[str, Any]) -> bool:
+    """Whether one planner-only recovery is still available for this execution."""
+    return bool(
+        value.get("status") == "failed"
+        and value.get("provider") == "cloud_build"
+        and value.get("operation") == "main_release"
+        and value.get("release_engine_failed")
+        and value.get("engine_event_status") == "quality_passed"
+        and value.get("evidence_committed")
+        and value.get("report_hash")
+        and not value.get("planner_retry_checked")
+        and int(value.get("planner_retry_count", 0) or 0) == 0
+        and value.get("build_id")
+    )
+
+
 def fingerprint(
     *,
     repository: str,
@@ -468,17 +484,59 @@ def claim_publish(execution_id: str) -> bool:
     return write(transaction)
 
 
-def claim_source_token(execution_id: str) -> bool:
-    """Allow a managed build to mint one repository-scoped read token."""
-    changes = {"source_token_issued_at": _now(), "updated_at": _now()}
+def _claim_build_scoped_token(
+    current: dict[str, Any],
+    *,
+    provider_run_id: str,
+    token_field: str,
+    issued_field: str,
+) -> bool:
+    provider = current.get("provider")
+    if not provider_run_id:
+        return False
+    if provider == "cloud_build":
+        if current.get("build_id") != provider_run_id:
+            return False
+        previous = set(current.get("previous_build_ids") or [])
+    elif provider == "github_actions" and token_field == "event_token_provider_run_id":
+        if str(current.get("provider_run_id", "")) != provider_run_id:
+            return False
+        previous = set()
+    else:
+        return False
+    issued_for = str(current.get(token_field, ""))
+    if issued_for == provider_run_id:
+        return False
+    if issued_for and issued_for not in previous:
+        return False
+    if (
+        not issued_for
+        and current.get(issued_field)
+        and (not previous or provider_run_id in previous)
+    ):
+        # Backward compatibility for executions that recorded only the
+        # one-time timestamp before token claims were scoped to build IDs.
+        return False
+    return True
+
+
+def claim_source_token(execution_id: str, *, provider_run_id: str) -> bool:
+    """Allow one repository-scoped read token per verified Cloud Build attempt."""
+    now = _now()
+    changes = {
+        "source_token_issued_at": now,
+        "source_token_build_id": provider_run_id,
+        "updated_at": now,
+    }
     collection = _collection()
     if collection is None:
         with _lock:
             current = _memory.get(execution_id)
-            if (
-                current is None
-                or current.get("provider") != "cloud_build"
-                or current.get("source_token_issued_at")
+            if current is None or not _claim_build_scoped_token(
+                current,
+                provider_run_id=provider_run_id,
+                token_field="source_token_build_id",
+                issued_field="source_token_issued_at",
             ):
                 return False
             current.update(changes)
@@ -493,8 +551,11 @@ def claim_source_token(execution_id: str) -> bool:
         if not snapshot.exists:
             return False
         current = snapshot.to_dict()
-        if current.get("provider") != "cloud_build" or current.get(
-            "source_token_issued_at"
+        if not _claim_build_scoped_token(
+            current,
+            provider_run_id=provider_run_id,
+            token_field="source_token_build_id",
+            issued_field="source_token_issued_at",
         ):
             return False
         txn.update(document, changes)
@@ -503,23 +564,37 @@ def claim_source_token(execution_id: str) -> bool:
     return write(transaction)
 
 
-def claim_event_token(execution_id: str, *, token_hash: str) -> bool:
-    """Bind one callback token hash without ever persisting its plaintext value."""
+def claim_event_token(
+    execution_id: str, *, provider_run_id: str, token_hash: str
+) -> bool:
+    """Bind one callback token hash to a single build attempt."""
     if len(token_hash) != 64 or any(
         character not in "0123456789abcdef" for character in token_hash
     ):
         raise ValueError("Event token hash must be a SHA-256 hex digest")
+    now = _now()
     changes = {
         "event_token_hash": token_hash,
-        "event_token_issued_at": _now(),
-        "updated_at": _now(),
+        "event_token_issued_at": now,
+        "updated_at": now,
     }
     collection = _collection()
     if collection is None:
         with _lock:
             current = _memory.get(execution_id)
-            if current is None or current.get("event_token_hash"):
+            token_field = (
+                "event_token_build_id"
+                if current and current.get("provider") == "cloud_build"
+                else "event_token_provider_run_id"
+            )
+            if current is None or not _claim_build_scoped_token(
+                current,
+                provider_run_id=provider_run_id,
+                token_field=token_field,
+                issued_field="event_token_issued_at",
+            ):
                 return False
+            changes[token_field] = provider_run_id
             current.update(changes)
             return True
 
@@ -533,8 +608,19 @@ def claim_event_token(execution_id: str, *, token_hash: str) -> bool:
         if not snapshot.exists:
             return False
         current = snapshot.to_dict()
-        if current.get("event_token_hash"):
+        token_field = (
+            "event_token_build_id"
+            if current.get("provider") == "cloud_build"
+            else "event_token_provider_run_id"
+        )
+        if not _claim_build_scoped_token(
+            current,
+            provider_run_id=provider_run_id,
+            token_field=token_field,
+            issued_field="event_token_issued_at",
+        ):
             return False
+        changes[token_field] = provider_run_id
         txn.update(document, changes)
         return True
 
@@ -596,6 +682,82 @@ def reconcile_submission_absent(execution_id: str) -> dict[str, Any]:
     )
 
 
+def stage_planner_retry(execution_id: str, *, failed_build_id: str) -> dict[str, Any]:
+    """Reserve the single planner-only recovery after verifying terminal identity."""
+    if not failed_build_id:
+        raise ValueError("Failed Cloud Build identity is required")
+    current = get(execution_id)
+    if current is None:
+        raise KeyError(execution_id)
+    if (
+        not planner_retry_candidate(current)
+        or current.get("build_id") != failed_build_id
+    ):
+        raise ValueError("Release execution is not eligible for planner recovery")
+
+    now = _now()
+    previous_build_ids = list(current.get("previous_build_ids") or [])
+    if failed_build_id not in previous_build_ids:
+        previous_build_ids.append(failed_build_id)
+    changes = {
+        "status": "submission_pending",
+        "build_id": "",
+        "provider_run_id": "",
+        "provider_status": "RETRY_PENDING",
+        "logs_url": "",
+        "build_name": "",
+        "previous_build_ids": previous_build_ids,
+        "planner_retry_pending": True,
+        "planner_retry_count": 1,
+        "planner_retry_checked": True,
+        "planner_retry_previous_build_id": failed_build_id,
+        "planner_retry_requested_at": now,
+        "release_engine_failed": False,
+        "release_error": "",
+        "error": "",
+        "updated_at": now,
+    }
+    collection = _collection()
+    if collection is None:
+        with _lock:
+            current = _memory.get(execution_id)
+            if current is None:
+                raise KeyError(execution_id)
+            if (
+                not planner_retry_candidate(current)
+                or current.get("build_id") != failed_build_id
+            ):
+                raise ValueError(
+                    "Release execution is not eligible for planner recovery"
+                )
+            current.update(changes)
+            return dict(current)
+
+    document = collection.document(execution_id)
+    transaction = document._client.transaction()
+    from google.cloud.firestore import transactional
+
+    @transactional
+    def write(txn):
+        snapshot = document.get(transaction=txn)
+        if not snapshot.exists:
+            raise KeyError(execution_id)
+        current = snapshot.to_dict()
+        if (
+            not planner_retry_candidate(current)
+            or current.get("build_id") != failed_build_id
+        ):
+            raise ValueError("Release execution is not eligible for planner recovery")
+        # This narrowly scoped recovery is the only terminal-state reopening:
+        # exact quality evidence is already committed, and the known failed
+        # planner step is verified by the reconciler before this reservation.
+        txn.update(document, changes)
+        current.update(changes)
+        return current
+
+    return write(transaction)
+
+
 def _validate_status_change(current: dict[str, Any], changes: dict[str, Any]) -> None:
     new_status = changes.get("status")
     if not new_status or new_status == current.get("status"):
@@ -649,7 +811,10 @@ def list_due(*, limit: int = 100) -> list[dict[str, Any]]:
             values = [
                 dict(value)
                 for value in _memory.values()
-                if value.get("status") not in terminal
+                if (
+                    value.get("status") not in terminal
+                    or planner_retry_candidate(value)
+                )
                 and not (
                     value.get("operation") == "pr_quality"
                     and value.get("status") == "quality_passed"
@@ -661,7 +826,10 @@ def list_due(*, limit: int = 100) -> list[dict[str, Any]]:
         values = [
             snapshot.to_dict()
             for snapshot in collection.stream()
-            if snapshot.to_dict().get("status") not in terminal
+            if (
+                snapshot.to_dict().get("status") not in terminal
+                or planner_retry_candidate(snapshot.to_dict())
+            )
             and not (
                 snapshot.to_dict().get("operation") == "pr_quality"
                 and snapshot.to_dict().get("status") == "quality_passed"

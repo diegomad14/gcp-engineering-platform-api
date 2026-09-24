@@ -479,27 +479,42 @@ def test_claim_publish_rejects_pr_wrong_status_and_missing():
 
 def test_claim_source_token_is_cloud_build_only_and_one_time():
     cloud, _ = _reserve(provider="cloud_build")
-    assert executions.claim_source_token(cloud["execution_id"]) is True
-    assert executions.claim_source_token(cloud["execution_id"]) is False
+    executions.bind_build(cloud["execution_id"], build_id="build-1")
+    assert (
+        executions.claim_source_token(cloud["execution_id"], provider_run_id="build-1")
+        is True
+    )
+    assert (
+        executions.claim_source_token(cloud["execution_id"], provider_run_id="build-1")
+        is False
+    )
     assert executions.get(cloud["execution_id"])["source_token_issued_at"]
 
     github, _ = _reserve(head_sha="c" * 40)
-    assert executions.claim_source_token(github["execution_id"]) is False
-    assert executions.claim_source_token("missing") is False
+    assert (
+        executions.claim_source_token(github["execution_id"], provider_run_id="run-1")
+        is False
+    )
+    assert executions.claim_source_token("missing", provider_run_id="build-1") is False
 
 
 def test_claim_event_token_persists_only_digest_and_is_single_use():
     value, _ = _reserve(provider="cloud_build")
+    executions.bind_build(value["execution_id"], build_id="build-1")
     plaintext = "raw-event-token-that-must-not-be-stored"
     token_hash = hashlib.sha256(plaintext.encode()).hexdigest()
 
     assert (
-        executions.claim_event_token(value["execution_id"], token_hash=token_hash)
+        executions.claim_event_token(
+            value["execution_id"], provider_run_id="build-1", token_hash=token_hash
+        )
         is True
     )
     assert (
         executions.claim_event_token(
-            value["execution_id"], token_hash=hashlib.sha256(b"replacement").hexdigest()
+            value["execution_id"],
+            provider_run_id="build-1",
+            token_hash=hashlib.sha256(b"replacement").hexdigest(),
         )
         is False
     )
@@ -527,7 +542,9 @@ def test_claim_event_token_requires_lowercase_sha256(token_hash):
     value, _ = _reserve()
 
     with pytest.raises(ValueError, match="SHA-256 hex digest"):
-        executions.claim_event_token(value["execution_id"], token_hash=token_hash)
+        executions.claim_event_token(
+            value["execution_id"], provider_run_id="run-1", token_hash=token_hash
+        )
 
     assert "event_token_hash" not in executions.get(value["execution_id"])
 
@@ -535,10 +552,19 @@ def test_claim_event_token_requires_lowercase_sha256(token_hash):
 @pytest.mark.parametrize("provider", ["github_actions", "cloud_build"])
 def test_claim_event_token_supports_both_managed_providers(provider):
     value, _ = _reserve(provider=provider)
+    provider_run_id = "build-1" if provider == "cloud_build" else "run-1"
+    if provider == "cloud_build":
+        executions.bind_build(value["execution_id"], build_id=provider_run_id)
+    else:
+        value = executions.save(value["execution_id"], provider_run_id=provider_run_id)
     token_hash = hashlib.sha256(f"{provider}-token".encode()).hexdigest()
 
     assert (
-        executions.claim_event_token(value["execution_id"], token_hash=token_hash)
+        executions.claim_event_token(
+            value["execution_id"],
+            provider_run_id=provider_run_id,
+            token_hash=token_hash,
+        )
         is True
     )
     assert executions.get(value["execution_id"])["event_token_hash"] == token_hash
@@ -547,7 +573,9 @@ def test_claim_event_token_supports_both_managed_providers(provider):
 def test_claim_event_token_missing_execution_is_not_claimed():
     assert (
         executions.claim_event_token(
-            "missing", token_hash=hashlib.sha256(b"token").hexdigest()
+            "missing",
+            provider_run_id="build-1",
+            token_hash=hashlib.sha256(b"token").hexdigest(),
         )
         is False
     )
@@ -555,13 +583,14 @@ def test_claim_event_token_missing_execution_is_not_claimed():
 
 def test_claim_event_token_memory_concurrency_has_exactly_one_winner():
     value, _ = _reserve(provider="cloud_build")
+    executions.bind_build(value["execution_id"], build_id="build-1")
     hashes = [
         hashlib.sha256(f"token-{index}".encode()).hexdigest() for index in range(32)
     ]
 
     def claim(token_hash):
         return executions.claim_event_token(
-            value["execution_id"], token_hash=token_hash
+            value["execution_id"], provider_run_id="build-1", token_hash=token_hash
         )
 
     with ThreadPoolExecutor(max_workers=16) as pool:
@@ -573,6 +602,48 @@ def test_claim_event_token_memory_concurrency_has_exactly_one_winner():
     stored = executions.get(value["execution_id"])
     assert stored["event_token_hash"] == winning_hash
     assert not any(f"token-{index}" in stored.values() for index in range(32))
+
+
+def test_cloud_build_retry_can_claim_fresh_tokens_only_for_new_bound_attempt():
+    value, _ = _reserve(operation="main_release", provider="cloud_build")
+    executions.bind_build(value["execution_id"], build_id="build-1")
+    assert executions.claim_source_token(
+        value["execution_id"], provider_run_id="build-1"
+    )
+    first_hash = hashlib.sha256(b"event-one").hexdigest()
+    assert executions.claim_event_token(
+        value["execution_id"], provider_run_id="build-1", token_hash=first_hash
+    )
+    executions._memory[value["execution_id"]].update(
+        {
+            "status": "failed",
+            "engine_event_status": "quality_passed",
+            "release_engine_failed": True,
+            "evidence_committed": True,
+            "report_hash": "a" * 64,
+        }
+    )
+
+    executions.stage_planner_retry(value["execution_id"], failed_build_id="build-1")
+    executions.bind_build(value["execution_id"], build_id="build-2")
+
+    assert executions.claim_source_token(
+        value["execution_id"], provider_run_id="build-2"
+    )
+    assert not executions.claim_source_token(
+        value["execution_id"], provider_run_id="build-2"
+    )
+    second_hash = hashlib.sha256(b"event-two").hexdigest()
+    assert executions.claim_event_token(
+        value["execution_id"], provider_run_id="build-2", token_hash=second_hash
+    )
+    assert not executions.claim_event_token(
+        value["execution_id"], provider_run_id="build-2", token_hash=first_hash
+    )
+    stored = executions.get(value["execution_id"])
+    assert stored["event_token_hash"] == second_hash
+    assert stored["event_token_build_id"] == "build-2"
+    assert stored["source_token_build_id"] == "build-2"
 
 
 def test_accept_event_requires_strictly_increasing_sequence():
@@ -632,6 +703,65 @@ def test_reconcile_submission_absent_rejects_known_or_bound_submission():
 
     with pytest.raises(KeyError):
         executions.reconcile_submission_absent("missing")
+
+
+def _failed_planner_execution(value: dict) -> None:
+    executions._memory[value["execution_id"]].update(
+        {
+            "status": "failed",
+            "provider": "cloud_build",
+            "operation": "main_release",
+            "build_id": "planner-build-1",
+            "provider_run_id": "planner-build-1",
+            "engine_event_status": "quality_passed",
+            "release_engine_failed": True,
+            "evidence_committed": True,
+            "report_hash": "a" * 64,
+        }
+    )
+
+
+def test_planner_retry_is_a_single_exact_evidence_recovery():
+    value, _ = _reserve(operation="main_release", provider="cloud_build")
+    _failed_planner_execution(value)
+
+    assert executions.planner_retry_candidate(executions.get(value["execution_id"]))
+    staged = executions.stage_planner_retry(
+        value["execution_id"], failed_build_id="planner-build-1"
+    )
+
+    assert staged["status"] == "submission_pending"
+    assert staged["build_id"] == ""
+    assert staged["provider_run_id"] == ""
+    assert staged["planner_retry_pending"] is True
+    assert staged["planner_retry_count"] == 1
+    assert staged["previous_build_ids"] == ["planner-build-1"]
+    assert staged["evidence_committed"] is True
+    assert not executions.planner_retry_candidate(staged)
+
+
+def test_planner_retry_rejects_missing_evidence_or_second_attempt():
+    value, _ = _reserve(operation="main_release", provider="cloud_build")
+    _failed_planner_execution(value)
+    executions._memory[value["execution_id"]]["evidence_committed"] = False
+    assert not executions.planner_retry_candidate(executions.get(value["execution_id"]))
+    with pytest.raises(ValueError, match="not eligible"):
+        executions.stage_planner_retry(
+            value["execution_id"], failed_build_id="planner-build-1"
+        )
+
+    executions._memory[value["execution_id"]]["evidence_committed"] = True
+    executions._memory[value["execution_id"]]["planner_retry_count"] = 1
+    assert not executions.planner_retry_candidate(executions.get(value["execution_id"]))
+
+
+def test_planner_retry_eligible_execution_remains_due_for_reconciliation():
+    value, _ = _reserve(operation="main_release", provider="cloud_build")
+    _failed_planner_execution(value)
+
+    assert [item["execution_id"] for item in executions.list_due()] == [
+        value["execution_id"]
+    ]
 
 
 def test_list_and_find_filter_normalize_sha_and_order_by_creation():
@@ -788,17 +918,28 @@ def test_firestore_submission_publish_and_token_claims_are_single_use(
     cloud, _ = _reserve(provider="cloud_build")
     assert executions.claim_submission(cloud["execution_id"]) is True
     assert executions.claim_submission(cloud["execution_id"]) is False
-    assert executions.claim_source_token(cloud["execution_id"]) is True
-    assert executions.claim_source_token(cloud["execution_id"]) is False
+    executions.bind_build(cloud["execution_id"], build_id="build-1")
+    assert (
+        executions.claim_source_token(cloud["execution_id"], provider_run_id="build-1")
+        is True
+    )
+    assert (
+        executions.claim_source_token(cloud["execution_id"], provider_run_id="build-1")
+        is False
+    )
     plaintext = "firestore-event-token"
     token_hash = hashlib.sha256(plaintext.encode()).hexdigest()
     assert (
-        executions.claim_event_token(cloud["execution_id"], token_hash=token_hash)
+        executions.claim_event_token(
+            cloud["execution_id"], provider_run_id="build-1", token_hash=token_hash
+        )
         is True
     )
     assert (
         executions.claim_event_token(
-            cloud["execution_id"], token_hash=hashlib.sha256(b"replacement").hexdigest()
+            cloud["execution_id"],
+            provider_run_id="build-1",
+            token_hash=hashlib.sha256(b"replacement").hexdigest(),
         )
         is False
     )
@@ -821,10 +962,12 @@ def test_firestore_submission_publish_and_token_claims_are_single_use(
         executions.claim_submission("missing")
     with pytest.raises(KeyError):
         executions.claim_publish("missing")
-    assert executions.claim_source_token("missing") is False
+    assert executions.claim_source_token("missing", provider_run_id="build-1") is False
     assert (
         executions.claim_event_token(
-            "missing", token_hash=hashlib.sha256(b"token").hexdigest()
+            "missing",
+            provider_run_id="build-1",
+            token_hash=hashlib.sha256(b"token").hexdigest(),
         )
         is False
     )
@@ -835,7 +978,10 @@ def test_firestore_claims_reject_wrong_provider_operation_and_bound_build(
 ):
     github, _ = _reserve()
     assert executions.claim_submission(github["execution_id"]) is False
-    assert executions.claim_source_token(github["execution_id"]) is False
+    assert (
+        executions.claim_source_token(github["execution_id"], provider_run_id="run-1")
+        is False
+    )
 
     pr, _ = _reserve(provider="cloud_build", head_sha="c" * 40)
     firestore_collection.document(pr["execution_id"]).value["status"] = (
@@ -891,3 +1037,31 @@ def test_firestore_reconcile_lists_and_finds_executions(firestore_collection):
         due["execution_id"],
         other["execution_id"],
     ]
+
+
+def test_firestore_planner_retry_is_transactional_and_one_shot(firestore_collection):
+    value, _ = _reserve(operation="main_release", provider="cloud_build")
+    firestore_collection.document(value["execution_id"]).value.update(
+        {
+            "status": "failed",
+            "build_id": "planner-build-1",
+            "provider_run_id": "planner-build-1",
+            "engine_event_status": "quality_passed",
+            "release_engine_failed": True,
+            "evidence_committed": True,
+            "report_hash": "a" * 64,
+        }
+    )
+
+    staged = executions.stage_planner_retry(
+        value["execution_id"], failed_build_id="planner-build-1"
+    )
+
+    assert staged["status"] == "submission_pending"
+    assert staged["planner_retry_pending"] is True
+    assert staged["planner_retry_count"] == 1
+    assert staged["previous_build_ids"] == ["planner-build-1"]
+    with pytest.raises(ValueError, match="not eligible"):
+        executions.stage_planner_retry(
+            value["execution_id"], failed_build_id="planner-build-1"
+        )

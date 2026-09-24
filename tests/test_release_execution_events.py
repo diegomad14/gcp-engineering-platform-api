@@ -1386,7 +1386,11 @@ def test_source_token_is_one_time_after_verified_provider(monkeypatch, provider_
     monkeypatch.setattr(events.release_executions, "get", lambda _: execution)
     provider = mock.Mock()
     monkeypatch.setattr(events, "_verify_provider", provider)
-    monkeypatch.setattr(events.release_executions, "claim_source_token", lambda _: True)
+    monkeypatch.setattr(
+        events.release_executions,
+        "claim_source_token",
+        lambda *_args, **_kwargs: True,
+    )
     mint = mock.Mock(return_value=("installation-token", "2026-09-22T13:00:00Z"))
     monkeypatch.setattr(events.github_release_control, "installation_read_token", mint)
     request = events.SourceTokenRequest(
@@ -1409,7 +1413,9 @@ def test_source_token_rejects_reuse_before_minting(monkeypatch):
     monkeypatch.setattr(events.release_executions, "get", lambda _: _execution())
     monkeypatch.setattr(events, "_verify_provider", mock.Mock())
     monkeypatch.setattr(
-        events.release_executions, "claim_source_token", lambda _: False
+        events.release_executions,
+        "claim_source_token",
+        lambda *_args, **_kwargs: False,
     )
     mint = mock.Mock()
     monkeypatch.setattr(events.github_release_control, "installation_read_token", mint)
@@ -1447,7 +1453,7 @@ def test_source_token_mint_failure_consumes_claim_and_hides_error(monkeypatch):
         )
     assert error.value.status_code == 502
     assert "secret" not in error.value.detail
-    claim.assert_called_once_with("execution-1")
+    claim.assert_called_once_with("execution-1", provider_run_id="build-1")
 
 
 def test_event_token_rejects_unknown_or_wrong_fingerprint_before_provider(
