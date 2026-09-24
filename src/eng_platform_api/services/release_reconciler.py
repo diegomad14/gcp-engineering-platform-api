@@ -316,6 +316,42 @@ def reconcile(execution_id: str) -> dict[str, Any]:
         return _publish_if_allowed(execution)
     if execution.get("status") in {"release_planned", "publish_pending"}:
         return _publish_if_allowed(execution)
+    if (
+        execution.get("provider") == "cloud_build"
+        and execution.get("status") == "submission_pending"
+    ):
+        service = catalog.get_service(str(execution["service_name"]))
+        if service is None:
+            raise ValueError("Release service disappeared before build submission")
+        try:
+            execution = release_cloud_build.submit(execution_id, service)
+        except release_cloud_build.ReleaseCloudBuildError as exc:
+            # Webhook handlers can fail after reserving an execution (for
+            # example, while GitHub is temporarily unavailable to create its
+            # canonical checks). The durable reservation must remain
+            # retryable. Cloud Build submit owns the idempotency claim and
+            # records definitive/uncertain outcomes before raising.
+            latest = release_executions.get(execution_id) or execution
+            logger.warning(
+                "release_cloud_build_submission_reconciled execution_id=%s status=%s error=%s",
+                execution_id,
+                latest.get("status", "unknown"),
+                str(exc)[:500],
+            )
+            if latest.get("status") == "failed":
+                _complete_check(
+                    latest,
+                    "quality",
+                    "failure",
+                    "Release quality could not start. No build was created.",
+                )
+                _complete_check(
+                    latest,
+                    "workflows",
+                    "failure",
+                    "Release quality could not start. No build was created.",
+                )
+            return latest
     if not _provider_success(execution):
         return release_executions.get(execution_id) or execution
     execution = _commit_quality(release_executions.get(execution_id) or execution)

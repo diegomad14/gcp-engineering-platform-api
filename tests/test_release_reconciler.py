@@ -946,6 +946,23 @@ def test_reconcile_returns_latest_state_when_provider_is_not_terminal(monkeypatc
     assert reconciler.reconcile("execution-1") is latest
 
 
+def test_reconcile_submits_reserved_cloud_build_execution(monkeypatch):
+    execution = _execution(status="submission_pending", build_id="")
+    submitted = {**execution, "status": "running_quality", "build_id": "build-1"}
+    reads = iter((execution, submitted))
+    monkeypatch.setattr(reconciler.release_executions, "get", lambda _: next(reads))
+    service = object()
+    monkeypatch.setattr(reconciler.catalog, "get_service", lambda _: service)
+    submit = mock.Mock(return_value=submitted)
+    monkeypatch.setattr(reconciler.release_cloud_build, "submit", submit)
+    monkeypatch.setattr(reconciler, "_provider_success", lambda _: False)
+
+    result = reconciler.reconcile("execution-1")
+
+    assert result is submitted
+    submit.assert_called_once_with("execution-1", service)
+
+
 def test_reconcile_stops_after_quality_policy_failure(monkeypatch):
     execution = _execution(operation="main_release")
     reads = iter((execution, execution))
