@@ -154,10 +154,10 @@ def test_api_derived_candidates_bind_release_sha_in_runtime(
 ):
     _environment(monkeypatch, profile)
     monkeypatch.setenv("CGM_RELEASE_SHA", "a" * 40)
-    assert engine.candidate_env_args() == [
-        "--update-env-vars",
-        "APP_RELEASE_SHA=" + "a" * 40,
-    ]
+    expected = "APP_RELEASE_SHA=" + "a" * 40
+    if profile == "cgm-artemis-api":
+        expected += ",APP_BACKGROUND_TASKS_ENABLED=false"
+    assert engine.candidate_env_args() == ["--update-env-vars", expected]
 
 
 def test_web_candidate_does_not_inherit_api_release_env(engine, monkeypatch):

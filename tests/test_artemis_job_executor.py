@@ -183,6 +183,99 @@ def test_private_worker_smoke_uses_base_service_audience(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize(
+    ("service", "worker_type"),
+    [
+        ("cgm-artemis-sync-worker", "sync"),
+        ("cgm-artemis-clock-sync-worker", "clock-sync"),
+        ("cgm-artemis-data-recovery-worker", "data-recovery"),
+        ("cgm-artemis-fnd-ip-sync-worker", "fnd-ip-sync"),
+    ],
+)
+def test_artemis_worker_profiles_pin_one_task_type(monkeypatch, service, worker_type):
+    monkeypatch.setenv("CGM_SERVICE", service)
+    monkeypatch.setenv("CGM_PROFILE", service)
+    monkeypatch.setenv("CGM_RELEASE_SHA", "a" * 40)
+    assert engine.candidate_env_args() == [
+        "--update-env-vars",
+        f"APP_RELEASE_SHA={'a' * 40},ARTEMIS_WORKER_TYPE={worker_type}",
+    ]
+
+
+def test_artemis_web_uses_the_tag_as_app_version():
+    service = get_service("cgm-artemis-web")
+    assert service is not None
+    assert profile_for(service).build_args == (("APP_VERSION", "{tag}"),)
+    assert engine.PROFILE_SPECS["cgm-artemis-web"]["build_args"] == [
+        ["APP_VERSION", "{tag}"]
+    ]
+
+
+def test_artemis_api_candidate_disables_embedded_background_workers(monkeypatch):
+    monkeypatch.setenv("CGM_SERVICE", "cgm-artemis-api")
+    monkeypatch.setenv("CGM_PROFILE", "cgm-artemis-api")
+    monkeypatch.setenv("CGM_RELEASE_SHA", "a" * 40)
+    assert engine.candidate_env_args() == [
+        "--update-env-vars",
+        f"APP_RELEASE_SHA={'a' * 40},APP_BACKGROUND_TASKS_ENABLED=false",
+    ]
+
+
+def test_artemis_dispatcher_candidate_routes_only_to_separate_workers(monkeypatch):
+    monkeypatch.setenv("CGM_SERVICE", "cgm-artemis-job-dispatcher")
+    monkeypatch.setenv("CGM_PROFILE", "cgm-artemis-job-dispatcher")
+    monkeypatch.setenv("CGM_RELEASE_SHA", "a" * 40)
+    monkeypatch.setenv("CGM_REGION", "us-central1")
+    monkeypatch.setenv("CGM_PROJECT_ID", "cgm-assistant-prod")
+    resolved = []
+
+    def service_url(name, region, project):
+        resolved.append((name, region, project))
+        return f"https://{name}-{'a' * 10}-uc.a.run.app"
+
+    monkeypatch.setattr(engine, "_service_url", service_url)
+    actual = engine.candidate_env_args()
+    assert actual[0] == "--update-env-vars"
+    values = dict(item.split("=", 1) for item in actual[1].split(","))
+    assert values["APP_RELEASE_SHA"] == "a" * 40
+    assert values["JOB_WORKER_PREFIX"] == "cgm-artemis"
+    assert values["JOB_TASK_OIDC_SERVICE_ACCOUNT"] == (
+        "artemis-tasks-invoker@cgm-assistant-prod.iam.gserviceaccount.com"
+    )
+    assert values["ARTEMIS_SYNC_QUEUE"] == "cgm-artemis-sync"
+    assert values["ARTEMIS_CLOCK_SYNC_QUEUE"] == "cgm-artemis-clock-sync"
+    assert values["ARTEMIS_DATA_RECOVERY_QUEUE"] == "cgm-artemis-data-recovery"
+    assert values["ARTEMIS_FND_IP_SYNC_QUEUE"] == "cgm-artemis-fnd-ip-sync"
+    assert resolved == [
+        ("cgm-artemis-sync-worker", "us-central1", "cgm-assistant-prod"),
+        ("cgm-artemis-clock-sync-worker", "us-central1", "cgm-assistant-prod"),
+        ("cgm-artemis-data-recovery-worker", "us-central1", "cgm-assistant-prod"),
+        ("cgm-artemis-fnd-ip-sync-worker", "us-central1", "cgm-assistant-prod"),
+    ]
+
+
+def test_artemis_dispatcher_rejects_an_unallowlisted_dynamic_route(monkeypatch):
+    service = "cgm-artemis-job-dispatcher"
+    monkeypatch.setenv("CGM_SERVICE", service)
+    monkeypatch.setenv("CGM_PROFILE", service)
+    monkeypatch.setenv("CGM_RELEASE_SHA", "a" * 40)
+    monkeypatch.setenv("CGM_REGION", "us-central1")
+    monkeypatch.setenv("CGM_PROJECT_ID", "cgm-assistant-prod")
+    monkeypatch.setattr(
+        engine,
+        "_service_url",
+        lambda name, _region, _project: f"https://{name}-{'a' * 10}-uc.a.run.app",
+    )
+    monkeypatch.setitem(
+        engine.PROFILE_SPECS[service],
+        "candidate_env_vars",
+        engine.PROFILE_SPECS[service]["candidate_env_vars"]
+        + [["ARTEMIS_UNLISTED_WORKER_URL", "{service_uri:cgm-artemis-unknown-worker}"]],
+    )
+    with pytest.raises(RuntimeError, match="service URL is not allowed"):
+        engine.candidate_env_args()
+
+
 def test_artemis_cloud_build_contract_is_economical(monkeypatch):
     from eng_platform_api.config import config
 
