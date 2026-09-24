@@ -826,6 +826,7 @@ def test_unknown_callback_image_drift_allows_only_verified_planner_remediation(
 
 
 def test_unknown_callback_drift_does_not_retry_a_non_planner_failure(monkeypatch):
+    new_image = "planner@sha256:" + "f" * 64
     state = _execution(
         operation="main_release",
         status="unknown",
@@ -854,6 +855,11 @@ def test_unknown_callback_drift_does_not_retry_a_non_planner_failure(monkeypatch
     )
     save = mock.Mock()
     submit = mock.Mock()
+    monkeypatch.setattr(
+        reconciler.config.release_orchestrator,
+        "release_planner_image",
+        new_image,
+    )
     monkeypatch.setattr(reconciler.release_executions, "get", lambda _: state)
     monkeypatch.setattr(reconciler.release_cloud_build, "get_build", lambda _: build)
     monkeypatch.setattr(reconciler.release_executions, "save", save)
@@ -864,6 +870,28 @@ def test_unknown_callback_drift_does_not_retry_a_non_planner_failure(monkeypatch
     assert result is state
     save.assert_not_called()
     submit.assert_not_called()
+
+
+def test_unknown_callback_drift_without_committed_hash_is_not_inspected(monkeypatch):
+    state = _execution(
+        operation="main_release",
+        status="unknown",
+        error="Cloud Build release identity does not match execution",
+        engine_event_status="quality_passed",
+        release_engine_failed=True,
+        evidence_committed=True,
+        planner_retry_count=1,
+        planner_retry_checked=True,
+        build_id="planner-retry-build-1",
+    )
+    get_build = mock.Mock()
+    monkeypatch.setattr(reconciler.release_executions, "get", lambda _: state)
+    monkeypatch.setattr(reconciler.release_cloud_build, "get_build", get_build)
+
+    result = reconciler.reconcile("execution-1")
+
+    assert result is state
+    get_build.assert_not_called()
 
 
 def test_unknown_callback_drift_keeps_execution_when_old_build_uses_current_image(
