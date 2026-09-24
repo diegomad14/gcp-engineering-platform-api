@@ -484,17 +484,53 @@ def claim_publish(execution_id: str) -> bool:
     return write(transaction)
 
 
-def claim_source_token(execution_id: str) -> bool:
-    """Allow a managed build to mint one repository-scoped read token."""
-    changes = {"source_token_issued_at": _now(), "updated_at": _now()}
+def _claim_build_scoped_token(
+    current: dict[str, Any], *, provider_run_id: str, token_field: str, issued_field: str
+) -> bool:
+    provider = current.get("provider")
+    if not provider_run_id:
+        return False
+    if provider == "cloud_build":
+        if current.get("build_id") != provider_run_id:
+            return False
+        previous = set(current.get("previous_build_ids") or [])
+    elif provider == "github_actions" and token_field == "event_token_provider_run_id":
+        if str(current.get("provider_run_id", "")) != provider_run_id:
+            return False
+        previous = set()
+    else:
+        return False
+    issued_for = str(current.get(token_field, ""))
+    if issued_for == provider_run_id:
+        return False
+    if issued_for and issued_for not in previous:
+        return False
+    if not issued_for and current.get(issued_field) and (
+        not previous or provider_run_id in previous
+    ):
+        # Backward compatibility for executions that recorded only the
+        # one-time timestamp before token claims were scoped to build IDs.
+        return False
+    return True
+
+
+def claim_source_token(execution_id: str, *, provider_run_id: str) -> bool:
+    """Allow one repository-scoped read token per verified Cloud Build attempt."""
+    now = _now()
+    changes = {
+        "source_token_issued_at": now,
+        "source_token_build_id": provider_run_id,
+        "updated_at": now,
+    }
     collection = _collection()
     if collection is None:
         with _lock:
             current = _memory.get(execution_id)
-            if (
-                current is None
-                or current.get("provider") != "cloud_build"
-                or current.get("source_token_issued_at")
+            if current is None or not _claim_build_scoped_token(
+                current,
+                provider_run_id=provider_run_id,
+                token_field="source_token_build_id",
+                issued_field="source_token_issued_at",
             ):
                 return False
             current.update(changes)
@@ -509,8 +545,11 @@ def claim_source_token(execution_id: str) -> bool:
         if not snapshot.exists:
             return False
         current = snapshot.to_dict()
-        if current.get("provider") != "cloud_build" or current.get(
-            "source_token_issued_at"
+        if not _claim_build_scoped_token(
+            current,
+            provider_run_id=provider_run_id,
+            token_field="source_token_build_id",
+            issued_field="source_token_issued_at",
         ):
             return False
         txn.update(document, changes)
@@ -519,23 +558,37 @@ def claim_source_token(execution_id: str) -> bool:
     return write(transaction)
 
 
-def claim_event_token(execution_id: str, *, token_hash: str) -> bool:
-    """Bind one callback token hash without ever persisting its plaintext value."""
+def claim_event_token(
+    execution_id: str, *, provider_run_id: str, token_hash: str
+) -> bool:
+    """Bind one callback token hash to a single build attempt."""
     if len(token_hash) != 64 or any(
         character not in "0123456789abcdef" for character in token_hash
     ):
         raise ValueError("Event token hash must be a SHA-256 hex digest")
+    now = _now()
     changes = {
         "event_token_hash": token_hash,
-        "event_token_issued_at": _now(),
-        "updated_at": _now(),
+        "event_token_issued_at": now,
+        "updated_at": now,
     }
     collection = _collection()
     if collection is None:
         with _lock:
             current = _memory.get(execution_id)
-            if current is None or current.get("event_token_hash"):
+            token_field = (
+                "event_token_build_id"
+                if current and current.get("provider") == "cloud_build"
+                else "event_token_provider_run_id"
+            )
+            if current is None or not _claim_build_scoped_token(
+                current,
+                provider_run_id=provider_run_id,
+                token_field=token_field,
+                issued_field="event_token_issued_at",
+            ):
                 return False
+            changes[token_field] = provider_run_id
             current.update(changes)
             return True
 
@@ -549,8 +602,19 @@ def claim_event_token(execution_id: str, *, token_hash: str) -> bool:
         if not snapshot.exists:
             return False
         current = snapshot.to_dict()
-        if current.get("event_token_hash"):
+        token_field = (
+            "event_token_build_id"
+            if current.get("provider") == "cloud_build"
+            else "event_token_provider_run_id"
+        )
+        if not _claim_build_scoped_token(
+            current,
+            provider_run_id=provider_run_id,
+            token_field=token_field,
+            issued_field="event_token_issued_at",
+        ):
             return False
+        changes[token_field] = provider_run_id
         txn.update(document, changes)
         return True
 
