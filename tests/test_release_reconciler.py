@@ -830,6 +830,8 @@ def test_unknown_callback_drift_does_not_retry_a_non_planner_failure(monkeypatch
         operation="main_release",
         status="unknown",
         error="Cloud Build release identity does not match execution",
+        build_id="planner-retry-build-1",
+        provider_run_id="planner-retry-build-1",
         engine_event_status="quality_passed",
         release_engine_failed=True,
         evidence_committed=True,
@@ -849,6 +851,45 @@ def test_unknown_callback_drift_does_not_retry_a_non_planner_failure(monkeypatch
         status="FAILURE",
         substitutions=substitutions,
         steps=[{"id": "prepare", "status": "FAILURE"}],
+    )
+    save = mock.Mock()
+    submit = mock.Mock()
+    monkeypatch.setattr(reconciler.release_executions, "get", lambda _: state)
+    monkeypatch.setattr(reconciler.release_cloud_build, "get_build", lambda _: build)
+    monkeypatch.setattr(reconciler.release_executions, "save", save)
+    monkeypatch.setattr(reconciler.release_cloud_build, "submit", submit)
+
+    result = reconciler.reconcile("execution-1")
+
+    assert result is state
+    save.assert_not_called()
+    submit.assert_not_called()
+
+
+def test_unknown_callback_drift_keeps_execution_when_old_build_uses_current_image(
+    monkeypatch,
+):
+    state = _execution(
+        operation="main_release",
+        status="unknown",
+        error="Cloud Build release identity does not match execution",
+        build_id="planner-retry-build-1",
+        provider_run_id="planner-retry-build-1",
+        engine_event_status="quality_passed",
+        release_engine_failed=True,
+        evidence_committed=True,
+        report_hash="e" * 64,
+        planner_retry_count=1,
+        planner_retry_checked=True,
+        planner_retry_pending=False,
+    )
+    substitutions = _substitutions(state)
+    substitutions["_PLANNER_RETRY_ATTEMPT"] = "1"
+    build = _build(
+        state,
+        status="FAILURE",
+        substitutions=substitutions,
+        steps=[{"id": "release-plan", "status": "FAILURE"}],
     )
     save = mock.Mock()
     submit = mock.Mock()
