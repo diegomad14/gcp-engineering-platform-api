@@ -307,6 +307,18 @@ def _prepare_history(source: Path, identity: dict[str, str]) -> None:
     try:
         if bootstrap:
             _git(source, "init", "--quiet", env=environment)
+        shallow = (
+            _git(
+                source,
+                "-c",
+                f"safe.directory={source}",
+                "rev-parse",
+                "--is-shallow-repository",
+                env=environment,
+            )
+            == "true"
+        )
+        history_depth = ("--deepen=2",) if shallow else ()
         _git(
             source,
             "-c",
@@ -314,12 +326,9 @@ def _prepare_history(source: Path, identity: dict[str, str]) -> None:
             "fetch",
             "--force",
             "--no-recurse-submodules",
+            *history_depth,
             repository_url,
-            *(
-                (f"+{identity['head_sha']}:refs/heads/eng-platform-quality-head",)
-                if bootstrap
-                else ()
-            ),
+            f"+{identity['head_sha']}:refs/heads/eng-platform-quality-head",
             f"+{identity['base_sha']}:refs/heads/eng-platform-quality-base",
             "+refs/tags/*:refs/tags/*",
             env=environment,
