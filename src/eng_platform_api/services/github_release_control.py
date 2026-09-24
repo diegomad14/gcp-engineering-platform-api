@@ -129,6 +129,18 @@ def workflow_run(repository: str, run_id: int):
     return github_client().get_repo(repository).get_workflow_run(run_id)
 
 
+def repository_execution_mode(repository: str) -> str:
+    """Read the server-managed mode used to skip private GitHub-hosted jobs."""
+    repo = github_client().get_repo(repository)
+    requester = repo._requester  # type: ignore[attr-defined]
+    path = (
+        f"/repos/{repository}/actions/variables/"
+        f"{config.release_orchestrator.github_mode_variable}"
+    )
+    _, payload = requester.requestJsonAndCheck("GET", path)
+    return str(payload.get("value", ""))
+
+
 def dispatch_health_probe(repository: str, *, nonce: str) -> None:
     workflow = (
         github_client()

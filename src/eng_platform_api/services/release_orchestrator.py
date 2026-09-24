@@ -686,6 +686,7 @@ def reconcile_verified_github_run(
     base_sha: str,
     run_id: int,
     requested_by: str,
+    paired_run_id: int | None = None,
 ) -> dict[str, Any]:
     """Seed a missed webhook only after re-reading all identity from GitHub."""
     service = catalog.get_service(service_name)
@@ -713,13 +714,58 @@ def reconcile_verified_github_run(
         else str(getattr(run, "display_title", ""))
         == f"eng-platform-quality-{head_sha}"
     )
-    if (
-        not run_matches_sha
-        or str(getattr(run, "event", "")) != expected_event
-        or str(getattr(run, "status", "")) != "completed"
-        or not release_workflow_identity.matches_workflow_path(
-            operation, str(getattr(run, "path", ""))
+    common_identity_matches = (
+        run_matches_sha
+        and str(getattr(run, "event", "")) == expected_event
+        and str(getattr(run, "status", "")) == "completed"
+        and (
+            operation != "main_release"
+            or str(getattr(run, "head_branch", "")) == "main"
         )
+    )
+    expected_workflow = release_workflow_identity.matches_workflow_path(
+        operation, str(getattr(run, "path", ""))
+    )
+    legacy_billing_recovery = False
+    if common_identity_matches and not expected_workflow:
+        # During the cutover, the legacy semantic-release workflow may be the
+        # run GitHub explicitly rejects for Billing while the new, expected
+        # orchestrator workflow is deliberately skipped by the server-owned
+        # Cloud Build mode. Accept only that paired, exact-SHA state.
+        legacy_workflow = (
+            operation == "main_release"
+            and str(getattr(run, "path", "")).split("@", 1)[0].lstrip("/")
+            == ".github/workflows/semantic-release.yml"
+        )
+        paired_run = (
+            github_release_control.workflow_run(service.repository, paired_run_id)
+            if legacy_workflow and paired_run_id
+            else None
+        )
+        paired_matches = bool(
+            paired_run
+            and str(getattr(paired_run, "head_sha", "")) == head_sha
+            and str(getattr(paired_run, "event", "")) == "push"
+            and str(getattr(paired_run, "head_branch", "")) == "main"
+            and str(getattr(paired_run, "status", "")) == "completed"
+            and str(getattr(paired_run, "conclusion", "")) == "skipped"
+            and release_workflow_identity.matches_workflow_path(
+                "main_release", str(getattr(paired_run, "path", ""))
+            )
+        )
+        legacy_billing_recovery = bool(
+            legacy_workflow
+            and paired_matches
+            and github_release_control.current_default_sha(service.repository)
+            == head_sha
+            and github_release_control.repository_execution_mode(service.repository)
+            == "cloud_build"
+            and github_actions_quota.is_release_quota_failure(
+                run, repository=service.repository, expected_sha=head_sha
+            )
+        )
+    if not common_identity_matches or not (
+        expected_workflow or legacy_billing_recovery
     ):
         raise ReleaseOrchestratorError("GitHub run does not match release recovery")
     execution, created = _reserve(
@@ -740,7 +786,7 @@ def reconcile_verified_github_run(
         github_run_url=str(getattr(run, "html_url", "")),
         recovery_requested_by=requested_by,
     )
-    if github_actions_quota.is_release_quota_failure(
+    if legacy_billing_recovery or github_actions_quota.is_release_quota_failure(
         run, repository=service.repository, expected_sha=head_sha
     ):
         _open_circuit(
