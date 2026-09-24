@@ -63,6 +63,124 @@ def _require_config(service: CatalogService) -> None:
         raise ReleaseCloudBuildError("PostgreSQL image must be pinned by digest")
 
 
+def _planner_retry_request(
+    execution: dict[str, Any],
+    service: CatalogService,
+    *,
+    substitutions: dict[str, str],
+    common_env: list[str],
+) -> dict[str, Any]:
+    """Retry only release planning after exact immutable quality evidence passed."""
+    if (
+        execution.get("operation") != "main_release"
+        or int(execution.get("planner_retry_count", 0) or 0) != 1
+        or not execution.get("planner_retry_pending")
+        or not execution.get("evidence_committed")
+        or not execution.get("report_hash")
+    ):
+        raise ReleaseCloudBuildError("Planner-only recovery is not authorized")
+    profile = profile_for(service)
+    executor = executor_image(profile)
+    planner = config.release_orchestrator.release_planner_image
+    planner_env = [
+        *common_env,
+        f"ENG_PLATFORM_RELEASE_PLANNER_HASH={planner_hash()}",
+        f"ENG_PLATFORM_RELEASE_PLANNER_IMAGE={planner}",
+        "GIT_CONFIG_COUNT=1",
+        "GIT_CONFIG_KEY_0=safe.directory",
+        "GIT_CONFIG_VALUE_0=/workspace",
+    ]
+    control_volume = {"name": "release-control", "path": "/eng-platform-control"}
+    planner_volume = {"name": "planner-output", "path": "/eng-platform-plan"}
+    steps = [
+        {
+            "id": "prepare",
+            "name": executor,
+            "args": [
+                "--mode",
+                "prepare",
+                "--service",
+                service.service_name,
+                "--source",
+                "/workspace",
+                "--control-dir",
+                "/eng-platform-control",
+            ],
+            "env": common_env,
+            "volumes": [control_volume],
+        },
+        {
+            "id": "prepare-planner-volume",
+            "name": executor,
+            "entrypoint": "/bin/bash",
+            "args": [
+                "-euc",
+                "install -d -m 0700 /eng-platform-plan; "
+                "chown -R 1000:1000 /eng-platform-plan /eng-platform-control",
+            ],
+            "volumes": [planner_volume, control_volume],
+            "waitFor": ["prepare"],
+        },
+        {
+            "id": "release-plan",
+            "name": planner,
+            "args": [
+                "--mode",
+                "plan",
+                "--source",
+                "/workspace",
+                "--output",
+                "/eng-platform-plan/release-plan.json",
+            ],
+            "env": planner_env,
+            "volumes": [planner_volume],
+            "waitFor": ["prepare-planner-volume"],
+        },
+        {
+            "id": "publish-release-plan",
+            "name": planner,
+            "args": [
+                "--mode",
+                "publish",
+                "--manifest",
+                "/eng-platform-plan/release-plan.json",
+                "--control-dir",
+                "/eng-platform-control",
+            ],
+            "env": common_env
+            + [
+                f"ENG_PLATFORM_RELEASE_PLANNER_HASH={planner_hash()}",
+                f"ENG_PLATFORM_RELEASE_PLANNER_IMAGE={planner}",
+            ],
+            "volumes": [planner_volume, control_volume],
+            "waitFor": ["release-plan"],
+        },
+    ]
+    return {
+        "source": {
+            "connectedRepository": {
+                "repository": _repository(service),
+                "revision": str(execution["head_sha"]),
+            }
+        },
+        "steps": steps,
+        "timeout": f"{profile.timeout_seconds}s",
+        "options": {
+            "machineType": "E2_STANDARD_2",
+            "logging": "CLOUD_LOGGING_ONLY",
+            "substitutionOption": "ALLOW_LOOSE",
+        },
+        "serviceAccount": config.release_orchestrator.service_account,
+        "substitutions": substitutions,
+        "tags": [
+            "eng-platform",
+            "economy",
+            "release-quality",
+            f"release-{execution['execution_id'][:48]}",
+        ],
+    }
+
+
 def build_request(execution: dict[str, Any], service: CatalogService) -> dict[str, Any]:
     """Generate the only allowed build shape; no request-supplied commands exist."""
     _require_config(service)
@@ -100,6 +218,9 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
             else ""
         ),
     }
+    planner_retry_count = int(execution.get("planner_retry_count", 0) or 0)
+    if planner_retry_count:
+        substitutions["_PLANNER_RETRY_ATTEMPT"] = str(planner_retry_count)
     common_env = [
         f"ENG_PLATFORM_RELEASE_EXECUTION_ID={execution_id}",
         f"ENG_PLATFORM_RELEASE_FINGERPRINT={fingerprint_value}",
@@ -121,6 +242,13 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
     }
     planner_volume = {"name": "planner-output", "path": "/eng-platform-plan"}
     executor = executor_image(profile)
+    if execution.get("planner_retry_pending"):
+        return _planner_retry_request(
+            execution,
+            service,
+            substitutions=substitutions,
+            common_env=common_env,
+        )
     steps: list[dict[str, Any]] = [
         {
             "id": "prepare",
@@ -352,7 +480,7 @@ def get_build(build_id: str) -> dict[str, Any]:
 
 def _expected_substitutions(execution: dict[str, Any]) -> dict[str, str]:
     operation = str(execution["operation"])
-    return {
+    expected = {
         "_EXECUTION_ID": str(execution["execution_id"]),
         "_REQUEST_FINGERPRINT": str(execution["fingerprint"]),
         "_SERVICE_NAME": str(execution["service_name"]),
@@ -371,6 +499,10 @@ def _expected_substitutions(execution: dict[str, Any]) -> dict[str, str]:
             else ""
         ),
     }
+    planner_retry_count = int(execution.get("planner_retry_count", 0) or 0)
+    if planner_retry_count:
+        expected["_PLANNER_RETRY_ATTEMPT"] = str(planner_retry_count)
+    return expected
 
 
 def _matching_build(execution: dict[str, Any]) -> dict[str, Any] | None:

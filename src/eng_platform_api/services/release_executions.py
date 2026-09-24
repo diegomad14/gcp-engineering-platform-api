@@ -71,6 +71,22 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def planner_retry_candidate(value: dict[str, Any]) -> bool:
+    """Whether one planner-only recovery is still available for this execution."""
+    return bool(
+        value.get("status") == "failed"
+        and value.get("provider") == "cloud_build"
+        and value.get("operation") == "main_release"
+        and value.get("release_engine_failed")
+        and value.get("engine_event_status") == "quality_passed"
+        and value.get("evidence_committed")
+        and value.get("report_hash")
+        and not value.get("planner_retry_checked")
+        and int(value.get("planner_retry_count", 0) or 0) == 0
+        and value.get("build_id")
+    )
+
+
 def fingerprint(
     *,
     repository: str,
@@ -596,6 +612,71 @@ def reconcile_submission_absent(execution_id: str) -> dict[str, Any]:
     )
 
 
+def stage_planner_retry(execution_id: str, *, failed_build_id: str) -> dict[str, Any]:
+    """Reserve the single planner-only recovery after verifying terminal identity."""
+    if not failed_build_id:
+        raise ValueError("Failed Cloud Build identity is required")
+    current = get(execution_id)
+    if current is None:
+        raise KeyError(execution_id)
+    if not planner_retry_candidate(current) or current.get("build_id") != failed_build_id:
+        raise ValueError("Release execution is not eligible for planner recovery")
+
+    now = _now()
+    previous_build_ids = list(current.get("previous_build_ids") or [])
+    if failed_build_id not in previous_build_ids:
+        previous_build_ids.append(failed_build_id)
+    changes = {
+        "status": "submission_pending",
+        "build_id": "",
+        "provider_run_id": "",
+        "provider_status": "RETRY_PENDING",
+        "logs_url": "",
+        "build_name": "",
+        "previous_build_ids": previous_build_ids,
+        "planner_retry_pending": True,
+        "planner_retry_count": 1,
+        "planner_retry_checked": True,
+        "planner_retry_previous_build_id": failed_build_id,
+        "planner_retry_requested_at": now,
+        "release_engine_failed": False,
+        "release_error": "",
+        "error": "",
+        "updated_at": now,
+    }
+    collection = _collection()
+    if collection is None:
+        with _lock:
+            current = _memory.get(execution_id)
+            if current is None:
+                raise KeyError(execution_id)
+            if not planner_retry_candidate(current) or current.get("build_id") != failed_build_id:
+                raise ValueError("Release execution is not eligible for planner recovery")
+            current.update(changes)
+            return dict(current)
+
+    document = collection.document(execution_id)
+    transaction = document._client.transaction()
+    from google.cloud.firestore import transactional
+
+    @transactional
+    def write(txn):
+        snapshot = document.get(transaction=txn)
+        if not snapshot.exists:
+            raise KeyError(execution_id)
+        current = snapshot.to_dict()
+        if not planner_retry_candidate(current) or current.get("build_id") != failed_build_id:
+            raise ValueError("Release execution is not eligible for planner recovery")
+        # This narrowly scoped recovery is the only terminal-state reopening:
+        # exact quality evidence is already committed, and the known failed
+        # planner step is verified by the reconciler before this reservation.
+        txn.update(document, changes)
+        current.update(changes)
+        return current
+
+    return write(transaction)
+
+
 def _validate_status_change(current: dict[str, Any], changes: dict[str, Any]) -> None:
     new_status = changes.get("status")
     if not new_status or new_status == current.get("status"):
@@ -649,7 +730,10 @@ def list_due(*, limit: int = 100) -> list[dict[str, Any]]:
             values = [
                 dict(value)
                 for value in _memory.values()
-                if value.get("status") not in terminal
+                if (
+                    value.get("status") not in terminal
+                    or planner_retry_candidate(value)
+                )
                 and not (
                     value.get("operation") == "pr_quality"
                     and value.get("status") == "quality_passed"
@@ -661,7 +745,10 @@ def list_due(*, limit: int = 100) -> list[dict[str, Any]]:
         values = [
             snapshot.to_dict()
             for snapshot in collection.stream()
-            if snapshot.to_dict().get("status") not in terminal
+            if (
+                snapshot.to_dict().get("status") not in terminal
+                or planner_retry_candidate(snapshot.to_dict())
+            )
             and not (
                 snapshot.to_dict().get("operation") == "pr_quality"
                 and snapshot.to_dict().get("status") == "quality_passed"

@@ -266,6 +266,16 @@ def test_record_build_timing_records_bounded_seconds_and_minutes(monkeypatch):
         "execution-1",
         build_duration_seconds=150.0,
         build_queue_seconds=0.0,
+        build_attempts=[
+            {
+                "build_id": "build-1",
+                "duration_seconds": 150.0,
+                "queue_seconds": 0.0,
+                "minutes": 2.5,
+                "estimated_cost_usd": 0.015,
+                "finished_at": "2026-09-22T12:02:30Z",
+            }
+        ],
         build_minutes_estimate=2.5,
         estimated_compute_cost_usd=0.015,
         build_minute_price_usd=0.006,
@@ -288,12 +298,56 @@ def test_record_build_timing_clamps_clock_skew_to_zero(monkeypatch):
         "execution-1",
         build_duration_seconds=0.0,
         build_queue_seconds=0.0,
+        build_attempts=[
+            {
+                "build_id": "",
+                "duration_seconds": 0.0,
+                "queue_seconds": 0.0,
+                "minutes": 0.0,
+                "estimated_cost_usd": 0.0,
+                "finished_at": "2026-09-22T12:00:00Z",
+            }
+        ],
         build_minutes_estimate=0.0,
         estimated_compute_cost_usd=0.0,
         build_minute_price_usd=0.006,
         cost_category="release_quality",
         build_finished_at="2026-09-22T12:00:00Z",
     )
+
+
+def test_record_build_timing_accumulates_distinct_retry_attempts(monkeypatch):
+    prior = {
+        **_execution(),
+        "build_attempts": [
+            {
+                "build_id": "build-1",
+                "duration_seconds": 150.0,
+                "queue_seconds": 0.0,
+                "minutes": 2.5,
+                "estimated_cost_usd": 0.015,
+                "finished_at": "2026-09-22T12:02:30Z",
+            }
+        ],
+    }
+    monkeypatch.setattr(reconciler.release_executions, "get", lambda _: prior)
+    save = mock.Mock()
+    monkeypatch.setattr(reconciler.release_executions, "save", save)
+    retry = {
+        **_build(),
+        "id": "build-2",
+        "startTime": "2026-09-22T12:02:30Z",
+        "finishTime": "2026-09-22T12:03:00Z",
+    }
+
+    reconciler._record_build_timing("execution-1", retry)
+
+    assert save.call_args.kwargs["build_minutes_estimate"] == 3.0
+    assert save.call_args.kwargs["estimated_compute_cost_usd"] == 0.018
+    assert [item["build_id"] for item in save.call_args.kwargs["build_attempts"]] == [
+        "build-1",
+        "build-2",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -538,9 +592,79 @@ def test_cloud_build_release_failure_commits_quality_then_fails_only_release(
     assert summary.call_args.args[0]["operation"] == "main_release"
     assert summary.call_args.args[2] == "e" * 64
     publish.assert_not_called()
-    assert complete.call_args_list[-1] == mock.call(
-        result, "release", "failure", "planner crashed"
+    assert complete.call_args_list[-1].args[1:] == (
+        "release",
+        "failure",
+        "planner crashed",
     )
+
+
+def test_terminal_planner_only_failure_submits_one_cost_limited_retry(monkeypatch):
+    state = _execution(
+        operation="main_release",
+        status="failed",
+        engine_event_status="quality_passed",
+        release_engine_failed=True,
+        evidence_committed=True,
+        report_hash="e" * 64,
+        planner_retry_count=0,
+    )
+    build = _build(
+        state,
+        status="FAILURE",
+        steps=[{"id": "release-plan", "status": "FAILURE"}],
+    )
+    staged = {
+        **state,
+        "status": "submission_pending",
+        "build_id": "",
+        "planner_retry_count": 1,
+        "planner_retry_pending": True,
+    }
+    submitted = {**staged, "build_id": "planner-retry-build"}
+    stage = mock.Mock(return_value=staged)
+    submit = mock.Mock(return_value=submitted)
+    monkeypatch.setattr(reconciler.release_executions, "get", lambda _: state)
+    monkeypatch.setattr(reconciler.release_executions, "planner_retry_candidate", lambda _: True)
+    monkeypatch.setattr(reconciler.release_cloud_build, "get_build", lambda _: build)
+    monkeypatch.setattr(reconciler, "_record_build_timing", mock.Mock())
+    monkeypatch.setattr(reconciler.release_executions, "stage_planner_retry", stage)
+    monkeypatch.setattr(reconciler.catalog, "get_service", lambda _: object())
+    monkeypatch.setattr(reconciler.release_cloud_build, "submit", submit)
+
+    result = reconciler.reconcile("execution-1")
+
+    assert result["build_id"] == "planner-retry-build"
+    stage.assert_called_once_with("execution-1", failed_build_id="build-1")
+    submit.assert_called_once_with("execution-1", mock.ANY)
+
+
+def test_terminal_failure_in_other_step_is_not_retried(monkeypatch):
+    state = _execution(
+        operation="main_release",
+        status="failed",
+        engine_event_status="quality_passed",
+        release_engine_failed=True,
+        evidence_committed=True,
+        report_hash="e" * 64,
+    )
+    build = _build(
+        state,
+        status="FAILURE",
+        steps=[{"id": "prepare", "status": "FAILURE"}],
+    )
+    save = mock.Mock(return_value={**state, "planner_retry_checked": True})
+    stage = mock.Mock()
+    monkeypatch.setattr(reconciler.release_executions, "get", lambda _: state)
+    monkeypatch.setattr(reconciler.release_executions, "planner_retry_candidate", lambda _: True)
+    monkeypatch.setattr(reconciler.release_cloud_build, "get_build", lambda _: build)
+    monkeypatch.setattr(reconciler.release_executions, "save", save)
+    monkeypatch.setattr(reconciler.release_executions, "stage_planner_retry", stage)
+
+    result = reconciler.reconcile("execution-1")
+
+    assert result["planner_retry_checked"] is True
+    stage.assert_not_called()
 
 
 def test_cloud_build_failure_before_quality_is_terminal_without_evidence(

@@ -395,6 +395,44 @@ def test_main_build_splits_planner_from_trusted_plan_publisher(configured):
     assert request["substitutions"]["_PLANNER_DIGEST"] == PLANNER
 
 
+def test_planner_retry_reuses_passed_evidence_without_quality_steps(configured):
+    execution = _execution_for(
+        _service(),
+        operation="main_release",
+        planner_retry_count=1,
+        planner_retry_pending=True,
+        evidence_committed=True,
+        report_hash="a" * 64,
+    )
+
+    request = cloud_build.build_request(execution, _service())
+
+    assert [step["id"] for step in request["steps"]] == [
+        "prepare",
+        "prepare-planner-volume",
+        "release-plan",
+        "publish-release-plan",
+    ]
+    assert request["substitutions"]["_PLANNER_RETRY_ATTEMPT"] == "1"
+    assert request["options"]["machineType"] == "E2_STANDARD_2"
+    assert request["options"]["logging"] == "CLOUD_LOGGING_ONLY"
+    assert "quality" not in {step["id"] for step in request["steps"]}
+    assert "publish-quality" not in {step["id"] for step in request["steps"]}
+    assert "GIT_CONFIG_VALUE_0=/workspace" in request["steps"][2]["env"]
+
+
+def test_planner_retry_requires_committed_quality_evidence(configured):
+    execution = _execution_for(
+        _service(),
+        operation="main_release",
+        planner_retry_count=1,
+        planner_retry_pending=True,
+    )
+
+    with pytest.raises(cloud_build.ReleaseCloudBuildError, match="not authorized"):
+        cloud_build.build_request(execution, _service())
+
+
 def test_api_profile_runs_container_smoke_without_control_volume(
     configured, monkeypatch
 ):

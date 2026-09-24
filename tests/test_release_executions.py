@@ -634,6 +634,65 @@ def test_reconcile_submission_absent_rejects_known_or_bound_submission():
         executions.reconcile_submission_absent("missing")
 
 
+def _failed_planner_execution(value: dict) -> None:
+    executions._memory[value["execution_id"]].update(
+        {
+            "status": "failed",
+            "provider": "cloud_build",
+            "operation": "main_release",
+            "build_id": "planner-build-1",
+            "provider_run_id": "planner-build-1",
+            "engine_event_status": "quality_passed",
+            "release_engine_failed": True,
+            "evidence_committed": True,
+            "report_hash": "a" * 64,
+        }
+    )
+
+
+def test_planner_retry_is_a_single_exact_evidence_recovery():
+    value, _ = _reserve(operation="main_release", provider="cloud_build")
+    _failed_planner_execution(value)
+
+    assert executions.planner_retry_candidate(executions.get(value["execution_id"]))
+    staged = executions.stage_planner_retry(
+        value["execution_id"], failed_build_id="planner-build-1"
+    )
+
+    assert staged["status"] == "submission_pending"
+    assert staged["build_id"] == ""
+    assert staged["provider_run_id"] == ""
+    assert staged["planner_retry_pending"] is True
+    assert staged["planner_retry_count"] == 1
+    assert staged["previous_build_ids"] == ["planner-build-1"]
+    assert staged["evidence_committed"] is True
+    assert not executions.planner_retry_candidate(staged)
+
+
+def test_planner_retry_rejects_missing_evidence_or_second_attempt():
+    value, _ = _reserve(operation="main_release", provider="cloud_build")
+    _failed_planner_execution(value)
+    executions._memory[value["execution_id"]]["evidence_committed"] = False
+    assert not executions.planner_retry_candidate(executions.get(value["execution_id"]))
+    with pytest.raises(ValueError, match="not eligible"):
+        executions.stage_planner_retry(
+            value["execution_id"], failed_build_id="planner-build-1"
+        )
+
+    executions._memory[value["execution_id"]]["evidence_committed"] = True
+    executions._memory[value["execution_id"]]["planner_retry_count"] = 1
+    assert not executions.planner_retry_candidate(executions.get(value["execution_id"]))
+
+
+def test_planner_retry_eligible_execution_remains_due_for_reconciliation():
+    value, _ = _reserve(operation="main_release", provider="cloud_build")
+    _failed_planner_execution(value)
+
+    assert [item["execution_id"] for item in executions.list_due()] == [
+        value["execution_id"]
+    ]
+
+
 def test_list_and_find_filter_normalize_sha_and_order_by_creation():
     first, _ = _reserve(head_sha="c" * 40)
     second, _ = _reserve(operation="main_release", head_sha="d" * 40)
@@ -891,3 +950,31 @@ def test_firestore_reconcile_lists_and_finds_executions(firestore_collection):
         due["execution_id"],
         other["execution_id"],
     ]
+
+
+def test_firestore_planner_retry_is_transactional_and_one_shot(firestore_collection):
+    value, _ = _reserve(operation="main_release", provider="cloud_build")
+    firestore_collection.document(value["execution_id"]).value.update(
+        {
+            "status": "failed",
+            "build_id": "planner-build-1",
+            "provider_run_id": "planner-build-1",
+            "engine_event_status": "quality_passed",
+            "release_engine_failed": True,
+            "evidence_committed": True,
+            "report_hash": "a" * 64,
+        }
+    )
+
+    staged = executions.stage_planner_retry(
+        value["execution_id"], failed_build_id="planner-build-1"
+    )
+
+    assert staged["status"] == "submission_pending"
+    assert staged["planner_retry_pending"] is True
+    assert staged["planner_retry_count"] == 1
+    assert staged["previous_build_ids"] == ["planner-build-1"]
+    with pytest.raises(ValueError, match="not eligible"):
+        executions.stage_planner_retry(
+            value["execution_id"], failed_build_id="planner-build-1"
+        )
