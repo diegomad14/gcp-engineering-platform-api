@@ -346,7 +346,10 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
                     (
                         "docker run --detach --rm --name eng-platform-postgres "
                         "--network cloudbuild -e POSTGRES_PASSWORD=quality-only "
-                        '-e POSTGRES_DB=wm_test "$ENG_PLATFORM_POSTGRES_IMAGE"; '
+                        # Cloud Build treats single-dollar expressions as
+                        # substitutions before the container starts. Escape
+                        # this shell environment expansion so it reaches bash.
+                        '-e POSTGRES_DB=wm_test "$$ENG_PLATFORM_POSTGRES_IMAGE"; '
                         "for attempt in $(seq 1 30); do "
                         "if docker exec eng-platform-postgres pg_isready -U postgres "
                         "-d wm_test >/dev/null 2>&1; then "
