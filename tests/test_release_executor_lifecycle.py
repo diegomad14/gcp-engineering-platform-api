@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from eng_platform_api.services.catalog import get_service
+from eng_platform_api.services.release_profiles import profile_for
+
 
 @pytest.fixture
 def engine():
@@ -153,3 +156,22 @@ def test_api_derived_candidates_bind_release_sha_in_runtime(
 def test_web_candidate_does_not_inherit_api_release_env(engine, monkeypatch):
     _environment(monkeypatch, "cgm-artemis-web")
     assert engine.candidate_env_args() == []
+
+
+def test_platform_profile_hashes_stay_compatible_with_the_live_executor(engine):
+    legacy_hashes = {
+        "eng-platform-api": (
+            "b29b8c450169374047dcddbb019eb27264ceeabf41272306199eb0d70632dbf0"
+        ),
+        "eng-platform-web": (
+            "38743606c97948b57645c990b15fe4d841770a0d1b033dc82115d0ae9eccd961"
+        ),
+        "communications-ms": (
+            "161ca2094fd1f9cd663e49def35a4ac755122bfafe42aa8bac41862a74d1213e"
+        ),
+    }
+    for name, digest in legacy_hashes.items():
+        service = get_service(name)
+        assert service is not None
+        assert profile_for(service).fingerprint() == digest
+        assert engine.profile_fingerprint(name) == digest

@@ -166,7 +166,17 @@ def env(name: str) -> str:
 
 
 def profile_fingerprint(name: str) -> str:
-    payload = json.dumps(PROFILE_SPECS[name], sort_keys=True, separators=(",", ":"))
+    value = PROFILE_SPECS[name]
+    if name in {"eng-platform-api", "eng-platform-web", "communications-ms"}:
+        value = {
+            "name": value["name"],
+            "timeout_seconds": value["timeout_seconds"],
+            "build_args": value["build_args"],
+            "hooks": value["candidate_hooks"],
+            "candidate_update_strategy": value["candidate_update_strategy"],
+            "rollback_mode": value["rollback_mode"],
+        }
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()
 
 

@@ -29,7 +29,24 @@ class ReleaseProfile:
     rollback_mode: str = "traffic"
 
     def fingerprint(self) -> str:
-        payload = json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+        value = asdict(self)
+        if self.name in {
+            "eng-platform-api",
+            "eng-platform-web",
+            "communications-ms",
+        }:
+            # These three profiles have no new paired behavior. Keep their
+            # pre-upgrade hash so the production executor remains usable while
+            # the API revision and then the pinned executor digest roll out.
+            value = {
+                "name": self.name,
+                "timeout_seconds": self.timeout_seconds,
+                "build_args": self.build_args,
+                "hooks": self.candidate_hooks,
+                "candidate_update_strategy": self.candidate_update_strategy,
+                "rollback_mode": self.rollback_mode,
+            }
+        payload = json.dumps(value, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode()).hexdigest()
 
 
