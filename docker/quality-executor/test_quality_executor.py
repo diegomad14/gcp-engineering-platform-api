@@ -610,6 +610,7 @@ while not os.path.exists(os.environ["ATTEMPT_MARKER"]):
                         "repository": "diegomad14/eng-platform-api",
                         "head_sha": head_sha,
                         "base_sha": base_sha,
+                        "operation": "pr_quality",
                     },
                 )
             self.assertEqual(head_sha, git(source, "rev-parse", "HEAD"))
@@ -726,6 +727,7 @@ while not os.path.exists(os.environ["ATTEMPT_MARKER"]):
                         "repository": "diegomad14/eng-platform-api",
                         "head_sha": head_sha,
                         "base_sha": base_sha,
+                        "operation": "pr_quality",
                     },
                 )
 
@@ -734,6 +736,85 @@ while not os.path.exists(os.environ["ATTEMPT_MARKER"]):
             )
             subprocess.run(
                 ["git", "merge-base", "--is-ancestor", base_sha, head_sha],
+                cwd=source,
+                check=True,
+            )
+
+    def test_main_release_unshallows_to_recover_reachable_semver_tags(self) -> None:
+        def git(cwd: Path, *args: str) -> str:
+            return subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ).stdout.strip()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            git(repository, "init", "-q", "-b", "main")
+            git(repository, "config", "user.email", "quality@example.test")
+            git(repository, "config", "user.name", "Quality Test")
+            (repository / "source.txt").write_text("release\n", encoding="utf-8")
+            git(repository, "add", "source.txt")
+            git(repository, "commit", "-qm", "release: baseline")
+            tagged_sha = git(repository, "rev-parse", "HEAD")
+            git(repository, "tag", "v1.41.2", tagged_sha)
+
+            for index in range(4):
+                (repository / "source.txt").write_text(
+                    f"commit {index}\n", encoding="utf-8"
+                )
+                git(repository, "commit", "-qam", f"chore: commit {index}")
+            base_sha = git(repository, "rev-parse", "HEAD")
+            (repository / "source.txt").write_text(
+                "release candidate\n", encoding="utf-8"
+            )
+            git(repository, "commit", "-qam", "feat: add release feature")
+            head_sha = git(repository, "rev-parse", "HEAD")
+
+            source = root / "source"
+            git(root, "clone", "-q", "--depth=1", repository.as_uri(), str(source))
+            original_git = quality_executor._git
+
+            def local_git(
+                cwd: Path, *args: str, env: dict[str, str] | None = None
+            ) -> str:
+                local_args = tuple(
+                    repository.as_uri()
+                    if value == "https://github.com/diegomad14/eng-platform-api.git"
+                    else value
+                    for value in args
+                )
+                return original_git(cwd, *local_args, env=env)
+
+            with (
+                mock.patch.object(
+                    quality_executor, "_source_token", return_value="token"
+                ),
+                mock.patch.object(quality_executor, "_git", side_effect=local_git),
+            ):
+                quality_executor._prepare_history(
+                    source,
+                    {
+                        "repository": "diegomad14/eng-platform-api",
+                        "head_sha": head_sha,
+                        "base_sha": base_sha,
+                        "operation": "main_release",
+                    },
+                )
+
+            self.assertEqual(
+                "false", git(source, "rev-parse", "--is-shallow-repository")
+            )
+            self.assertEqual(
+                "v1.41.2", git(source, "tag", "--merged", head_sha, "--list", "v*")
+            )
+            subprocess.run(
+                ["git", "merge-base", "--is-ancestor", tagged_sha, head_sha],
                 cwd=source,
                 check=True,
             )
