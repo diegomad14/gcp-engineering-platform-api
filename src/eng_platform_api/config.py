@@ -8,6 +8,23 @@ import json
 import os
 from dataclasses import dataclass, field
 
+_RELEASE_PLANNER_BROKEN_DIGEST = (
+    "us-central1-docker.pkg.dev/cgm-assistant-prod/cgm-sanplat-repo/"
+    "release-planner@sha256:2807a7bc318215ed9473aaf456d614e96d276bc449a5aad5c103974db5f3f392"
+)
+_RELEASE_PLANNER_RECOVERED_DIGEST = (
+    "us-central1-docker.pkg.dev/cgm-assistant-prod/cgm-sanplat-repo/"
+    "release-planner@sha256:6db0fc9bc323f9260d7d529ee9142777db848b31c750fb5015c34fef8a866591"
+)
+
+
+def _effective_release_planner_image(configured: str) -> str:
+    """Roll the single known-broken planner digest forward without mutating Cloud Run."""
+    image = configured.strip()
+    if image == _RELEASE_PLANNER_BROKEN_DIGEST:
+        return _RELEASE_PLANNER_RECOVERED_DIGEST
+    return image
+
 
 def _service_account_subject(value: str) -> str:
     """Normalize a Cloud Build resource name to the OIDC email subject."""
@@ -343,9 +360,9 @@ def load_config() -> PlatformConfig:
         ).strip(),
         quality_node_image=os.getenv("ENG_PLATFORM_QUALITY_NODE_IMAGE", "").strip(),
         quality_python_image=os.getenv("ENG_PLATFORM_QUALITY_PYTHON_IMAGE", "").strip(),
-        release_planner_image=os.getenv(
-            "ENG_PLATFORM_RELEASE_PLANNER_IMAGE", ""
-        ).strip(),
+        release_planner_image=_effective_release_planner_image(
+            os.getenv("ENG_PLATFORM_RELEASE_PLANNER_IMAGE", "")
+        ),
         postgres_image=os.getenv("ENG_PLATFORM_RELEASE_POSTGRES_IMAGE", "").strip(),
         github_mode_variable=os.getenv(
             "ENG_PLATFORM_GITHUB_MODE_VARIABLE", "ENG_PLATFORM_CI_EXECUTOR"
