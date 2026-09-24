@@ -594,7 +594,7 @@ def test_postgres_profile_uses_pinned_image_and_isolated_test_dsn(
     assert postgres["name"] == DIGEST
     assert postgres["entrypoint"] == "/bin/bash"
     assert postgres["args"][:3] == ["-euo", "pipefail", "-c"]
-    assert '"$ENG_PLATFORM_POSTGRES_IMAGE"' in postgres["args"][3]
+    assert '"$$ENG_PLATFORM_POSTGRES_IMAGE"' in postgres["args"][3]
     assert "POSTGRES_DB=wm_test" in postgres["args"][3]
     assert "pg_isready -U postgres -d wm_test" in postgres["args"][3]
     assert (
