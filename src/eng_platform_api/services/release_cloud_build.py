@@ -263,6 +263,15 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
             "ENG_PLATFORM_RELEASE_PLANNER_IMAGE="
             + config.release_orchestrator.release_planner_image,
         ]
+        # Cloud Build checks out /workspace as root, while the pinned planner
+        # image runs as an unprivileged user. Git's ownership protection
+        # otherwise rejects read-only commands such as `git rev-parse HEAD`.
+        # Scope the exception to this one repository path and this one step.
+        planner_git_env = [
+            "GIT_CONFIG_COUNT=1",
+            "GIT_CONFIG_KEY_0=safe.directory",
+            "GIT_CONFIG_VALUE_0=/workspace",
+        ]
         steps.extend(
             [
                 {
@@ -288,7 +297,7 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
                         "--output",
                         "/eng-platform-plan/release-plan.json",
                     ],
-                    "env": planner_env,
+                    "env": [*planner_env, *planner_git_env],
                     "volumes": [planner_volume],
                     "waitFor": ["prepare-planner-volume"],
                 },

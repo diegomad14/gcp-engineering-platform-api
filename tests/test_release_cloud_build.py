@@ -371,6 +371,9 @@ def test_main_build_splits_planner_from_trusted_plan_publisher(configured):
     assert all(volume["name"] != "release-control" for volume in planner["volumes"])
     assert f"ENG_PLATFORM_RELEASE_PLANNER_HASH={PLANNER_HASH}" in planner["env"]
     assert f"ENG_PLATFORM_RELEASE_PLANNER_IMAGE={PLANNER}" in planner["env"]
+    assert "GIT_CONFIG_COUNT=1" in planner["env"]
+    assert "GIT_CONFIG_KEY_0=safe.directory" in planner["env"]
+    assert "GIT_CONFIG_VALUE_0=/workspace" in planner["env"]
 
     publisher = request["steps"][5]
     assert publisher["name"] == PLANNER
@@ -383,6 +386,7 @@ def test_main_build_splits_planner_from_trusted_plan_publisher(configured):
         "/eng-platform-control",
     ]
     assert publisher["waitFor"] == ["release-plan"]
+    assert not any(item.startswith("GIT_CONFIG_") for item in publisher["env"])
     assert publisher["volumes"] == [
         {"name": "planner-output", "path": "/eng-platform-plan"},
         {"name": "release-control", "path": "/eng-platform-control"},
