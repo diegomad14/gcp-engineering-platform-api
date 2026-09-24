@@ -836,6 +836,13 @@ def test_planner_contract_retry_allows_one_same_image_recovery_after_remediation
 
     state = executions.get(value["execution_id"])
     assert executions.planner_retry_candidate(state, allow_contract_retry=True)
+    state["planner_remediation_retry_hash"] = "not-a-sha256"
+    assert not executions.planner_retry_candidate(state, allow_contract_retry=True)
+    state["planner_remediation_retry_hash"] = new_hash
+    state["planner_remediation_retry_image"] = "registry.example/release-planner:latest"
+    assert not executions.planner_retry_candidate(state, allow_contract_retry=True)
+    state["planner_remediation_retry_image"] = new_image
+    assert executions.planner_retry_candidate(state, allow_contract_retry=True)
     staged = executions.stage_planner_retry(
         value["execution_id"],
         failed_build_id="planner-build-2",
