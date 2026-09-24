@@ -265,6 +265,38 @@ def test_verify_cloud_build_accepts_exact_identity(monkeypatch):
     assert events._verify_cloud_build(execution, "build-1")["status"] == "SUCCESS"
 
 
+def test_verify_cloud_build_accepts_exact_authorized_contract_retry(monkeypatch):
+    contract_hash = "e" * 64
+    planner_image = "planner@sha256:" + "d" * 64
+    execution = _execution(
+        operation="main_release",
+        planner_hash=PLANNER_HASH,
+        planner_retry_count=3,
+        planner_contract_retry_pending=True,
+        planner_contract_retry_hash=contract_hash,
+    )
+    build = _build(execution)
+    build["substitutions"].update(
+        {
+            "_PLANNER_SHA256": PLANNER_HASH,
+            "_PLANNER_DIGEST": planner_image,
+            "_PLANNER_RETRY_ATTEMPT": "3",
+            "_PLANNER_IMAGE_SHA256": contract_hash,
+        }
+    )
+    monkeypatch.setattr(
+        events.config.release_orchestrator,
+        "release_planner_image",
+        planner_image,
+    )
+    monkeypatch.setattr(
+        events.config.release_orchestrator, "service_account", SERVICE_ACCOUNT
+    )
+    monkeypatch.setattr(events.release_cloud_build, "get_build", lambda _: build)
+
+    assert events._verify_cloud_build(execution, "build-1")["status"] == "SUCCESS"
+
+
 def test_verify_cloud_build_requires_bound_build_id(monkeypatch):
     get_build = mock.Mock()
     monkeypatch.setattr(events.release_cloud_build, "get_build", get_build)
