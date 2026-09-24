@@ -89,8 +89,10 @@ const identity = () => {
   };
 };
 
+export const gitArguments = (cwd, args) => ["-c", `safe.directory=${cwd}`, ...args];
+
 const gitOutput = (cwd, args) =>
-  execFileSync("git", args, {
+  execFileSync("git", gitArguments(cwd, args), {
     cwd,
     encoding: "utf8",
     env: {

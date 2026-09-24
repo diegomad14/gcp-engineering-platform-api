@@ -5,7 +5,16 @@ import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { calculatePlan } from "./release_planner.mjs";
+import { calculatePlan, gitArguments } from "./release_planner.mjs";
+
+test("Git commands explicitly trust only the checked-out source directory", () => {
+  assert.deepEqual(gitArguments("/workspace", ["rev-parse", "HEAD"]), [
+    "-c",
+    "safe.directory=/workspace",
+    "rev-parse",
+    "HEAD",
+  ]);
+});
 
 
 const git = (cwd, ...args) =>

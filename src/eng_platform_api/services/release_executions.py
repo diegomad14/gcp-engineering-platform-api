@@ -71,8 +71,19 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def planner_retry_candidate(value: dict[str, Any]) -> bool:
-    """Whether one planner-only recovery is still available for this execution."""
+def planner_retry_candidate(
+    value: dict[str, Any], *, allow_remediation: bool = False
+) -> bool:
+    """Whether one safe planner-only recovery is available for this execution."""
+    retry_count = int(value.get("planner_retry_count", 0) or 0)
+    attempt_available = (
+        retry_count == 0 and not value.get("planner_retry_checked")
+    ) or (
+        allow_remediation
+        and retry_count == 1
+        and value.get("planner_retry_checked")
+        and not value.get("planner_remediation_retry_checked")
+    )
     return bool(
         value.get("status") == "failed"
         and value.get("provider") == "cloud_build"
@@ -81,8 +92,7 @@ def planner_retry_candidate(value: dict[str, Any]) -> bool:
         and value.get("engine_event_status") == "quality_passed"
         and value.get("evidence_committed")
         and value.get("report_hash")
-        and not value.get("planner_retry_checked")
-        and int(value.get("planner_retry_count", 0) or 0) == 0
+        and attempt_available
         and value.get("build_id")
     )
 
@@ -682,18 +692,40 @@ def reconcile_submission_absent(execution_id: str) -> dict[str, Any]:
     )
 
 
-def stage_planner_retry(execution_id: str, *, failed_build_id: str) -> dict[str, Any]:
-    """Reserve the single planner-only recovery after verifying terminal identity."""
+def stage_planner_retry(
+    execution_id: str,
+    *,
+    failed_build_id: str,
+    planner_image: str = "",
+    planner_hash_value: str = "",
+    remediation: bool = False,
+    previous_planner_image: str = "",
+) -> dict[str, Any]:
+    """Reserve a narrowly gated planner-only recovery after identity checks."""
     if not failed_build_id:
         raise ValueError("Failed Cloud Build identity is required")
     current = get(execution_id)
     if current is None:
         raise KeyError(execution_id)
     if (
-        not planner_retry_candidate(current)
+        not planner_retry_candidate(current, allow_remediation=remediation)
         or current.get("build_id") != failed_build_id
     ):
         raise ValueError("Release execution is not eligible for planner recovery")
+
+    retry_count = int(current.get("planner_retry_count", 0) or 0)
+    if not planner_image or "@sha256:" not in planner_image:
+        raise ValueError("A digest-pinned planner image is required")
+    stored_previous_image = str(current.get("planner_retry_image", ""))
+    previous_planner_image = stored_previous_image or previous_planner_image
+    if remediation and (
+        retry_count != 1
+        or not previous_planner_image
+        or previous_planner_image == planner_image
+    ):
+        raise ValueError("Planner remediation requires a different pinned image")
+    if not remediation and retry_count != 0:
+        raise ValueError("Planner retry budget is already consumed")
 
     now = _now()
     previous_build_ids = list(current.get("previous_build_ids") or [])
@@ -708,7 +740,7 @@ def stage_planner_retry(execution_id: str, *, failed_build_id: str) -> dict[str,
         "build_name": "",
         "previous_build_ids": previous_build_ids,
         "planner_retry_pending": True,
-        "planner_retry_count": 1,
+        "planner_retry_count": retry_count + 1,
         "planner_retry_checked": True,
         "planner_retry_previous_build_id": failed_build_id,
         "planner_retry_requested_at": now,
@@ -717,6 +749,19 @@ def stage_planner_retry(execution_id: str, *, failed_build_id: str) -> dict[str,
         "error": "",
         "updated_at": now,
     }
+    if remediation:
+        changes.update(
+            {
+                "planner_remediation_retry_checked": True,
+                "planner_remediation_retry_pending": True,
+                "planner_remediation_retry_previous_build_id": failed_build_id,
+                "planner_remediation_retry_image": planner_image,
+                "planner_remediation_retry_hash": planner_hash_value,
+                "planner_retry_image": previous_planner_image,
+            }
+        )
+    else:
+        changes["planner_retry_image"] = planner_image
     collection = _collection()
     if collection is None:
         with _lock:
@@ -724,12 +769,30 @@ def stage_planner_retry(execution_id: str, *, failed_build_id: str) -> dict[str,
             if current is None:
                 raise KeyError(execution_id)
             if (
-                not planner_retry_candidate(current)
+                not planner_retry_candidate(current, allow_remediation=remediation)
                 or current.get("build_id") != failed_build_id
             ):
                 raise ValueError(
                     "Release execution is not eligible for planner recovery"
                 )
+            retry_count = int(current.get("planner_retry_count", 0) or 0)
+            previous_for_write = (
+                str(current.get("planner_retry_image", "")) or previous_planner_image
+            )
+            if (
+                not planner_image
+                or "@sha256:" not in planner_image
+                or (
+                    remediation
+                    and (
+                        retry_count != 1
+                        or previous_for_write == planner_image
+                        or not planner_hash_value
+                    )
+                )
+                or (not remediation and retry_count != 0)
+            ):
+                raise ValueError("Planner remediation image is not authorized")
             current.update(changes)
             return dict(current)
 
@@ -744,10 +807,28 @@ def stage_planner_retry(execution_id: str, *, failed_build_id: str) -> dict[str,
             raise KeyError(execution_id)
         current = snapshot.to_dict()
         if (
-            not planner_retry_candidate(current)
+            not planner_retry_candidate(current, allow_remediation=remediation)
             or current.get("build_id") != failed_build_id
         ):
             raise ValueError("Release execution is not eligible for planner recovery")
+        retry_count = int(current.get("planner_retry_count", 0) or 0)
+        previous_for_write = (
+            str(current.get("planner_retry_image", "")) or previous_planner_image
+        )
+        if (
+            not planner_image
+            or "@sha256:" not in planner_image
+            or (
+                remediation
+                and (
+                    retry_count != 1
+                    or previous_for_write == planner_image
+                    or not planner_hash_value
+                )
+            )
+            or (not remediation and retry_count != 0)
+        ):
+            raise ValueError("Planner remediation image is not authorized")
         # This narrowly scoped recovery is the only terminal-state reopening:
         # exact quality evidence is already committed, and the known failed
         # planner step is verified by the reconciler before this reservation.

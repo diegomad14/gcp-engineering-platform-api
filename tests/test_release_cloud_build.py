@@ -433,6 +433,48 @@ def test_planner_retry_requires_committed_quality_evidence(configured):
         cloud_build.build_request(execution, _service())
 
 
+def test_planner_image_remediation_reuses_old_fingerprint_and_quality(
+    configured, monkeypatch
+):
+    new_image = "planner@sha256:" + "f" * 64
+    new_hash = "9" * 64
+    monkeypatch.setattr(
+        cloud_build.config.release_orchestrator,
+        "release_planner_image",
+        new_image,
+    )
+    monkeypatch.setattr(cloud_build, "planner_hash", lambda: new_hash)
+    execution = _execution_for(
+        _service(),
+        operation="main_release",
+        planner_hash=PLANNER_HASH,
+        planner_retry_count=2,
+        planner_retry_pending=True,
+        planner_remediation_retry_pending=True,
+        planner_remediation_retry_image=new_image,
+        planner_remediation_retry_hash=new_hash,
+        evidence_committed=True,
+        report_hash="a" * 64,
+    )
+
+    request = cloud_build.build_request(execution, _service())
+
+    assert [step["id"] for step in request["steps"]] == [
+        "prepare",
+        "prepare-planner-volume",
+        "release-plan",
+        "publish-release-plan",
+    ]
+    assert request["substitutions"]["_PLANNER_RETRY_ATTEMPT"] == "2"
+    assert request["substitutions"]["_PLANNER_SHA256"] == PLANNER_HASH
+    assert request["substitutions"]["_PLANNER_DIGEST"] == new_image
+    assert "quality" not in {step["id"] for step in request["steps"]}
+    assert (
+        "ENG_PLATFORM_RELEASE_PLANNER_HASH=" + PLANNER_HASH
+        in request["steps"][2]["env"]
+    )
+
+
 def test_api_profile_runs_container_smoke_without_control_volume(
     configured, monkeypatch
 ):

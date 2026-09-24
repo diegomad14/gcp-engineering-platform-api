@@ -626,7 +626,9 @@ def test_terminal_planner_only_failure_submits_one_cost_limited_retry(monkeypatc
     submit = mock.Mock(return_value=submitted)
     monkeypatch.setattr(reconciler.release_executions, "get", lambda _: state)
     monkeypatch.setattr(
-        reconciler.release_executions, "planner_retry_candidate", lambda _: True
+        reconciler.release_executions,
+        "planner_retry_candidate",
+        lambda *args, **kwargs: True,
     )
     monkeypatch.setattr(reconciler.release_cloud_build, "get_build", lambda _: build)
     monkeypatch.setattr(reconciler, "_record_build_timing", mock.Mock())
@@ -637,7 +639,14 @@ def test_terminal_planner_only_failure_submits_one_cost_limited_retry(monkeypatc
     result = reconciler.reconcile("execution-1")
 
     assert result["build_id"] == "planner-retry-build"
-    stage.assert_called_once_with("execution-1", failed_build_id="build-1")
+    stage.assert_called_once_with(
+        "execution-1",
+        failed_build_id="build-1",
+        planner_image=PLANNER_DIGEST,
+        planner_hash_value=mock.ANY,
+        remediation=False,
+        previous_planner_image="",
+    )
     submit.assert_called_once_with("execution-1", mock.ANY)
 
 
@@ -659,7 +668,9 @@ def test_terminal_failure_in_other_step_is_not_retried(monkeypatch):
     stage = mock.Mock()
     monkeypatch.setattr(reconciler.release_executions, "get", lambda _: state)
     monkeypatch.setattr(
-        reconciler.release_executions, "planner_retry_candidate", lambda _: True
+        reconciler.release_executions,
+        "planner_retry_candidate",
+        lambda *args, **kwargs: True,
     )
     monkeypatch.setattr(reconciler.release_cloud_build, "get_build", lambda _: build)
     monkeypatch.setattr(reconciler.release_executions, "save", save)
@@ -669,6 +680,69 @@ def test_terminal_failure_in_other_step_is_not_retried(monkeypatch):
 
     assert result["planner_retry_checked"] is True
     stage.assert_not_called()
+
+
+def test_verified_planner_image_change_allows_exactly_one_short_remediation(
+    monkeypatch,
+):
+    old_image = PLANNER_DIGEST
+    new_image = "planner@sha256:" + "f" * 64
+    state = _execution(
+        operation="main_release",
+        status="failed",
+        build_id="planner-retry-build-1",
+        provider_run_id="planner-retry-build-1",
+        engine_event_status="quality_passed",
+        release_engine_failed=True,
+        evidence_committed=True,
+        report_hash="e" * 64,
+        planner_retry_count=1,
+        planner_retry_checked=True,
+        planner_retry_pending=False,
+        planner_retry_image=old_image,
+    )
+    substitutions = _substitutions(state)
+    substitutions.update({"_PLANNER_DIGEST": old_image, "_PLANNER_RETRY_ATTEMPT": "1"})
+    build = _build(
+        state,
+        status="FAILURE",
+        substitutions=substitutions,
+        steps=[{"id": "release-plan", "status": "FAILURE"}],
+    )
+    staged = {
+        **state,
+        "status": "submission_pending",
+        "build_id": "",
+        "planner_retry_count": 2,
+        "planner_retry_pending": True,
+        "planner_remediation_retry_pending": True,
+        "planner_remediation_retry_image": new_image,
+    }
+    submitted = {**staged, "build_id": "planner-retry-build-2"}
+    monkeypatch.setattr(
+        reconciler.config.release_orchestrator, "release_planner_image", new_image
+    )
+    monkeypatch.setattr(reconciler.release_executions, "get", lambda _: state)
+    monkeypatch.setattr(reconciler.release_cloud_build, "get_build", lambda _: build)
+    monkeypatch.setattr(reconciler, "_record_build_timing", mock.Mock())
+    stage = mock.Mock(return_value=staged)
+    submit = mock.Mock(return_value=submitted)
+    monkeypatch.setattr(reconciler.release_executions, "stage_planner_retry", stage)
+    monkeypatch.setattr(reconciler.catalog, "get_service", lambda _: object())
+    monkeypatch.setattr(reconciler.release_cloud_build, "submit", submit)
+
+    result = reconciler.reconcile("execution-1")
+
+    assert result["build_id"] == "planner-retry-build-2"
+    stage.assert_called_once_with(
+        "execution-1",
+        failed_build_id="planner-retry-build-1",
+        planner_image=new_image,
+        planner_hash_value=reconciler.planner_hash(),
+        remediation=True,
+        previous_planner_image=old_image,
+    )
+    submit.assert_called_once_with("execution-1", mock.ANY)
 
 
 def test_cloud_build_failure_before_quality_is_terminal_without_evidence(

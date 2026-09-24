@@ -71,12 +71,21 @@ def _planner_retry_request(
     common_env: list[str],
 ) -> dict[str, Any]:
     """Retry only release planning after exact immutable quality evidence passed."""
+    retry_count = int(execution.get("planner_retry_count", 0) or 0)
+    remediation_authorized = bool(
+        retry_count == 2
+        and execution.get("planner_remediation_retry_pending")
+        and execution.get("planner_remediation_retry_image")
+        == config.release_orchestrator.release_planner_image
+        and execution.get("planner_remediation_retry_hash") == planner_hash()
+    )
     if (
         execution.get("operation") != "main_release"
-        or int(execution.get("planner_retry_count", 0) or 0) != 1
+        or retry_count not in {1, 2}
         or not execution.get("planner_retry_pending")
         or not execution.get("evidence_committed")
         or not execution.get("report_hash")
+        or (retry_count == 2 and not remediation_authorized)
     ):
         raise ReleaseCloudBuildError("Planner-only recovery is not authorized")
     profile = profile_for(service)
@@ -84,7 +93,9 @@ def _planner_retry_request(
     planner = config.release_orchestrator.release_planner_image
     planner_env = [
         *common_env,
-        f"ENG_PLATFORM_RELEASE_PLANNER_HASH={planner_hash()}",
+        # Keep the original execution planner hash in the callback identity.
+        # A remediation build is separately pinned/audited by its image digest.
+        f"ENG_PLATFORM_RELEASE_PLANNER_HASH={execution['planner_hash']}",
         f"ENG_PLATFORM_RELEASE_PLANNER_IMAGE={planner}",
         "GIT_CONFIG_COUNT=1",
         "GIT_CONFIG_KEY_0=safe.directory",
@@ -149,7 +160,7 @@ def _planner_retry_request(
             ],
             "env": common_env
             + [
-                f"ENG_PLATFORM_RELEASE_PLANNER_HASH={planner_hash()}",
+                f"ENG_PLATFORM_RELEASE_PLANNER_HASH={execution['planner_hash']}",
                 f"ENG_PLATFORM_RELEASE_PLANNER_IMAGE={planner}",
             ],
             "volumes": [planner_volume, control_volume],
@@ -190,6 +201,16 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
     operation = str(execution["operation"])
     if operation not in {"pr_quality", "main_release"}:
         raise ReleaseCloudBuildError("Release operation is not supported")
+    planner_retry_count = int(execution.get("planner_retry_count", 0) or 0)
+    remediation_authorized = bool(
+        operation == "main_release"
+        and planner_retry_count == 2
+        and execution.get("planner_retry_pending")
+        and execution.get("planner_remediation_retry_pending")
+        and execution.get("planner_remediation_retry_image")
+        == config.release_orchestrator.release_planner_image
+        and execution.get("planner_remediation_retry_hash") == planner_hash()
+    )
     if (
         execution.get("service_name") != service.service_name
         or execution.get("repository") != service.repository
@@ -198,6 +219,7 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
         or (
             operation == "main_release"
             and execution.get("planner_hash") != planner_hash()
+            and not remediation_authorized
         )
     ):
         raise ReleaseCloudBuildError("Release build identity is not authorized")
@@ -218,7 +240,6 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
             else ""
         ),
     }
-    planner_retry_count = int(execution.get("planner_retry_count", 0) or 0)
     if planner_retry_count:
         substitutions["_PLANNER_RETRY_ATTEMPT"] = str(planner_retry_count)
     common_env = [

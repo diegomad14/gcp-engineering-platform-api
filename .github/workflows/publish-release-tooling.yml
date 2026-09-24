@@ -11,6 +11,7 @@ on:
         default: release-executor
         options:
           - release-executor
+          - release-planner
           - quality
           - all
 
@@ -73,6 +74,10 @@ jobs:
           if [[ "$COMPONENT" == all || "$COMPONENT" == quality ]]; then
             build_and_push quality-python docker/quality-executor/Dockerfile.python
             build_and_push quality-node docker/quality-executor/Dockerfile.node
+          fi
+          if [[ "$COMPONENT" == all || \
+                "$COMPONENT" == quality || \
+                "$COMPONENT" == release-planner ]]; then
             build_and_push release-planner docker/release-planner/Dockerfile
           fi
           if [[ "$COMPONENT" == all || "$COMPONENT" == release-executor ]]; then

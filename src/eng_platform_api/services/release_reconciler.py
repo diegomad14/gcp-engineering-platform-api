@@ -16,6 +16,7 @@ from . import (
     release_executions,
 )
 from .quality_policy import policy_errors
+from .quality_profiles import planner_hash
 
 _FAILED_BUILD_STATES = {
     "FAILURE",
@@ -47,7 +48,12 @@ def _complete_check(
     )
 
 
-def _verify_build(execution: dict[str, Any], build: dict[str, Any]) -> None:
+def _verify_build(
+    execution: dict[str, Any],
+    build: dict[str, Any],
+    *,
+    planner_digest: str = "",
+) -> None:
     substitutions = build.get("substitutions", {})
     source = build.get("source", {}).get("connectedRepository", {})
     expected_repository = config.cloud_build.repositories.get(
@@ -75,7 +81,8 @@ def _verify_build(execution: dict[str, Any], build: dict[str, Any]) -> None:
         expected.update(
             {
                 "_PLANNER_SHA256": execution["planner_hash"],
-                "_PLANNER_DIGEST": config.release_orchestrator.release_planner_image,
+                "_PLANNER_DIGEST": planner_digest
+                or config.release_orchestrator.release_planner_image,
             }
         )
         retry_count = int(execution.get("planner_retry_count", 0) or 0)
@@ -343,11 +350,35 @@ def _publish_if_allowed(execution: dict[str, Any]) -> dict[str, Any]:
 def _retry_planner_after_verified_step_failure(
     execution: dict[str, Any],
 ) -> dict[str, Any]:
-    if not release_executions.planner_retry_candidate(execution):
+    retry_count = int(execution.get("planner_retry_count", 0) or 0)
+    remediation = retry_count == 1
+    if retry_count not in {0, 1} or not release_executions.planner_retry_candidate(
+        execution, allow_remediation=remediation
+    ):
         return execution
     try:
         build = release_cloud_build.get_build(str(execution["build_id"]))
-        _verify_build(execution, build)
+        failed_planner_digest = str(
+            build.get("substitutions", {}).get("_PLANNER_DIGEST", "")
+        )
+        if remediation:
+            if (
+                str(build.get("substitutions", {}).get("_PLANNER_RETRY_ATTEMPT", ""))
+                != "1"
+                or "@sha256:" not in failed_planner_digest
+                or failed_planner_digest
+                == config.release_orchestrator.release_planner_image
+                or (
+                    execution.get("planner_retry_image")
+                    and execution.get("planner_retry_image") != failed_planner_digest
+                )
+            ):
+                return execution
+        _verify_build(
+            execution,
+            build,
+            planner_digest=failed_planner_digest if remediation else "",
+        )
     except Exception as exc:
         logger.warning(
             "release_planner_retry_inspection_failed execution_id=%s error=%s",
@@ -361,14 +392,21 @@ def _retry_planner_after_verified_step_failure(
         for step in build.get("steps", [])
     )
     if not failed_plan:
-        return release_executions.save(
-            str(execution["execution_id"]), planner_retry_checked=True
+        checked_field = (
+            {"planner_remediation_retry_checked": True}
+            if remediation
+            else {"planner_retry_checked": True}
         )
+        return release_executions.save(str(execution["execution_id"]), **checked_field)
     _record_build_timing(str(execution["execution_id"]), build)
     try:
         staged = release_executions.stage_planner_retry(
             str(execution["execution_id"]),
             failed_build_id=str(execution["build_id"]),
+            planner_image=config.release_orchestrator.release_planner_image,
+            planner_hash_value=planner_hash(),
+            remediation=remediation,
+            previous_planner_image=failed_planner_digest if remediation else "",
         )
         service = catalog.get_service(str(staged["service_name"]))
         if service is None:
