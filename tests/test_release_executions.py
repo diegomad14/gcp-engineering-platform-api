@@ -624,7 +624,11 @@ def test_cloud_build_retry_can_claim_fresh_tokens_only_for_new_bound_attempt():
         }
     )
 
-    executions.stage_planner_retry(value["execution_id"], failed_build_id="build-1")
+    executions.stage_planner_retry(
+        value["execution_id"],
+        failed_build_id="build-1",
+        planner_image="registry.example/release-planner@sha256:" + "a" * 64,
+    )
     executions.bind_build(value["execution_id"], build_id="build-2")
 
     assert executions.claim_source_token(
@@ -727,7 +731,9 @@ def test_planner_retry_is_a_single_exact_evidence_recovery():
 
     assert executions.planner_retry_candidate(executions.get(value["execution_id"]))
     staged = executions.stage_planner_retry(
-        value["execution_id"], failed_build_id="planner-build-1"
+        value["execution_id"],
+        failed_build_id="planner-build-1",
+        planner_image="registry.example/release-planner@sha256:" + "a" * 64,
     )
 
     assert staged["status"] == "submission_pending"
@@ -745,6 +751,50 @@ def test_planner_retry_rejects_missing_evidence_or_second_attempt():
     _failed_planner_execution(value)
     executions._memory[value["execution_id"]]["evidence_committed"] = False
     assert not executions.planner_retry_candidate(executions.get(value["execution_id"]))
+
+
+def test_planner_retry_allows_one_image_change_remediation_only():
+    value, _ = _reserve(operation="main_release", provider="cloud_build")
+    _failed_planner_execution(value)
+    old_image = "registry.example/release-planner@sha256:" + "a" * 64
+    first = executions.stage_planner_retry(
+        value["execution_id"],
+        failed_build_id="planner-build-1",
+        planner_image=old_image,
+    )
+    executions._memory[value["execution_id"]].update(
+        {
+            "status": "failed",
+            "build_id": "planner-build-2",
+            "provider_run_id": "planner-build-2",
+            "provider_status": "FAILURE",
+            "planner_retry_pending": False,
+            "release_engine_failed": True,
+            "error": "planner still failed",
+        }
+    )
+
+    state = executions.get(value["execution_id"])
+    assert not executions.planner_retry_candidate(state)
+    assert executions.planner_retry_candidate(state, allow_remediation=True)
+    new_image = "registry.example/release-planner@sha256:" + "b" * 64
+    staged = executions.stage_planner_retry(
+        value["execution_id"],
+        failed_build_id="planner-build-2",
+        planner_image=new_image,
+        planner_hash_value="c" * 64,
+        remediation=True,
+        previous_planner_image=old_image,
+    )
+
+    assert first["planner_retry_count"] == 1
+    assert staged["planner_retry_count"] == 2
+    assert staged["planner_remediation_retry_pending"] is True
+    assert staged["planner_remediation_retry_checked"] is True
+    assert staged["planner_remediation_retry_image"] == new_image
+    assert staged["planner_retry_image"] == old_image
+    assert staged["previous_build_ids"] == ["planner-build-1", "planner-build-2"]
+    assert not executions.planner_retry_candidate(staged, allow_remediation=True)
     with pytest.raises(ValueError, match="not eligible"):
         executions.stage_planner_retry(
             value["execution_id"], failed_build_id="planner-build-1"
@@ -1054,7 +1104,9 @@ def test_firestore_planner_retry_is_transactional_and_one_shot(firestore_collect
     )
 
     staged = executions.stage_planner_retry(
-        value["execution_id"], failed_build_id="planner-build-1"
+        value["execution_id"],
+        failed_build_id="planner-build-1",
+        planner_image="registry.example/release-planner@sha256:" + "a" * 64,
     )
 
     assert staged["status"] == "submission_pending"
@@ -1063,5 +1115,7 @@ def test_firestore_planner_retry_is_transactional_and_one_shot(firestore_collect
     assert staged["previous_build_ids"] == ["planner-build-1"]
     with pytest.raises(ValueError, match="not eligible"):
         executions.stage_planner_retry(
-            value["execution_id"], failed_build_id="planner-build-1"
+            value["execution_id"],
+            failed_build_id="planner-build-1",
+            planner_image="registry.example/release-planner@sha256:" + "a" * 64,
         )
