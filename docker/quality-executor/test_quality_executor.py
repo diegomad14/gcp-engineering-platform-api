@@ -484,6 +484,7 @@ while not os.path.exists(os.environ["ATTEMPT_MARKER"]):
     def test_prepare_fetches_exact_repository_with_host_scoped_token(self) -> None:
         identity = {
             "repository": "diegomad14/eng-platform-api",
+            "head_sha": "a" * 40,
             "base_sha": "b" * 40,
         }
         calls: list[tuple[tuple[str, ...], dict[str, str] | None]] = []
@@ -503,10 +504,16 @@ while not os.path.exists(os.environ["ATTEMPT_MARKER"]):
             (Path(directory) / ".git").mkdir()
             quality_executor._prepare_history(Path(directory), identity)
 
-        fetch_args, fetch_environment = calls[0]
+        fetch_args, fetch_environment = next(
+            (args, env) for args, env in calls if "fetch" in args
+        )
         self.assertIn("https://github.com/diegomad14/eng-platform-api.git", fetch_args)
         self.assertIn(
             "+" + identity["base_sha"] + ":refs/heads/eng-platform-quality-base",
+            fetch_args,
+        )
+        self.assertIn(
+            "+" + identity["head_sha"] + ":refs/heads/eng-platform-quality-head",
             fetch_args,
         )
         self.assertNotIn("origin", fetch_args)
@@ -547,12 +554,13 @@ while not os.path.exists(os.environ["ATTEMPT_MARKER"]):
             quality_executor._prepare_history(Path(directory), identity)
             verify.assert_called_once()
         self.assertEqual(calls[0], ("init", "--quiet"))
+        fetch_args = next(args for args in calls if "fetch" in args)
         self.assertIn(
             "+" + identity["head_sha"] + ":refs/heads/eng-platform-quality-head",
-            calls[1],
+            fetch_args,
         )
-        self.assertIn("checkout", calls[2])
-        self.assertIn("--detach", calls[2])
+        checkout_args = next(args for args in calls if "checkout" in args)
+        self.assertIn("--detach", checkout_args)
 
     def test_prepare_bootstrap_checks_out_exact_head_from_repository(self) -> None:
         def git(cwd: Path, *args: str) -> str:
@@ -595,7 +603,9 @@ while not os.path.exists(os.environ["ATTEMPT_MARKER"]):
                 return original_git(cwd, *local_args, env=env)
 
             with (
-                mock.patch.object(quality_executor, "_source_token", return_value="token"),
+                mock.patch.object(
+                    quality_executor, "_source_token", return_value="token"
+                ),
                 mock.patch.object(quality_executor, "_git", side_effect=local_git),
             ):
                 quality_executor._prepare_history(
@@ -662,6 +672,74 @@ while not os.path.exists(os.environ["ATTEMPT_MARKER"]):
             )
             self.assertEqual(
                 base_sha, git(isolated, "rev-parse", f"{base_sha}^{{commit}}")
+            )
+
+    def test_prepare_deepens_shallow_checkout_to_prove_authorized_parent(self) -> None:
+        def git(cwd: Path, *args: str) -> str:
+            return subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ).stdout.strip()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            git(repository, "init", "-q")
+            git(repository, "config", "user.email", "quality@example.test")
+            git(repository, "config", "user.name", "Quality Test")
+            (repository / "source.txt").write_text("base\n")
+            git(repository, "add", "source.txt")
+            git(repository, "commit", "-qm", "base")
+            base_sha = git(repository, "rev-parse", "HEAD")
+            (repository / "source.txt").write_text("head\n")
+            git(repository, "commit", "-qam", "head")
+            head_sha = git(repository, "rev-parse", "HEAD")
+
+            source = root / "source"
+            git(root, "clone", "-q", "--depth=1", repository.as_uri(), str(source))
+            self.assertEqual(
+                "true", git(source, "rev-parse", "--is-shallow-repository")
+            )
+            original_git = quality_executor._git
+
+            def local_git(
+                cwd: Path, *args: str, env: dict[str, str] | None = None
+            ) -> str:
+                local_args = tuple(
+                    repository.as_uri()
+                    if value == "https://github.com/diegomad14/eng-platform-api.git"
+                    else value
+                    for value in args
+                )
+                return original_git(cwd, *local_args, env=env)
+
+            with (
+                mock.patch.object(
+                    quality_executor, "_source_token", return_value="token"
+                ),
+                mock.patch.object(quality_executor, "_git", side_effect=local_git),
+            ):
+                quality_executor._prepare_history(
+                    source,
+                    {
+                        "repository": "diegomad14/eng-platform-api",
+                        "head_sha": head_sha,
+                        "base_sha": base_sha,
+                    },
+                )
+
+            self.assertEqual(
+                "false", git(source, "rev-parse", "--is-shallow-repository")
+            )
+            subprocess.run(
+                ["git", "merge-base", "--is-ancestor", base_sha, head_sha],
+                cwd=source,
+                check=True,
             )
 
     def test_prepare_rejects_repository_url_injection(self) -> None:
