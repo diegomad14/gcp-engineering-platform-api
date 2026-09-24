@@ -805,6 +805,65 @@ def test_planner_retry_allows_one_image_change_remediation_only():
     assert not executions.planner_retry_candidate(executions.get(value["execution_id"]))
 
 
+def test_planner_contract_retry_allows_one_same_image_recovery_after_remediation():
+    value, _ = _reserve(operation="main_release", provider="cloud_build")
+    _failed_planner_execution(value)
+    old_image = "registry.example/release-planner@sha256:" + "a" * 64
+    new_image = "registry.example/release-planner@sha256:" + "b" * 64
+    new_hash = "c" * 64
+    first = executions.stage_planner_retry(
+        value["execution_id"],
+        failed_build_id="planner-build-1",
+        planner_image=old_image,
+    )
+    executions._memory[value["execution_id"]].update(
+        {
+            "status": "failed",
+            "build_id": "planner-build-2",
+            "provider_run_id": "planner-build-2",
+            "provider_status": "FAILURE",
+            "planner_retry_count": 2,
+            "planner_retry_pending": False,
+            "planner_retry_checked": True,
+            "planner_remediation_retry_checked": True,
+            "planner_remediation_retry_pending": True,
+            "planner_remediation_retry_image": new_image,
+            "planner_remediation_retry_hash": new_hash,
+            "release_engine_failed": True,
+            "error": "planner hash/image contract mismatch",
+        }
+    )
+
+    state = executions.get(value["execution_id"])
+    assert executions.planner_retry_candidate(state, allow_contract_retry=True)
+    staged = executions.stage_planner_retry(
+        value["execution_id"],
+        failed_build_id="planner-build-2",
+        planner_image=new_image,
+        planner_hash_value=new_hash,
+        contract_retry=True,
+    )
+
+    assert first["planner_retry_count"] == 1
+    assert staged["status"] == "submission_pending"
+    assert staged["planner_retry_count"] == 3
+    assert staged["planner_contract_retry_checked"] is True
+    assert staged["planner_contract_retry_pending"] is True
+    assert staged["planner_contract_retry_image"] == new_image
+    assert staged["planner_contract_retry_hash"] == new_hash
+    assert staged["planner_retry_image"] == old_image
+    assert staged["previous_build_ids"] == ["planner-build-1", "planner-build-2"]
+    assert not executions.planner_retry_candidate(staged, allow_contract_retry=True)
+    with pytest.raises(ValueError, match="not eligible"):
+        executions.stage_planner_retry(
+            value["execution_id"],
+            failed_build_id="planner-build-2",
+            planner_image=new_image,
+            planner_hash_value=new_hash,
+            contract_retry=True,
+        )
+
+
 def test_planner_retry_eligible_execution_remains_due_for_reconciliation():
     value, _ = _reserve(operation="main_release", provider="cloud_build")
     _failed_planner_execution(value)

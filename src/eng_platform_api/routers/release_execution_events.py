@@ -123,6 +123,10 @@ def _verify_cloud_build(execution: dict, provider_run_id: str) -> dict:
         retry_count = int(execution.get("planner_retry_count", 0) or 0)
         if retry_count:
             expected["_PLANNER_RETRY_ATTEMPT"] = str(retry_count)
+        if retry_count == 3 and execution.get("planner_contract_retry_pending"):
+            expected["_PLANNER_IMAGE_SHA256"] = str(
+                execution.get("planner_contract_retry_hash", "")
+            )
     if any(substitutions.get(key) != value for key, value in expected.items()):
         raise HTTPException(status_code=403, detail="Cloud Build source mismatch")
     account = str(build.get("serviceAccount", ""))
@@ -222,7 +226,12 @@ def _verify_plan(execution: dict, payload: ReleaseExecutionEvent) -> dict | None
         raise HTTPException(
             status_code=403, detail="PR executions cannot publish releases"
         )
-    if plan.config_hash != execution.get("planner_hash"):
+    expected_hash = str(execution.get("planner_hash", ""))
+    if int(execution.get("planner_retry_count", 0) or 0) == 3 and execution.get(
+        "planner_contract_retry_pending"
+    ):
+        expected_hash = str(execution.get("planner_contract_retry_hash", ""))
+    if not expected_hash or plan.config_hash != expected_hash:
         raise HTTPException(status_code=403, detail="Release planner hash mismatch")
     if plan.release_type == "none":
         if plan.git_tag or plan.next_version:

@@ -88,6 +88,10 @@ def _verify_build(
         retry_count = int(execution.get("planner_retry_count", 0) or 0)
         if retry_count:
             expected["_PLANNER_RETRY_ATTEMPT"] = str(retry_count)
+        if retry_count == 3 and execution.get("planner_contract_retry_pending"):
+            expected["_PLANNER_IMAGE_SHA256"] = str(
+                execution.get("planner_contract_retry_hash", "")
+            )
     if any(substitutions.get(key) != value for key, value in expected.items()):
         raise ValueError("Cloud Build release identity does not match execution")
     if build.get("serviceAccount") != config.release_orchestrator.service_account:
@@ -352,8 +356,11 @@ def _retry_planner_after_verified_step_failure(
 ) -> dict[str, Any]:
     retry_count = int(execution.get("planner_retry_count", 0) or 0)
     remediation = retry_count == 1
-    if retry_count not in {0, 1} or not release_executions.planner_retry_candidate(
-        execution, allow_remediation=remediation
+    contract_retry = retry_count == 2
+    if retry_count not in {0, 1, 2} or not release_executions.planner_retry_candidate(
+        execution,
+        allow_remediation=remediation,
+        allow_contract_retry=contract_retry,
     ):
         return execution
     try:
@@ -374,6 +381,17 @@ def _retry_planner_after_verified_step_failure(
                 )
             ):
                 return execution
+        elif contract_retry:
+            if (
+                str(build.get("substitutions", {}).get("_PLANNER_RETRY_ATTEMPT", ""))
+                != "2"
+                or failed_planner_digest
+                != config.release_orchestrator.release_planner_image
+                or failed_planner_digest
+                != execution.get("planner_remediation_retry_image")
+                or execution.get("planner_remediation_retry_hash") != planner_hash()
+            ):
+                return execution
         _verify_build(
             execution,
             build,
@@ -386,14 +404,19 @@ def _retry_planner_after_verified_step_failure(
             str(exc)[:500],
         )
         return execution
-    failed_plan = str(build.get("status", "")) in _FAILED_BUILD_STATES and any(
-        str(step.get("id", "")) == "release-plan"
-        and str(step.get("status", "")) in _FAILED_BUILD_STATES
+    failed_steps = [
+        str(step.get("id", ""))
         for step in build.get("steps", [])
-    )
+        if str(step.get("status", "")) in _FAILED_BUILD_STATES
+    ]
+    failed_plan = str(
+        build.get("status", "")
+    ) in _FAILED_BUILD_STATES and failed_steps == ["release-plan"]
     if not failed_plan:
         checked_field = (
-            {"planner_remediation_retry_checked": True}
+            {"planner_contract_retry_checked": True}
+            if contract_retry
+            else {"planner_remediation_retry_checked": True}
             if remediation
             else {"planner_retry_checked": True}
         )
@@ -406,6 +429,7 @@ def _retry_planner_after_verified_step_failure(
             planner_image=config.release_orchestrator.release_planner_image,
             planner_hash_value=planner_hash(),
             remediation=remediation,
+            contract_retry=contract_retry,
             previous_planner_image=failed_planner_digest if remediation else "",
         )
         service = catalog.get_service(str(staged["service_name"]))
@@ -548,6 +572,26 @@ def reconcile(execution_id: str) -> dict[str, Any]:
     if not execution.get("evidence_committed"):
         execution = _commit_quality(execution)
     if execution.get("status") not in {"quality_passed", "running_quality"}:
+        if (
+            execution.get("operation") == "main_release"
+            and execution.get("release_engine_failed")
+            and execution.get("engine_event_status") == "quality_passed"
+            and execution.get("evidence_committed")
+        ):
+            failed = release_executions.save(
+                execution_id,
+                status="failed",
+                error=str(execution.get("release_error") or "Release planner failed")[
+                    :1000
+                ],
+            )
+            _complete_check(
+                failed,
+                "release",
+                "failure",
+                str(failed.get("error") or "Release planner failed")[:500],
+            )
+            return _retry_planner_after_verified_step_failure(failed)
         return execution
     if execution.get("operation") == "pr_quality":
         return execution
