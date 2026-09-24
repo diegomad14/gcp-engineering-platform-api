@@ -353,8 +353,11 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
                         "for attempt in $(seq 1 30); do "
                         "if docker exec eng-platform-postgres pg_isready -U postgres "
                         "-d wm_test >/dev/null 2>&1; then "
-                        "docker exec eng-platform-postgres createdb -U postgres fnd_test; "
-                        "exit 0; fi; sleep 1; done; exit 1"
+                        "for create_attempt in $(seq 1 10); do "
+                        "if docker exec eng-platform-postgres createdb -U postgres "
+                        "fnd_test >/dev/null 2>&1; then exit 0; fi; sleep 1; done; "
+                        "fi; sleep 1; done; "
+                        "docker exec eng-platform-postgres createdb -U postgres fnd_test"
                     ),
                 ],
                 "env": [
