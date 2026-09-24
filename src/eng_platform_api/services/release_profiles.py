@@ -18,7 +18,13 @@ class ReleaseProfile:
     name: str
     timeout_seconds: int
     build_args: tuple[tuple[str, str], ...] = ()
-    hooks: tuple[str, ...] = ()
+    candidate_env_vars: tuple[tuple[str, str], ...] = ()
+    pre_candidate_hooks: tuple[str, ...] = ()
+    candidate_hooks: tuple[str, ...] = ()
+    pre_promote_hooks: tuple[str, ...] = ()
+    post_promote_hooks: tuple[str, ...] = ()
+    recovery_hook: str = ""
+    rollback_hook: str = ""
     candidate_update_strategy: str = "merge"
     rollback_mode: str = "traffic"
 
@@ -29,7 +35,7 @@ class ReleaseProfile:
 
 _PROFILES: dict[str, ReleaseProfile] = {
     "eng-platform-api": ReleaseProfile(
-        "eng-platform-api", 1800, hooks=("verify_candidate_config",)
+        "eng-platform-api", 1800, candidate_hooks=("verify_candidate_config",)
     ),
     "eng-platform-web": ReleaseProfile(
         "eng-platform-web", 1800, build_args=(("APP_VERSION", "{tag}"),)
@@ -40,30 +46,32 @@ _PROFILES: dict[str, ReleaseProfile] = {
     "cgm-bot-api": ReleaseProfile(
         "cgm-bot-api",
         1800,
-        hooks=("ensure_bulk_queue", "deploy_bulk_worker", "validate_smarti"),
+        pre_candidate_hooks=("ensure_bulk_queue", "deploy_bulk_worker"),
+        candidate_hooks=("validate_smarti",),
+        post_promote_hooks=("promote_bulk_worker",),
+        recovery_hook="recover_bulk_worker",
+        rollback_hook="rollback_bulk_worker",
         candidate_update_strategy="overwrite",
     ),
     "cgm-sanplat-web": ReleaseProfile(
         "cgm-sanplat-web",
         3600,
-        hooks=("corporate_window_web", "wait_corporate_activation_web"),
+        pre_promote_hooks=("corporate_window_web",),
+        post_promote_hooks=("wait_corporate_activation_web",),
+        recovery_hook="recover_corporate_web",
+        rollback_hook="rollback_corporate_web",
         rollback_mode="corporate_web",
     ),
     "cgm-sanplat-api": ReleaseProfile(
         "cgm-sanplat-api",
         3600,
-        hooks=(
-            "prepare_corporate_runtimes",
-            "deploy_external_jobs",
-            "deploy_smarti_prevention",
-            "validate_corporate_runtimes",
-            "validate_wm_perseo",
-            "validate_openapi_inventory",
-            "validate_corporate_auth",
-            "corporate_window_api",
-            "activate_job_engine",
-            "wait_corporate_activation_api",
-        ),
+        candidate_env_vars=(("APP_RELEASE_SHA", "{sha}"),),
+        pre_candidate_hooks=("prepare_corporate_runtimes",),
+        candidate_hooks=("validate_openapi_inventory", "validate_corporate_auth"),
+        pre_promote_hooks=("corporate_window_api",),
+        post_promote_hooks=("wait_corporate_activation_api",),
+        recovery_hook="recover_corporate_api",
+        rollback_hook="rollback_corporate_api",
         rollback_mode="corporate_api",
     ),
 }
@@ -85,9 +93,20 @@ _ARTEMIS_JOBS = (
     "cgm-artemis-wm-sweep-worker",
 )
 for _name in _ARTEMIS_SERVICES:
-    _PROFILES[_name] = ReleaseProfile(_name, 3600)
+    _PROFILES[_name] = ReleaseProfile(
+        _name,
+        3600,
+        candidate_env_vars=(("APP_RELEASE_SHA", "{sha}"),)
+        if _name != "cgm-artemis-web"
+        else (),
+    )
 for _name in _ARTEMIS_JOBS:
-    _PROFILES[_name] = ReleaseProfile(_name, 3600, rollback_mode="job_definition")
+    _PROFILES[_name] = ReleaseProfile(
+        _name,
+        3600,
+        candidate_env_vars=(("APP_RELEASE_SHA", "{sha}"),),
+        rollback_mode="job_definition",
+    )
 
 
 def profile_for(service: CatalogService) -> ReleaseProfile:
