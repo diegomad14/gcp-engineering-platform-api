@@ -27,7 +27,13 @@ PROFILE_SPECS = {
         "name": "eng-platform-api",
         "timeout_seconds": 1800,
         "build_args": [],
-        "hooks": ["verify_candidate_config"],
+        "candidate_env_vars": [],
+        "pre_candidate_hooks": [],
+        "candidate_hooks": ["verify_candidate_config"],
+        "pre_promote_hooks": [],
+        "post_promote_hooks": [],
+        "recovery_hook": "",
+        "rollback_hook": "",
         "candidate_update_strategy": "merge",
         "rollback_mode": "traffic",
     },
@@ -35,7 +41,13 @@ PROFILE_SPECS = {
         "name": "eng-platform-web",
         "timeout_seconds": 1800,
         "build_args": [["APP_VERSION", "{tag}"]],
-        "hooks": [],
+        "candidate_env_vars": [],
+        "pre_candidate_hooks": [],
+        "candidate_hooks": [],
+        "pre_promote_hooks": [],
+        "post_promote_hooks": [],
+        "recovery_hook": "",
+        "rollback_hook": "",
         "candidate_update_strategy": "merge",
         "rollback_mode": "traffic",
     },
@@ -43,7 +55,13 @@ PROFILE_SPECS = {
         "name": "communications-ms",
         "timeout_seconds": 1800,
         "build_args": [],
-        "hooks": [],
+        "candidate_env_vars": [],
+        "pre_candidate_hooks": [],
+        "candidate_hooks": [],
+        "pre_promote_hooks": [],
+        "post_promote_hooks": [],
+        "recovery_hook": "",
+        "rollback_hook": "",
         "candidate_update_strategy": "overwrite",
         "rollback_mode": "traffic",
     },
@@ -51,7 +69,13 @@ PROFILE_SPECS = {
         "name": "cgm-bot-api",
         "timeout_seconds": 1800,
         "build_args": [],
-        "hooks": ["ensure_bulk_queue", "deploy_bulk_worker", "validate_smarti"],
+        "candidate_env_vars": [],
+        "pre_candidate_hooks": ["ensure_bulk_queue", "deploy_bulk_worker"],
+        "candidate_hooks": ["validate_smarti"],
+        "pre_promote_hooks": [],
+        "post_promote_hooks": ["promote_bulk_worker"],
+        "recovery_hook": "recover_bulk_worker",
+        "rollback_hook": "rollback_bulk_worker",
         "candidate_update_strategy": "overwrite",
         "rollback_mode": "traffic",
     },
@@ -59,7 +83,13 @@ PROFILE_SPECS = {
         "name": "cgm-sanplat-web",
         "timeout_seconds": 3600,
         "build_args": [],
-        "hooks": ["corporate_window_web", "wait_corporate_activation_web"],
+        "candidate_env_vars": [],
+        "pre_candidate_hooks": [],
+        "candidate_hooks": [],
+        "pre_promote_hooks": ["corporate_window_web"],
+        "post_promote_hooks": ["wait_corporate_activation_web"],
+        "recovery_hook": "recover_corporate_web",
+        "rollback_hook": "rollback_corporate_web",
         "candidate_update_strategy": "merge",
         "rollback_mode": "corporate_web",
     },
@@ -67,18 +97,16 @@ PROFILE_SPECS = {
         "name": "cgm-sanplat-api",
         "timeout_seconds": 3600,
         "build_args": [],
-        "hooks": [
-            "prepare_corporate_runtimes",
-            "deploy_external_jobs",
-            "deploy_smarti_prevention",
-            "validate_corporate_runtimes",
-            "validate_wm_perseo",
+        "candidate_env_vars": [["APP_RELEASE_SHA", "{sha}"]],
+        "pre_candidate_hooks": ["prepare_corporate_runtimes"],
+        "candidate_hooks": [
             "validate_openapi_inventory",
             "validate_corporate_auth",
-            "corporate_window_api",
-            "activate_job_engine",
-            "wait_corporate_activation_api",
         ],
+        "pre_promote_hooks": ["corporate_window_api"],
+        "post_promote_hooks": ["wait_corporate_activation_api"],
+        "recovery_hook": "recover_corporate_api",
+        "rollback_hook": "rollback_corporate_api",
         "candidate_update_strategy": "merge",
         "rollback_mode": "corporate_api",
     },
@@ -102,7 +130,15 @@ for _name in (
         "name": _name,
         "timeout_seconds": 3600,
         "build_args": [],
-        "hooks": [],
+        "candidate_env_vars": (
+            [] if _name == "cgm-artemis-web" else [["APP_RELEASE_SHA", "{sha}"]]
+        ),
+        "pre_candidate_hooks": [],
+        "candidate_hooks": [],
+        "pre_promote_hooks": [],
+        "post_promote_hooks": [],
+        "recovery_hook": "",
+        "rollback_hook": "",
         "candidate_update_strategy": "merge",
         "rollback_mode": (
             "job_definition"
@@ -130,7 +166,17 @@ def env(name: str) -> str:
 
 
 def profile_fingerprint(name: str) -> str:
-    payload = json.dumps(PROFILE_SPECS[name], sort_keys=True, separators=(",", ":"))
+    value = PROFILE_SPECS[name]
+    if name in {"eng-platform-api", "eng-platform-web", "communications-ms"}:
+        value = {
+            "name": value["name"],
+            "timeout_seconds": value["timeout_seconds"],
+            "build_args": value["build_args"],
+            "hooks": value["candidate_hooks"],
+            "candidate_update_strategy": value["candidate_update_strategy"],
+            "rollback_mode": value["rollback_mode"],
+        }
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -347,6 +393,55 @@ def hook(name: str) -> None:
     run("bash", str(path))
 
 
+def verify_hooks() -> None:
+    """Reject an incomplete tagged source before building or changing resources."""
+    spec = PROFILE_SPECS[env("CGM_PROFILE")]
+    names = [
+        *spec["pre_candidate_hooks"],
+        *spec["candidate_hooks"],
+        *spec["pre_promote_hooks"],
+        *spec["post_promote_hooks"],
+        spec["recovery_hook"],
+        spec["rollback_hook"],
+    ]
+    for name in filter(None, names):
+        if name == "verify_candidate_config":
+            continue
+        path = (HOOKS_ROOT / f"{name}.sh").resolve()
+        if path.parent != HOOKS_ROOT or not path.is_file():
+            raise RuntimeError(f"authorized hook is absent from exact commit: {name}")
+
+
+def run_hooks(phase: str) -> None:
+    for name in PROFILE_SPECS[env("CGM_PROFILE")][phase]:
+        if name == "verify_candidate_config":
+            run(
+                "python3",
+                "src/eng_platform_api/verify_candidate_config.py",
+                "--project",
+                env("CGM_PROJECT_ID"),
+                "--region",
+                env("CGM_REGION"),
+                "--revision",
+                env("CGM_CANDIDATE_REVISION"),
+            )
+        else:
+            hook(name)
+
+
+def candidate_env_args() -> list[str]:
+    """Render only server-owned release variables, never caller-supplied names."""
+    rows = PROFILE_SPECS[env("CGM_PROFILE")]["candidate_env_vars"]
+    if not rows:
+        return []
+    values = []
+    for name, template in rows:
+        if template != "{sha}" or name != "APP_RELEASE_SHA":
+            raise RuntimeError("unsupported candidate environment template")
+        values.append(f"{name}={env('CGM_RELEASE_SHA')}")
+    return ["--update-env-vars", ",".join(values)]
+
+
 def _traffic(service: str, region: str, project: str) -> dict[str, int]:
     raw = run(
         "gcloud",
@@ -432,13 +527,9 @@ def _smoke(url: str) -> None:
             subprocess.run(["sleep", "3"], check=True)
 
 
-def deploy(image: str) -> dict[str, str]:
-    service, region, project = (
-        env("CGM_SERVICE"),
-        env("CGM_REGION"),
-        env("CGM_PROJECT_ID"),
-    )
-    previous = _traffic(service, region, project)
+def _deploy_candidate(
+    image: str, service: str, region: str, project: str
+) -> tuple[str, str]:
     emit("deploy-candidate", "running")
     suffix = "ep-" + env("CGM_REQUEST_FINGERPRINT")[:10]
     run(
@@ -451,6 +542,7 @@ def deploy(image: str) -> dict[str, str]:
         image,
         "--update-labels",
         f"commit-sha={env('CGM_RELEASE_SHA')}",
+        *candidate_env_args(),
         "--region",
         region,
         "--project",
@@ -515,35 +607,51 @@ def deploy(image: str) -> dict[str, str]:
         candidate_url=candidate_url,
         image_digest=image,
     )
-    emit("validate-candidate", "running")
-    _smoke(candidate_url)
-    if env("CGM_PROFILE") == "eng-platform-api":
-        run(
-            "python3",
-            "src/eng_platform_api/verify_candidate_config.py",
-            "--project",
-            project,
-            "--region",
-            region,
-            "--revision",
-            candidate,
-        )
-    for name in PROFILE_SPECS[env("CGM_PROFILE")]["hooks"]:
-        if name != "verify_candidate_config":
-            hook(name)
-    emit(
-        "validate-candidate",
-        "succeeded",
-        candidate_revision=candidate,
-        candidate_url=candidate_url,
+    return candidate, candidate_url
+
+
+def deploy(image: str) -> dict[str, str]:
+    service, region, project = (
+        env("CGM_SERVICE"),
+        env("CGM_REGION"),
+        env("CGM_PROJECT_ID"),
     )
+    previous = _traffic(service, region, project)
+    os.environ["CGM_PREVIOUS_TRAFFIC"] = json.dumps(previous, sort_keys=True)
+    profile = PROFILE_SPECS[env("CGM_PROFILE")]
+    verify_hooks()
+    os.environ["CGM_RESOLVED_IMAGE"] = image
+    promoted = False
+    side_effects_started = False
     try:
+        if profile["pre_candidate_hooks"]:
+            side_effects_started = True
+        run_hooks("pre_candidate_hooks")
+        candidate, candidate_url = _deploy_candidate(image, service, region, project)
+        os.environ["CGM_CANDIDATE_REVISION"] = candidate
+        os.environ["CGM_CANDIDATE_URL"] = candidate_url
+        emit("validate-candidate", "running")
+        _smoke(candidate_url)
+        run_hooks("candidate_hooks")
+        emit(
+            "validate-candidate",
+            "succeeded",
+            candidate_revision=candidate,
+            candidate_url=candidate_url,
+        )
+        if profile["pre_promote_hooks"]:
+            side_effects_started = True
+        run_hooks("pre_promote_hooks")
         emit("promote", "running")
+        # A failed update may already have moved traffic. Always reconcile it.
+        promoted = True
         _set_traffic(service, region, project, {candidate: 100})
         emit("promote", "succeeded", production_revision=candidate)
         emit("validate-production", "running")
         production_url = _service_url(service, region, project)
+        os.environ["CGM_PRODUCTION_URL"] = production_url
         _smoke(production_url)
+        run_hooks("post_promote_hooks")
         emit(
             "validate-production",
             "succeeded",
@@ -557,18 +665,48 @@ def deploy(image: str) -> dict[str, str]:
             "production_url": production_url,
             "image_digest": image,
         }
-    except Exception:
-        _set_traffic(service, region, project, previous)
-        restored = max(previous, key=previous.get)
+    except Exception as exc:
+        if not promoted and not side_effects_started:
+            raise
+        emit("rollback", "running")
+        try:
+            if profile["recovery_hook"]:
+                hook(profile["recovery_hook"])
+            elif promoted:
+                _set_traffic(service, region, project, previous)
+            current = _traffic(service, region, project)
+            if not profile["recovery_hook"] and current != previous:
+                raise RuntimeError("prior traffic was not restored exactly")
+            restored = max(current, key=current.get)
+        except Exception as restore_exc:
+            emit("rollback", "failed", error="paired recovery could not be verified")
+            raise RuntimeError(
+                "release failed and paired recovery could not be verified"
+            ) from restore_exc
         emit("rollback", "succeeded", production_revision=restored)
-        raise AutomaticRollback("production smoke failed; traffic was restored")
+        raise AutomaticRollback(
+            "release failed; prior resources were restored"
+        ) from exc
 
 
 def rollback() -> dict[str, str]:
     if os.getenv("CGM_RUNTIME_KIND") == "cloud_run_job":
         return rollback_job()
+    profile = PROFILE_SPECS[env("CGM_PROFILE")]
+    verify_hooks()
     target = env("CGM_TARGET_REVISION")
     emit("rollback", "running")
+    if profile["rollback_hook"]:
+        hook(profile["rollback_hook"])
+        current = _traffic(env("CGM_SERVICE"), env("CGM_REGION"), env("CGM_PROJECT_ID"))
+        actual = max(current, key=current.get)
+        emit("rollback", "succeeded", production_revision=actual)
+        return {
+            "production_revision": actual,
+            "production_url": _service_url(
+                env("CGM_SERVICE"), env("CGM_REGION"), env("CGM_PROJECT_ID")
+            ),
+        }
     run(
         "gcloud",
         "run",
@@ -728,6 +866,7 @@ def deploy_job(image: str) -> dict[str, str]:
             image,
             "--update-labels",
             f"commit-sha={env('CGM_RELEASE_SHA')}",
+            *candidate_env_args(),
             "--region",
             env("CGM_REGION"),
             "--project",
@@ -810,6 +949,7 @@ def main() -> None:
     configure_runtime_home()
     verify_profile()
     assert_source()
+    verify_hooks()
     emit("verify-release", "running")
     if env("CGM_OPERATION") != "rollback":
         verify_quality()

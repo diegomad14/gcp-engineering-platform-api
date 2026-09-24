@@ -25,6 +25,7 @@ def test_job_deploy_snapshots_before_mutation_and_does_not_execute(monkeypatch):
     events = []
     state = {"definition": "before", "image": "repo/old@sha256:old"}
     monkeypatch.setenv("CGM_SERVICE", "cgm-artemis-fnd-observation-worker")
+    monkeypatch.setenv("CGM_PROFILE", "cgm-artemis-fnd-observation-worker")
     monkeypatch.setenv("CGM_REGION", "us-central1")
     monkeypatch.setenv("CGM_PROJECT_ID", "cgm-assistant-prod")
     monkeypatch.setenv("CGM_EVIDENCE_BUCKET", "evidence-bucket")
@@ -57,6 +58,7 @@ def test_job_deploy_snapshots_before_mutation_and_does_not_execute(monkeypatch):
 
 
 def test_job_deploy_restores_definition_on_update_failure(monkeypatch):
+    monkeypatch.setenv("CGM_PROFILE", "cgm-artemis-fnd-observation-worker")
     restored = []
     monkeypatch.setattr(engine, "_job_definition", lambda: "before")
     monkeypatch.setattr(engine, "_job_operational_spec", lambda definition: definition)
