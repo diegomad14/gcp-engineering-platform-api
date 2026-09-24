@@ -469,10 +469,47 @@ def test_planner_image_remediation_reuses_old_fingerprint_and_quality(
     assert request["substitutions"]["_PLANNER_SHA256"] == PLANNER_HASH
     assert request["substitutions"]["_PLANNER_DIGEST"] == new_image
     assert "quality" not in {step["id"] for step in request["steps"]}
-    assert (
-        "ENG_PLATFORM_RELEASE_PLANNER_HASH=" + PLANNER_HASH
-        in request["steps"][2]["env"]
+    assert "ENG_PLATFORM_RELEASE_PLANNER_HASH=" + new_hash in request["steps"][2]["env"]
+
+
+def test_planner_contract_retry_uses_image_hash_separate_from_execution_hash(
+    configured, monkeypatch
+):
+    new_hash = "9" * 64
+    monkeypatch.setattr(cloud_build, "planner_hash", lambda: new_hash)
+    execution = _execution_for(
+        _service(),
+        operation="main_release",
+        planner_hash=PLANNER_HASH,
+        planner_retry_count=3,
+        planner_retry_pending=True,
+        planner_remediation_retry_pending=True,
+        planner_remediation_retry_checked=True,
+        planner_remediation_retry_image=PLANNER,
+        planner_remediation_retry_hash=new_hash,
+        planner_contract_retry_pending=True,
+        planner_contract_retry_checked=True,
+        planner_contract_retry_image=PLANNER,
+        planner_contract_retry_hash=new_hash,
+        evidence_committed=True,
+        report_hash="a" * 64,
     )
+
+    request = cloud_build.build_request(execution, _service())
+
+    assert [step["id"] for step in request["steps"]] == [
+        "prepare",
+        "prepare-planner-volume",
+        "release-plan",
+        "publish-release-plan",
+    ]
+    assert request["substitutions"]["_PLANNER_RETRY_ATTEMPT"] == "3"
+    assert request["substitutions"]["_PLANNER_SHA256"] == PLANNER_HASH
+    assert request["substitutions"]["_PLANNER_IMAGE_SHA256"] == new_hash
+    assert request["substitutions"]["_PLANNER_DIGEST"] == PLANNER
+    assert "ENG_PLATFORM_RELEASE_PLANNER_HASH=" + new_hash in request["steps"][2]["env"]
+    assert "ENG_PLATFORM_RELEASE_PLANNER_HASH=" + new_hash in request["steps"][3]["env"]
+    assert "quality" not in {step["id"] for step in request["steps"]}
 
 
 def test_api_profile_runs_container_smoke_without_control_volume(

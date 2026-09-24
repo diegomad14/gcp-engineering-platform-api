@@ -645,6 +645,7 @@ def test_terminal_planner_only_failure_submits_one_cost_limited_retry(monkeypatc
         planner_image=PLANNER_DIGEST,
         planner_hash_value=mock.ANY,
         remediation=False,
+        contract_retry=False,
         previous_planner_image="",
     )
     submit.assert_called_once_with("execution-1", mock.ANY)
@@ -680,6 +681,88 @@ def test_terminal_failure_in_other_step_is_not_retried(monkeypatch):
 
     assert result["planner_retry_checked"] is True
     stage.assert_not_called()
+
+
+def test_submission_pending_contract_failure_transitions_and_stages_one_retry(
+    monkeypatch,
+):
+    remediation_hash = reconciler.planner_hash()
+    state = _execution(
+        operation="main_release",
+        status="submission_pending",
+        build_id="planner-remediation-build",
+        provider_run_id="planner-remediation-build",
+        engine_event_status="quality_passed",
+        release_engine_failed=False,
+        evidence_committed=True,
+        pending_report_hash="e" * 64,
+        report_hash="e" * 64,
+        planner_retry_count=2,
+        planner_retry_checked=True,
+        planner_retry_pending=True,
+        planner_remediation_retry_checked=True,
+        planner_remediation_retry_pending=True,
+        planner_remediation_retry_image=PLANNER_DIGEST,
+        planner_remediation_retry_hash=remediation_hash,
+        release_failed_step="release-plan",
+    )
+    substitutions = _substitutions(state)
+    substitutions["_PLANNER_RETRY_ATTEMPT"] = "2"
+    build = _build(
+        state,
+        status="FAILURE",
+        substitutions=substitutions,
+        steps=[{"id": "release-plan", "status": "FAILURE"}],
+    )
+    staged = {
+        **state,
+        "status": "submission_pending",
+        "build_id": "",
+        "planner_retry_count": 3,
+        "planner_retry_pending": True,
+        "planner_contract_retry_checked": True,
+        "planner_contract_retry_pending": True,
+        "planner_contract_retry_image": PLANNER_DIGEST,
+        "planner_contract_retry_hash": remediation_hash,
+    }
+    submitted = {**staged, "build_id": "planner-contract-retry-build"}
+
+    def provider_success(execution):
+        execution["release_engine_failed"] = True
+        execution["release_error"] = "Release planner failed"
+        return True
+
+    monkeypatch.setattr(reconciler.release_executions, "get", lambda _: state)
+    monkeypatch.setattr(reconciler, "_provider_success", provider_success)
+    monkeypatch.setattr(reconciler.release_cloud_build, "get_build", lambda _: build)
+    monkeypatch.setattr(reconciler, "_record_build_timing", mock.Mock())
+    monkeypatch.setattr(
+        reconciler.release_executions,
+        "save",
+        lambda _execution_id, **changes: state.update(changes) or dict(state),
+    )
+    monkeypatch.setattr(reconciler.catalog, "get_service", lambda _: object())
+    stage = mock.Mock(return_value=staged)
+    monkeypatch.setattr(reconciler.release_executions, "stage_planner_retry", stage)
+    submit = mock.Mock(side_effect=[state, submitted])
+    monkeypatch.setattr(reconciler.release_cloud_build, "submit", submit)
+    monkeypatch.setattr(reconciler, "_complete_check", mock.Mock())
+
+    result = reconciler.reconcile("execution-1")
+
+    assert state["status"] == "failed"
+    assert state["error"] == "Release planner failed"
+    assert result["build_id"] == "planner-contract-retry-build"
+    stage.assert_called_once_with(
+        "execution-1",
+        failed_build_id="planner-remediation-build",
+        planner_image=PLANNER_DIGEST,
+        planner_hash_value=remediation_hash,
+        remediation=False,
+        contract_retry=True,
+        previous_planner_image="",
+    )
+    assert submit.call_count == 2
 
 
 def test_verified_planner_image_change_allows_exactly_one_short_remediation(
@@ -740,6 +823,7 @@ def test_verified_planner_image_change_allows_exactly_one_short_remediation(
         planner_image=new_image,
         planner_hash_value=reconciler.planner_hash(),
         remediation=True,
+        contract_retry=False,
         previous_planner_image=old_image,
     )
     submit.assert_called_once_with("execution-1", mock.ANY)
@@ -820,6 +904,7 @@ def test_unknown_callback_image_drift_allows_only_verified_planner_remediation(
         planner_image=new_image,
         planner_hash_value=mock.ANY,
         remediation=True,
+        contract_retry=False,
         previous_planner_image=PLANNER_DIGEST,
     )
     submit.assert_called_once_with("execution-1", mock.ANY)

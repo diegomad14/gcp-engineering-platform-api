@@ -79,23 +79,40 @@ def _planner_retry_request(
         == config.release_orchestrator.release_planner_image
         and execution.get("planner_remediation_retry_hash") == planner_hash()
     )
+    contract_retry_authorized = bool(
+        retry_count == 3
+        and execution.get("planner_contract_retry_pending")
+        and execution.get("planner_contract_retry_image")
+        == config.release_orchestrator.release_planner_image
+        and execution.get("planner_contract_retry_hash") == planner_hash()
+        and execution.get("planner_remediation_retry_hash") == planner_hash()
+    )
     if (
         execution.get("operation") != "main_release"
-        or retry_count not in {1, 2}
+        or retry_count not in {1, 2, 3}
         or not execution.get("planner_retry_pending")
         or not execution.get("evidence_committed")
         or not execution.get("report_hash")
         or (retry_count == 2 and not remediation_authorized)
+        or (retry_count == 3 and not contract_retry_authorized)
     ):
         raise ReleaseCloudBuildError("Planner-only recovery is not authorized")
     profile = profile_for(service)
     executor = executor_image(profile)
     planner = config.release_orchestrator.release_planner_image
+    runtime_planner_hash = (
+        str(execution["planner_contract_retry_hash"])
+        if contract_retry_authorized
+        else str(execution["planner_remediation_retry_hash"])
+        if remediation_authorized
+        else str(execution["planner_hash"])
+    )
     planner_env = [
         *common_env,
-        # Keep the original execution planner hash in the callback identity.
-        # A remediation build is separately pinned/audited by its image digest.
-        f"ENG_PLATFORM_RELEASE_PLANNER_HASH={execution['planner_hash']}",
+        # The plan callback uses the original execution hash for the first
+        # retry, then the separately authorized hash of the rolled-forward
+        # planner image for image remediation/contract recovery.
+        f"ENG_PLATFORM_RELEASE_PLANNER_HASH={runtime_planner_hash}",
         f"ENG_PLATFORM_RELEASE_PLANNER_IMAGE={planner}",
         "GIT_CONFIG_COUNT=1",
         "GIT_CONFIG_KEY_0=safe.directory",
@@ -160,7 +177,7 @@ def _planner_retry_request(
             ],
             "env": common_env
             + [
-                f"ENG_PLATFORM_RELEASE_PLANNER_HASH={execution['planner_hash']}",
+                f"ENG_PLATFORM_RELEASE_PLANNER_HASH={runtime_planner_hash}",
                 f"ENG_PLATFORM_RELEASE_PLANNER_IMAGE={planner}",
             ],
             "volumes": [planner_volume, control_volume],
@@ -211,6 +228,16 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
         == config.release_orchestrator.release_planner_image
         and execution.get("planner_remediation_retry_hash") == planner_hash()
     )
+    contract_retry_authorized = bool(
+        operation == "main_release"
+        and planner_retry_count == 3
+        and execution.get("planner_contract_retry_pending")
+        and execution.get("planner_contract_retry_image")
+        == config.release_orchestrator.release_planner_image
+        and execution.get("planner_contract_retry_hash") == planner_hash()
+        and execution.get("planner_remediation_retry_hash") == planner_hash()
+    )
+    planner_recovery_authorized = remediation_authorized or contract_retry_authorized
     if (
         execution.get("service_name") != service.service_name
         or execution.get("repository") != service.repository
@@ -219,7 +246,7 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
         or (
             operation == "main_release"
             and execution.get("planner_hash") != planner_hash()
-            and not remediation_authorized
+            and not planner_recovery_authorized
         )
     ):
         raise ReleaseCloudBuildError("Release build identity is not authorized")
@@ -242,6 +269,10 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
     }
     if planner_retry_count:
         substitutions["_PLANNER_RETRY_ATTEMPT"] = str(planner_retry_count)
+    if contract_retry_authorized:
+        substitutions["_PLANNER_IMAGE_SHA256"] = str(
+            execution["planner_contract_retry_hash"]
+        )
     common_env = [
         f"ENG_PLATFORM_RELEASE_EXECUTION_ID={execution_id}",
         f"ENG_PLATFORM_RELEASE_FINGERPRINT={fingerprint_value}",
@@ -523,6 +554,10 @@ def _expected_substitutions(execution: dict[str, Any]) -> dict[str, str]:
     planner_retry_count = int(execution.get("planner_retry_count", 0) or 0)
     if planner_retry_count:
         expected["_PLANNER_RETRY_ATTEMPT"] = str(planner_retry_count)
+    if planner_retry_count == 3 and execution.get("planner_contract_retry_pending"):
+        expected["_PLANNER_IMAGE_SHA256"] = str(
+            execution.get("planner_contract_retry_hash", "")
+        )
     return expected
 
 

@@ -622,6 +622,31 @@ def test_verify_plan_requires_exact_planner_hash():
     assert error.value.status_code == 403
 
 
+def test_verify_plan_accepts_only_the_exact_authorized_contract_retry_hash():
+    remediation_hash = "e" * 64
+    execution = _execution(
+        operation="main_release",
+        planner_hash=PLANNER_HASH,
+        planner_retry_count=3,
+        planner_contract_retry_pending=True,
+        planner_contract_retry_hash=remediation_hash,
+    )
+    plan = ReleasePlan(
+        next_version="1.2.3",
+        git_tag="v1.2.3",
+        release_type="patch",
+        config_hash=remediation_hash,
+    )
+
+    result = events._verify_plan(execution, _event(release_plan=plan))
+
+    assert result["config_hash"] == remediation_hash
+    execution["planner_contract_retry_pending"] = False
+    with pytest.raises(HTTPException) as error:
+        events._verify_plan(execution, _event(release_plan=plan))
+    assert error.value.status_code == 403
+
+
 def test_verify_plan_rejects_tag_on_no_release():
     plan = ReleasePlan(
         next_version="",
