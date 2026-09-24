@@ -456,8 +456,7 @@ def _recover_unknown_planner_identity_drift(
             build.get("substitutions", {}).get("_PLANNER_DIGEST", "")
         )
         if (
-            str(build.get("substitutions", {}).get("_PLANNER_RETRY_ATTEMPT", ""))
-            != "1"
+            str(build.get("substitutions", {}).get("_PLANNER_RETRY_ATTEMPT", "")) != "1"
             or "@sha256:" not in failed_planner_digest
             or failed_planner_digest
             == config.release_orchestrator.release_planner_image
