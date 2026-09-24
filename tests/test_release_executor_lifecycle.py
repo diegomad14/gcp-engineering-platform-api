@@ -75,6 +75,13 @@ def test_corporate_activation_waits_until_after_promotion(engine, monkeypatch):
     )
 
 
+def test_bot_hooks_receive_previous_api_traffic_snapshot(engine, monkeypatch):
+    _setup_deploy(engine, monkeypatch, profile="cgm-bot-api")
+    monkeypatch.setenv("CGM_RELEASE_SHA", "a" * 40)
+    engine.deploy("repo/image@sha256:" + "b" * 64)
+    assert engine.os.environ["CGM_PREVIOUS_TRAFFIC"] == '{"old-revision": 100}'
+
+
 def test_corporate_failure_uses_paired_recovery_not_traffic_only(engine, monkeypatch):
     events, traffic = _setup_deploy(
         engine,

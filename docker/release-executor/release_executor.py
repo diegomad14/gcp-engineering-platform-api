@@ -617,6 +617,7 @@ def deploy(image: str) -> dict[str, str]:
         env("CGM_PROJECT_ID"),
     )
     previous = _traffic(service, region, project)
+    os.environ["CGM_PREVIOUS_TRAFFIC"] = json.dumps(previous, sort_keys=True)
     profile = PROFILE_SPECS[env("CGM_PROFILE")]
     verify_hooks()
     os.environ["CGM_RESOLVED_IMAGE"] = image
