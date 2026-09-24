@@ -745,6 +745,125 @@ def test_verified_planner_image_change_allows_exactly_one_short_remediation(
     submit.assert_called_once_with("execution-1", mock.ANY)
 
 
+def test_unknown_callback_image_drift_allows_only_verified_planner_remediation(
+    monkeypatch,
+):
+    new_image = "planner@sha256:" + "f" * 64
+    state = _execution(
+        operation="main_release",
+        status="unknown",
+        error="Cloud Build release identity does not match execution",
+        build_id="planner-retry-build-1",
+        provider_run_id="planner-retry-build-1",
+        engine_event_status="quality_passed",
+        release_engine_failed=True,
+        evidence_committed=True,
+        report_hash="e" * 64,
+        planner_retry_count=1,
+        planner_retry_checked=True,
+        planner_retry_pending=False,
+        release_failed_step="release-plan",
+    )
+    substitutions = _substitutions(state)
+    substitutions.update(
+        {
+            "_PLANNER_DIGEST": PLANNER_DIGEST,
+            "_PLANNER_RETRY_ATTEMPT": "1",
+        }
+    )
+    build = _build(
+        state,
+        status="FAILURE",
+        substitutions=substitutions,
+        steps=[{"id": "release-plan", "status": "FAILURE"}],
+    )
+    staged = {
+        **state,
+        "status": "submission_pending",
+        "build_id": "",
+        "planner_retry_count": 2,
+        "planner_retry_pending": True,
+        "planner_remediation_retry_pending": True,
+        "planner_remediation_retry_image": new_image,
+    }
+    submitted = {**staged, "build_id": "planner-remediation-build"}
+
+    monkeypatch.setattr(
+        reconciler.config.release_orchestrator,
+        "release_planner_image",
+        new_image,
+    )
+    monkeypatch.setattr(reconciler.release_executions, "get", lambda _: state)
+    monkeypatch.setattr(reconciler.release_cloud_build, "get_build", lambda _: build)
+    monkeypatch.setattr(reconciler, "_record_build_timing", mock.Mock())
+    monkeypatch.setattr(
+        reconciler.release_executions,
+        "save",
+        lambda _execution_id, **changes: state.update(changes) or dict(state),
+    )
+    stage = mock.Mock(return_value=staged)
+    monkeypatch.setattr(reconciler.release_executions, "stage_planner_retry", stage)
+    monkeypatch.setattr(reconciler.catalog, "get_service", lambda _: object())
+    submit = mock.Mock(return_value=submitted)
+    monkeypatch.setattr(reconciler.release_cloud_build, "submit", submit)
+
+    result = reconciler.reconcile("execution-1")
+
+    assert state["status"] == "failed"
+    assert state["error"] == (
+        "Verified planner-only failure; callback image identity drift reconciled"
+    )
+    assert result["build_id"] == "planner-remediation-build"
+    stage.assert_called_once_with(
+        "execution-1",
+        failed_build_id="planner-retry-build-1",
+        planner_image=new_image,
+        planner_hash_value=mock.ANY,
+        remediation=True,
+        previous_planner_image=PLANNER_DIGEST,
+    )
+    submit.assert_called_once_with("execution-1", mock.ANY)
+
+
+def test_unknown_callback_drift_does_not_retry_a_non_planner_failure(monkeypatch):
+    state = _execution(
+        operation="main_release",
+        status="unknown",
+        error="Cloud Build release identity does not match execution",
+        engine_event_status="quality_passed",
+        release_engine_failed=True,
+        evidence_committed=True,
+        report_hash="e" * 64,
+        planner_retry_count=1,
+        planner_retry_checked=True,
+    )
+    substitutions = _substitutions(state)
+    substitutions.update(
+        {
+            "_PLANNER_DIGEST": PLANNER_DIGEST,
+            "_PLANNER_RETRY_ATTEMPT": "1",
+        }
+    )
+    build = _build(
+        state,
+        status="FAILURE",
+        substitutions=substitutions,
+        steps=[{"id": "prepare", "status": "FAILURE"}],
+    )
+    save = mock.Mock()
+    submit = mock.Mock()
+    monkeypatch.setattr(reconciler.release_executions, "get", lambda _: state)
+    monkeypatch.setattr(reconciler.release_cloud_build, "get_build", lambda _: build)
+    monkeypatch.setattr(reconciler.release_executions, "save", save)
+    monkeypatch.setattr(reconciler.release_cloud_build, "submit", submit)
+
+    result = reconciler.reconcile("execution-1")
+
+    assert result is state
+    save.assert_not_called()
+    submit.assert_not_called()
+
+
 def test_cloud_build_failure_before_quality_is_terminal_without_evidence(
     monkeypatch,
 ):

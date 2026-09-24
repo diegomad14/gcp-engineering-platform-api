@@ -421,6 +421,74 @@ def _retry_planner_after_verified_step_failure(
         return release_executions.get(str(execution["execution_id"])) or execution
 
 
+def _recover_unknown_planner_identity_drift(
+    execution: dict[str, Any],
+) -> dict[str, Any]:
+    """Reopen only a verified planner-only failure hidden by callback drift.
+
+    A release-planner image roll-forward can make a completed older retry's
+    callback fail the *current* image check. The event handler correctly marks
+    that execution unknown. Before allowing its one remediation retry, verify
+    the actual immutable Cloud Build directly, including source, service
+    account, every execution substitution, old planner digest, retry number,
+    and the exact failed step. Never trust the rejected callback as evidence.
+    """
+    if (
+        execution.get("status") != "unknown"
+        or execution.get("error")
+        != "Cloud Build release identity does not match execution"
+        or execution.get("provider") != "cloud_build"
+        or execution.get("operation") != "main_release"
+        or not execution.get("release_engine_failed")
+        or execution.get("engine_event_status") != "quality_passed"
+        or not execution.get("evidence_committed")
+        or not execution.get("report_hash")
+        or int(execution.get("planner_retry_count", 0) or 0) != 1
+        or not execution.get("planner_retry_checked")
+        or execution.get("planner_remediation_retry_checked")
+        or not execution.get("build_id")
+    ):
+        return execution
+
+    try:
+        build = release_cloud_build.get_build(str(execution["build_id"]))
+        failed_planner_digest = str(
+            build.get("substitutions", {}).get("_PLANNER_DIGEST", "")
+        )
+        if (
+            str(build.get("substitutions", {}).get("_PLANNER_RETRY_ATTEMPT", ""))
+            != "1"
+            or "@sha256:" not in failed_planner_digest
+            or failed_planner_digest
+            == config.release_orchestrator.release_planner_image
+        ):
+            return execution
+        _verify_build(execution, build, planner_digest=failed_planner_digest)
+        failed_steps = [
+            str(step.get("id", ""))
+            for step in build.get("steps", [])
+            if str(step.get("status", "")) in _FAILED_BUILD_STATES
+        ]
+        if str(build.get("status", "")) != "FAILURE" or failed_steps != [
+            "release-plan"
+        ]:
+            return execution
+    except Exception as exc:
+        logger.warning(
+            "release_planner_unknown_identity_recovery_rejected execution_id=%s error=%s",
+            execution.get("execution_id"),
+            str(exc)[:500],
+        )
+        return execution
+
+    verified = release_executions.save(
+        str(execution["execution_id"]),
+        status="failed",
+        error="Verified planner-only failure; callback image identity drift reconciled",
+    )
+    return _retry_planner_after_verified_step_failure(verified)
+
+
 def reconcile(execution_id: str) -> dict[str, Any]:
     execution = release_executions.get(execution_id)
     if execution is None:
@@ -435,6 +503,8 @@ def reconcile(execution_id: str) -> dict[str, Any]:
         return _retry_planner_after_verified_step_failure(execution)
     if execution.get("status") == "unknown" and execution.get("publication_uncertain"):
         return _publish_if_allowed(execution)
+    if execution.get("status") == "unknown":
+        return _recover_unknown_planner_identity_drift(execution)
     if execution.get("status") in {"release_planned", "publish_pending"}:
         return _publish_if_allowed(execution)
     if (
