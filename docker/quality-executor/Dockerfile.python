@@ -12,7 +12,9 @@ RUN apt-get update \
         pip-audit==2.9.0 \
         pytest-cov==7.0.0 \
         ruff==0.15.22 \
+        setuptools==80.9.0 \
         semgrep==1.136.0 \
+    && semgrep --version \
     && curl --fail --location --silent --show-error \
         "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
         | tar -xz -C /usr/local/bin trivy \
