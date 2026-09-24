@@ -318,7 +318,18 @@ def _prepare_history(source: Path, identity: dict[str, str]) -> None:
             )
             == "true"
         )
-        history_depth = ("--deepen=2",) if shallow else ()
+        # Release planning must see the complete ancestry of version tags. A
+        # shallow checkout can contain every tag ref while the tagged commits
+        # are still outside its shallow boundary, making `git tag --merged`
+        # incorrectly report an untagged repository. PR quality only needs its
+        # authorized base/head relationship and keeps the inexpensive deepen.
+        history_depth = (
+            ("--unshallow",)
+            if shallow and identity.get("operation") == "main_release"
+            else ("--deepen=2",)
+            if shallow
+            else ()
+        )
         _git(
             source,
             "-c",
