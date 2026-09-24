@@ -481,24 +481,18 @@ def test_claim_source_token_is_cloud_build_only_and_one_time():
     cloud, _ = _reserve(provider="cloud_build")
     executions.bind_build(cloud["execution_id"], build_id="build-1")
     assert (
-        executions.claim_source_token(
-            cloud["execution_id"], provider_run_id="build-1"
-        )
+        executions.claim_source_token(cloud["execution_id"], provider_run_id="build-1")
         is True
     )
     assert (
-        executions.claim_source_token(
-            cloud["execution_id"], provider_run_id="build-1"
-        )
+        executions.claim_source_token(cloud["execution_id"], provider_run_id="build-1")
         is False
     )
     assert executions.get(cloud["execution_id"])["source_token_issued_at"]
 
     github, _ = _reserve(head_sha="c" * 40)
     assert (
-        executions.claim_source_token(
-            github["execution_id"], provider_run_id="run-1"
-        )
+        executions.claim_source_token(github["execution_id"], provider_run_id="run-1")
         is False
     )
     assert executions.claim_source_token("missing", provider_run_id="build-1") is False
@@ -567,7 +561,9 @@ def test_claim_event_token_supports_both_managed_providers(provider):
 
     assert (
         executions.claim_event_token(
-            value["execution_id"], provider_run_id=provider_run_id, token_hash=token_hash
+            value["execution_id"],
+            provider_run_id=provider_run_id,
+            token_hash=token_hash,
         )
         is True
     )
@@ -611,7 +607,9 @@ def test_claim_event_token_memory_concurrency_has_exactly_one_winner():
 def test_cloud_build_retry_can_claim_fresh_tokens_only_for_new_bound_attempt():
     value, _ = _reserve(operation="main_release", provider="cloud_build")
     executions.bind_build(value["execution_id"], build_id="build-1")
-    assert executions.claim_source_token(value["execution_id"], provider_run_id="build-1")
+    assert executions.claim_source_token(
+        value["execution_id"], provider_run_id="build-1"
+    )
     first_hash = hashlib.sha256(b"event-one").hexdigest()
     assert executions.claim_event_token(
         value["execution_id"], provider_run_id="build-1", token_hash=first_hash
@@ -626,12 +624,12 @@ def test_cloud_build_retry_can_claim_fresh_tokens_only_for_new_bound_attempt():
         }
     )
 
-    executions.stage_planner_retry(
-        value["execution_id"], failed_build_id="build-1"
-    )
+    executions.stage_planner_retry(value["execution_id"], failed_build_id="build-1")
     executions.bind_build(value["execution_id"], build_id="build-2")
 
-    assert executions.claim_source_token(value["execution_id"], provider_run_id="build-2")
+    assert executions.claim_source_token(
+        value["execution_id"], provider_run_id="build-2"
+    )
     assert not executions.claim_source_token(
         value["execution_id"], provider_run_id="build-2"
     )
@@ -922,15 +920,11 @@ def test_firestore_submission_publish_and_token_claims_are_single_use(
     assert executions.claim_submission(cloud["execution_id"]) is False
     executions.bind_build(cloud["execution_id"], build_id="build-1")
     assert (
-        executions.claim_source_token(
-            cloud["execution_id"], provider_run_id="build-1"
-        )
+        executions.claim_source_token(cloud["execution_id"], provider_run_id="build-1")
         is True
     )
     assert (
-        executions.claim_source_token(
-            cloud["execution_id"], provider_run_id="build-1"
-        )
+        executions.claim_source_token(cloud["execution_id"], provider_run_id="build-1")
         is False
     )
     plaintext = "firestore-event-token"
@@ -985,9 +979,7 @@ def test_firestore_claims_reject_wrong_provider_operation_and_bound_build(
     github, _ = _reserve()
     assert executions.claim_submission(github["execution_id"]) is False
     assert (
-        executions.claim_source_token(
-            github["execution_id"], provider_run_id="run-1"
-        )
+        executions.claim_source_token(github["execution_id"], provider_run_id="run-1")
         is False
     )
 

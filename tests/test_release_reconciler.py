@@ -625,7 +625,9 @@ def test_terminal_planner_only_failure_submits_one_cost_limited_retry(monkeypatc
     stage = mock.Mock(return_value=staged)
     submit = mock.Mock(return_value=submitted)
     monkeypatch.setattr(reconciler.release_executions, "get", lambda _: state)
-    monkeypatch.setattr(reconciler.release_executions, "planner_retry_candidate", lambda _: True)
+    monkeypatch.setattr(
+        reconciler.release_executions, "planner_retry_candidate", lambda _: True
+    )
     monkeypatch.setattr(reconciler.release_cloud_build, "get_build", lambda _: build)
     monkeypatch.setattr(reconciler, "_record_build_timing", mock.Mock())
     monkeypatch.setattr(reconciler.release_executions, "stage_planner_retry", stage)
@@ -656,7 +658,9 @@ def test_terminal_failure_in_other_step_is_not_retried(monkeypatch):
     save = mock.Mock(return_value={**state, "planner_retry_checked": True})
     stage = mock.Mock()
     monkeypatch.setattr(reconciler.release_executions, "get", lambda _: state)
-    monkeypatch.setattr(reconciler.release_executions, "planner_retry_candidate", lambda _: True)
+    monkeypatch.setattr(
+        reconciler.release_executions, "planner_retry_candidate", lambda _: True
+    )
     monkeypatch.setattr(reconciler.release_cloud_build, "get_build", lambda _: build)
     monkeypatch.setattr(reconciler.release_executions, "save", save)
     monkeypatch.setattr(reconciler.release_executions, "stage_planner_retry", stage)

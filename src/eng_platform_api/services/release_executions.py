@@ -485,7 +485,11 @@ def claim_publish(execution_id: str) -> bool:
 
 
 def _claim_build_scoped_token(
-    current: dict[str, Any], *, provider_run_id: str, token_field: str, issued_field: str
+    current: dict[str, Any],
+    *,
+    provider_run_id: str,
+    token_field: str,
+    issued_field: str,
 ) -> bool:
     provider = current.get("provider")
     if not provider_run_id:
@@ -505,8 +509,10 @@ def _claim_build_scoped_token(
         return False
     if issued_for and issued_for not in previous:
         return False
-    if not issued_for and current.get(issued_field) and (
-        not previous or provider_run_id in previous
+    if (
+        not issued_for
+        and current.get(issued_field)
+        and (not previous or provider_run_id in previous)
     ):
         # Backward compatibility for executions that recorded only the
         # one-time timestamp before token claims were scoped to build IDs.
@@ -683,7 +689,10 @@ def stage_planner_retry(execution_id: str, *, failed_build_id: str) -> dict[str,
     current = get(execution_id)
     if current is None:
         raise KeyError(execution_id)
-    if not planner_retry_candidate(current) or current.get("build_id") != failed_build_id:
+    if (
+        not planner_retry_candidate(current)
+        or current.get("build_id") != failed_build_id
+    ):
         raise ValueError("Release execution is not eligible for planner recovery")
 
     now = _now()
@@ -714,8 +723,13 @@ def stage_planner_retry(execution_id: str, *, failed_build_id: str) -> dict[str,
             current = _memory.get(execution_id)
             if current is None:
                 raise KeyError(execution_id)
-            if not planner_retry_candidate(current) or current.get("build_id") != failed_build_id:
-                raise ValueError("Release execution is not eligible for planner recovery")
+            if (
+                not planner_retry_candidate(current)
+                or current.get("build_id") != failed_build_id
+            ):
+                raise ValueError(
+                    "Release execution is not eligible for planner recovery"
+                )
             current.update(changes)
             return dict(current)
 
@@ -729,7 +743,10 @@ def stage_planner_retry(execution_id: str, *, failed_build_id: str) -> dict[str,
         if not snapshot.exists:
             raise KeyError(execution_id)
         current = snapshot.to_dict()
-        if not planner_retry_candidate(current) or current.get("build_id") != failed_build_id:
+        if (
+            not planner_retry_candidate(current)
+            or current.get("build_id") != failed_build_id
+        ):
             raise ValueError("Release execution is not eligible for planner recovery")
         # This narrowly scoped recovery is the only terminal-state reopening:
         # exact quality evidence is already committed, and the known failed
