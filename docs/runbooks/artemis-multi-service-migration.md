@@ -23,14 +23,26 @@ and rollback. Never infer activity from the mere existence of a Cloud Run Job.
   previous revision only in `ENG_PLATFORM_QUALITY_PYTHON_IMAGE`; `/health`
   returned 200 before and after promotion. The former revision
   `eng-platform-api-ep-a2157abce4` remains available at 0% for rollback.
-- API PR #120 is open at head `85245215f29e100e188eae94b5922dcb2fa25be6`.
+- API PR #120 merged with head `85245215f29e100e188eae94b5922dcb2fa25be6`.
   Its Cloud Build PR-quality canary is
-  `1739df8a-19ab-4082-8022-6365975d57c7`; no exact-SHA evidence is claimed
-  until the build completes successfully and the backend publishes its report.
+  `1739df8a-19ab-4082-8022-6365975d57c7`; it completed successfully and the
+  backend published exact `oss-v2 PASSED` evidence for that PR head. Its merge
+  commit is `c0c84f2566f822b30b5e4dcb6314e6a4402c28a7`; its main-release
+  Cloud Build `e7c5be0d-1c1b-41c9-a717-389a7ba79535` completed successfully
+  and the backend recorded exact `oss-v2 PASSED` evidence. The release is still
+  in canary approval and no API tag was published. The plan has not yet been
+  reviewed/approved, and no Artemis deployment was started.
   The preceding canary ran 1,190 tests (5 skipped), Ruff, compile and Trivy,
   but failed the full gate on the old Semgrep timeout and a workflow-pattern
   finding. The current PR head documents the verified credential isolation for
   that specific workflow finding.
+- Central platform PR #94 merged as `bc06824515460896fdaa0ca296d66fded2c552aa`.
+  Its profiles build Artemis Web with the release tag, disable embedded API
+  background tasks, pin each isolated task-worker type, and let the dispatcher
+  resolve only the four server-owned Artemis worker URLs. Unit and integration
+  tests plus GitHub CI, normalized quality and workflow checks passed. This
+  changes executor behavior but does not provision resources or enable any
+  Artemis catalog entry.
 - `gs://cgm-artemis-data/kpi_cgm.db` was refreshed from the authoritative
   SanPlat object. Source generation `1790283727562435` and target generation
   `1790286356815430` are both 76,107,776 bytes and have matching MD5
@@ -38,15 +50,33 @@ and rollback. Never infer activity from the mere existence of a Cloud Run Job.
   `migration-baselines/2026-09-24/`. This is only a point-in-time copy, not
   write mirroring or cutover parity.
 - No Artemis Cloud Run Service or Job exists. All 12 Artemis catalog entries
-  remain `deployment.enabled=false` and not deployment-ready. Profiles do not
-  yet contain complete per-runtime commands, limits, identities, environment
-  and secret mappings; the executor updates existing Run resources instead of
-  provisioning absent ones. Do not enable descriptors or route schedulers or
-  queues to Artemis yet.
-- Production Run traffic, tasks, schedulers and the physical database still
-  use SanPlat names. No Artemis queues or schedulers have been created. The
-  SQL restore-mechanics test is complete and its temporary instance deleted;
-  row-level production data parity remains outstanding.
+  remain `deployment.enabled=false` and not deployment-ready. The platform
+  executor still updates existing Run resources and has no audited first-create
+  path with exact candidate/rollback behavior. Do not enable descriptors,
+  publish new runtime traffic, or route triggers to Artemis yet.
+- A least-privilege preparation pass created 12 dedicated Artemis runtime
+  service accounts and 26 `cgm-artemis-*` Secret Manager aliases. Secret bytes
+  were copied directly in memory and each source/target pair was verified by
+  SHA-256 without printing values. Accessor bindings are scoped to individual
+  secrets and runtime identities; Cloud SQL client access is limited to the
+  database-using runtimes. Only the API and readings-export identities have
+  object-user access to `cgm-artemis-data`. The dispatcher can attach the
+  dedicated `artemis-tasks-invoker` identity but cannot impersonate it project-
+  wide.
+- Four Artemis Cloud Tasks queues now exist with low dispatch limits and are
+  all **paused and empty**: `cgm-artemis-sync`, `cgm-artemis-clock-sync`,
+  `cgm-artemis-data-recovery`, and `cgm-artemis-fnd-ip-sync`. No Artemis
+  schedulers exist. Production Run traffic, tasks, schedulers and the physical
+  database remain SanPlat-authoritative. The queues must remain paused until
+  their target Services, resource-level invoker policies, OIDC behavior,
+  release-gate state and rollback path have all been verified.
+- The SQL restore-mechanics test is complete and its temporary instance
+  deleted; row-level production data parity remains outstanding. The API
+  profile explicitly disables embedded background tasks on Artemis to prevent
+  duplicate schedulers, but Perseo WM alerts, orphaned-report recovery, cache
+  refresh and any other startup-managed work have not yet been relocated to
+  independently owned triggers. This is a cutover blocker, not a safe default
+  to ignore.
 
 The following preparation snapshot is historical; statements about old GitHub
 names and earlier bucket generations are superseded by the current status above.
