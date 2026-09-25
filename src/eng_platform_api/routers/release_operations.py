@@ -21,6 +21,7 @@ class ReconcileGitHubRunRequest(BaseModel):
     head_sha: str = Field(min_length=40, max_length=40, pattern=r"^[0-9a-fA-F]{40}$")
     base_sha: str = Field(min_length=40, max_length=40, pattern=r"^[0-9a-fA-F]{40}$")
     github_run_id: int = Field(gt=0)
+    paired_github_run_id: int | None = Field(default=None, gt=0)
 
 
 @router.post("/reconcile", include_in_schema=False)
@@ -86,6 +87,7 @@ def reconcile_github_run(
             head_sha=payload.head_sha,
             base_sha=payload.base_sha,
             run_id=payload.github_run_id,
+            paired_run_id=payload.paired_github_run_id,
             requested_by=identity,
         )
     except release_orchestrator.ReleaseOrchestratorError as exc:

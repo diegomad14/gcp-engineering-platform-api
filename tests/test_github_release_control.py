@@ -53,6 +53,30 @@ def test_execution_variable_is_private_only_and_recovers_missing_variable(monkey
         control.set_repository_execution_mode("owner/repo", "other")
 
 
+def test_repository_execution_mode_reads_the_server_owned_actions_variable(
+    monkeypatch,
+):
+    requester = mock.Mock()
+    requester.requestJsonAndCheck.return_value = (
+        {},
+        {"name": "ENG_PLATFORM_CI_EXECUTOR", "value": "cloud_build"},
+    )
+    repo = SimpleNamespace(_requester=requester)
+    _repository(monkeypatch, repo)
+    monkeypatch.setattr(
+        control.config.release_orchestrator,
+        "github_mode_variable",
+        "ENG_PLATFORM_CI_EXECUTOR",
+    )
+
+    mode = control.repository_execution_mode("owner/repo")
+
+    assert mode == "cloud_build"
+    requester.requestJsonAndCheck.assert_called_once_with(
+        "GET", "/repos/owner/repo/actions/variables/ENG_PLATFORM_CI_EXECUTOR"
+    )
+
+
 def test_source_token_uses_public_integration_requester_and_read_only_scope(
     monkeypatch,
 ):
