@@ -25,6 +25,7 @@ def _source(kind: str, name: str) -> dict:
                 },
             },
             {"name": "APP_BACKGROUND_TASKS_ENABLED", "value": "true"},
+            {"name": "PERSEO_DB_GCS_BUCKET", "value": "cgm-sanplat-data"},
         ],
     }
     template = {
@@ -39,6 +40,12 @@ def _source(kind: str, name: str) -> dict:
         "spec": {
             "serviceAccountName": "old@example.com",
             "containers": [container],
+            "volumes": [
+                {
+                    "name": "perseo-data",
+                    "csi": {"volumeAttributes": {"bucketName": "cgm-sanplat-data"}},
+                }
+            ],
         },
     }
     if kind == "Job":
@@ -75,6 +82,10 @@ def test_api_bootstrap_is_passive_and_drops_stale_provenance():
     assert env["APP_BACKGROUND_TASKS_ENABLED"]["value"] == "false"
     assert env["WM_SWEEP_ENABLED"]["value"] == "false"
     assert env["DATA_RECOVERY_CONTINUOUS_ENABLED"]["value"] == "false"
+    assert env["PERSEO_DB_GCS_BUCKET"]["value"] == "cgm-artemis-data"
+    assert spec["volumes"][0]["csi"]["volumeAttributes"]["bucketName"] == (
+        "cgm-artemis-data"
+    )
 
 
 def test_typed_worker_does_not_inherit_a_general_worker_identity():
@@ -109,3 +120,23 @@ def test_bootstrap_rejects_missing_secret_alias_and_mutable_image():
     )
     with pytest.raises(ValueError, match="immutable source image"):
         bootstrap.make_manifest(source, "cgm-artemis-api", {"cgm-artemis-database-url"})
+
+
+def test_repair_only_accepts_failed_bootstrap_without_traffic():
+    expected = bootstrap.make_manifest(
+        _source("Service", "cgm-sanplat-api"),
+        "cgm-artemis-api",
+        {"cgm-artemis-database-url"},
+    )
+    existing = _source("Service", "cgm-artemis-api")
+    existing["metadata"]["labels"] = {"managed-by": "eng-platform-bootstrap"}
+    existing["spec"]["template"]["spec"]["serviceAccountName"] = expected["spec"][
+        "template"
+    ]["spec"]["serviceAccountName"]
+    existing["status"] = {"conditions": [{"type": "Ready", "status": "False"}]}
+    assert bootstrap.may_repair(existing, "cgm-artemis-api", expected)
+    existing["status"]["traffic"] = [{"percent": 100}]
+    assert not bootstrap.may_repair(existing, "cgm-artemis-api", expected)
+    existing["status"].pop("traffic")
+    existing["status"]["latestReadyRevisionName"] = "ready-old-revision"
+    assert not bootstrap.may_repair(existing, "cgm-artemis-api", expected)
