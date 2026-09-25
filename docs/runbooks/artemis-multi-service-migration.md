@@ -181,6 +181,20 @@ names and earlier bucket generations are superseded by the current status above.
 
 ## Runtime rollout
 
+The one-time provisioning command is `python3 scripts/bootstrap_artemis_runtimes.py
+cgm-artemis-api`. It prints the reviewed source, immutable image, target service
+account and secret *references* without changing GCP. Add `--apply` for that
+single target only after reviewing the dry run. Repeat for each catalogued
+Artemis runtime; the script refuses an existing target, remaps secrets to
+`cgm-artemis-*`, disables API background work, and never starts a Job or moves a
+Scheduler. For task workers, the new service stays private and has no Cloud
+Tasks route until its exact tagged image has been deployed. After provisioning,
+verify the target's image, service account, readiness and IAM before enabling
+its descriptor. API and Web remain private during this bootstrap; opening their
+URLs is a separate cutover step. The bootstrap revision uses the existing
+immutable legacy image as a recoverable baseline. The first Artemis code
+revision must still pass the regular tag, evidence and release-profile gates.
+
 1. Build and pin the Artemis release executor once by digest. Keep all new
    services disabled until IAM, Artifact Registry and connected-repository
    mappings are ready. Automated tests must not submit Cloud Builds.

@@ -95,6 +95,7 @@ jobs:
       - name: Isolate quality runner
         run: |
           cp .eng-platform/scripts/quality/*.py "$RUNNER_TEMP/"
+          cp .eng-platform/scripts/quality/semgrep_container.sh "$RUNNER_TEMP/"
           rm -rf .eng-platform
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -109,7 +110,12 @@ jobs:
           version: v0.72.0
 
       - name: Install quality tools
-        run: python -m pip install --disable-pip-version-check ruff semgrep pytest-cov
+        run: |
+          python -m pip install --disable-pip-version-check ruff pytest-cov
+          mkdir -p "$RUNNER_TEMP/eng-platform-scanners"
+          install -m 0755 "$RUNNER_TEMP/semgrep_container.sh" \
+            "$RUNNER_TEMP/eng-platform-scanners/semgrep"
+          echo "$RUNNER_TEMP/eng-platform-scanners" >> "$GITHUB_PATH"
 
       - name: Run quality gate
         id: gate
