@@ -22,6 +22,8 @@ import yaml
 
 PROJECT = "cgm-assistant-prod"
 REGION = "us-central1"
+SOURCE_BUCKET = "cgm-sanplat-data"
+TARGET_BUCKET = "cgm-artemis-data"
 
 
 @dataclass(frozen=True)
@@ -131,6 +133,10 @@ def make_manifest(
     if len(containers) != 1 or "@sha256:" not in containers[0].get("image", ""):
         raise ValueError("bootstrap requires one immutable source image")
     container = containers[0]
+    for volume in spec.get("volumes", []):
+        attributes = volume.get("csi", {}).get("volumeAttributes", {})
+        if attributes.get("bucketName") == SOURCE_BUCKET:
+            attributes["bucketName"] = TARGET_BUCKET
     for row in container.get("env", []):
         secret = row.get("valueFrom", {}).get("secretKeyRef")
         if secret:
@@ -143,6 +149,12 @@ def make_manifest(
             if replacement not in available_secrets:
                 raise ValueError(f"Artemis secret alias is missing: {replacement}")
             secret["name"] = replacement
+        elif row.get("value") == SOURCE_BUCKET:
+            row["value"] = TARGET_BUCKET
+        elif str(row.get("value", "")).startswith(f"gs://{SOURCE_BUCKET}/"):
+            row["value"] = row["value"].replace(
+                f"gs://{SOURCE_BUCKET}/", f"gs://{TARGET_BUCKET}/", 1
+            )
         elif re.search(r"(?:SECRET|PASSWORD|API_KEY)$", row.get("name", "")):
             raise ValueError(f"sensitive literal environment variable: {row['name']}")
 
@@ -169,21 +181,61 @@ def make_manifest(
     return manifest
 
 
+def may_repair(existing: dict[str, Any], target: str, expected: dict[str, Any]) -> bool:
+    """Allow only a failed bootstrap Service with no ready revision or traffic."""
+    if RUNTIMES[target].kind != "services":
+        return False
+    if (
+        existing.get("kind") != "Service"
+        or existing.get("metadata", {}).get("name") != target
+        or existing.get("metadata", {}).get("labels", {}).get("managed-by")
+        != "eng-platform-bootstrap"
+    ):
+        return False
+    status = existing.get("status", {})
+    if status.get("latestReadyRevisionName") or status.get("traffic"):
+        return False
+    if not any(
+        row.get("type") == "Ready" and row.get("status") == "False"
+        for row in status.get("conditions", [])
+    ):
+        return False
+    current_spec = _container_spec(existing, RUNTIMES[target])
+    expected_spec = _container_spec(expected, RUNTIMES[target])
+    return current_spec.get("serviceAccountName") == expected_spec.get(
+        "serviceAccountName"
+    ) and current_spec.get("containers", [{}])[0].get("image") == expected_spec.get(
+        "containers", [{}]
+    )[0].get("image")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target", choices=sorted(RUNTIMES))
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--repair", action="store_true")
     args = parser.parse_args()
     runtime = RUNTIMES[args.target]
     base = ["gcloud", "run", runtime.kind]
     flags = [f"--region={REGION}", f"--project={PROJECT}"]
-    if command(*base, "describe", args.target, *flags, check=False).returncode == 0:
+    existing_result = command(
+        *base, "describe", args.target, *flags, "--format=json", check=False
+    )
+    if args.repair and not args.apply:
+        raise SystemExit("--repair requires --apply")
+    if existing_result.returncode == 0 and not args.repair:
         raise SystemExit(f"{args.target} already exists; bootstrap is create-only")
+    if existing_result.returncode != 0 and args.repair:
+        raise SystemExit(f"{args.target} does not exist; repair is unavailable")
     result = command(*base, "describe", runtime.source, *flags, "--format=export")
     secrets = command(
         "gcloud", "secrets", "list", f"--project={PROJECT}", "--format=value(name)"
     ).stdout.splitlines()
     manifest = make_manifest(yaml.safe_load(result.stdout), args.target, set(secrets))
+    if args.repair and not may_repair(
+        json.loads(existing_result.stdout), args.target, manifest
+    ):
+        raise SystemExit(f"{args.target} is not a failed, traffic-free bootstrap")
     spec = _container_spec(manifest, runtime)
     container = spec["containers"][0]
     summary = {
@@ -201,6 +253,7 @@ def main() -> None:
         ),
         "env_count": len(container.get("env", [])),
         "applied": args.apply,
+        "repair": args.repair,
     }
     if args.apply:
         with tempfile.TemporaryDirectory(prefix="artemis-bootstrap-") as directory:
