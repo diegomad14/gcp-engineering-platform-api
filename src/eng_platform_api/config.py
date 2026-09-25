@@ -476,9 +476,9 @@ def load_config() -> PlatformConfig:
             raise ValueError("Cloud Build usage alert thresholds must be positive")
         if release_orchestrator.release_dispatch_timeout_seconds <= 0:
             raise ValueError("Release dispatch timeout must be positive")
-        paired_web_sha = release_orchestrator.artemis_web_sha
-        if paired_web_sha and not re.fullmatch(r"[0-9a-f]{40}", paired_web_sha):
-            raise ValueError("The paired Artemis Web SHA must be a full commit SHA")
+    paired_web_sha = release_orchestrator.artemis_web_sha
+    if paired_web_sha and not re.fullmatch(r"[0-9a-f]{40}", paired_web_sha):
+        raise ValueError("The paired Artemis Web SHA must be a full commit SHA")
 
     auth = AuthConfig(
         github_client_id=os.getenv("ENG_PLATFORM_GITHUB_OAUTH_CLIENT_ID", ""),
