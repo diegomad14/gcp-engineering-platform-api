@@ -85,15 +85,18 @@ def _get_service_config() -> list[dict]:
 def _catalog_service(cfg: dict) -> CatalogService:
     quality_cfg = dict(cfg.get("quality", {}))
     deployment_cfg = dict(cfg.get("deployment", {}))
+    # A renamed repository publishes one quality execution for the same SHA, so
+    # both catalog names accept each other's evidence. Without the reverse
+    # alias a legacy deploy of the still-serving SanPlat runtime could never
+    # consume the evidence its own repository produced after the rename.
+    owners = {
+        1306114845: ["cgm-artemis-api", "cgm-sanplat-api"],
+        1306114872: ["cgm-artemis-web", "cgm-sanplat-web"],
+    }
+    identity = repository_id(cfg["repository"])
+    if identity in owners:
+        quality_cfg["evidence_services"] = owners[identity]
     if cfg["service_name"].startswith("cgm-artemis-"):
-        owners = {
-            1306114845: ["cgm-artemis-api", "cgm-sanplat-api"],
-            1306114872: ["cgm-artemis-web", "cgm-sanplat-web"],
-        }
-        identity = repository_id(cfg["repository"])
-        quality_cfg["evidence_services"] = (
-            owners.get(identity, []) if identity is not None else []
-        )
         if cfg["service_name"] not in {"cgm-artemis-api", "cgm-artemis-web"}:
             deployment_cfg["private_runtime"] = (
                 deployment_cfg.get("runtime_kind") == "cloud_run_service"
