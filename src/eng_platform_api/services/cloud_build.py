@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import hashlib
 import json
 import urllib.request
@@ -124,6 +125,7 @@ def build_request(item: DeploymentItem, service: CatalogService) -> dict[str, An
                     f"CGM_RUNTIME_KIND={service.deployment.runtime_kind}",
                     f"CGM_PRIVATE_RUNTIME={'true' if service.deployment.private_runtime else 'false'}",
                     f"CGM_QUALITY_EVIDENCE_SERVICES={','.join(service.quality.evidence_services)}",
+                    f"CGM_PAIRED_WEB_SHA={config.release_orchestrator.artemis_web_sha}",
                     f"CGM_HEALTH_PATH={service.deployment.health_path}",
                     f"CGM_TARGET_REVISION={item.production_revision}",
                     f"CGM_PROJECT_ID={service.project_id}",
@@ -283,6 +285,15 @@ def refresh(item: DeploymentItem) -> DeploymentItem:
     state = build.get("status", "")
     item.logs_url = build.get("logUrl", item.logs_url)
     deployment_executions.save(item.id, status=state, log_url=item.logs_url)
+    if state in {
+        "SUCCESS",
+        "FAILURE",
+        "TIMEOUT",
+        "CANCELLED",
+        "EXPIRED",
+        "INTERNAL_ERROR",
+    }:
+        _record_build_timing(item.id, build)
     if state == "SUCCESS":
         # A successful build is not enough to assert a successful deployment.
         # The authenticated final engine event is authoritative; absent that,
@@ -330,6 +341,68 @@ def _healthy(url: str, health_path: str) -> bool:
             return 200 <= response.status < 300
     except Exception:
         return False
+
+
+def _record_build_timing(deployment_id: str, build: dict[str, Any]) -> None:
+    """Account one completed deployment build, including retries and queueing."""
+    started = str(build.get("startTime", ""))
+    finished = str(build.get("finishTime", ""))
+    if not started or not finished:
+        return
+    try:
+        seconds = max(
+            0.0,
+            (_parse_time(finished) - _parse_time(started)).total_seconds(),
+        )
+    except (TypeError, ValueError):
+        return
+    created = str(build.get("createTime", ""))
+    queue_seconds = 0.0
+    if created:
+        try:
+            queue_seconds = max(
+                0.0, (_parse_time(started) - _parse_time(created)).total_seconds()
+            )
+        except (TypeError, ValueError):
+            queue_seconds = 0.0
+    minutes = seconds / 60
+    execution = deployment_executions.get(deployment_id) or {}
+    attempt = {
+        "build_id": str(build.get("id", "")),
+        "duration_seconds": round(seconds, 3),
+        "queue_seconds": round(queue_seconds, 3),
+        "minutes": round(minutes, 3),
+        "estimated_cost_usd": round(
+            minutes * config.release_orchestrator.build_minute_price_usd, 6
+        ),
+        "finished_at": finished,
+    }
+    attempts = [
+        item
+        for item in execution.get("build_attempts", [])
+        if item.get("build_id") != attempt["build_id"]
+    ]
+    attempts.append(attempt)
+    deployment_executions.save(
+        deployment_id,
+        build_duration_seconds=round(seconds, 3),
+        build_queue_seconds=round(queue_seconds, 3),
+        build_attempts=attempts,
+        build_minutes_estimate=round(
+            sum(float(item.get("minutes", 0)) for item in attempts), 3
+        ),
+        estimated_compute_cost_usd=round(
+            sum(float(item.get("estimated_cost_usd", 0)) for item in attempts), 6
+        ),
+        build_minute_price_usd=config.release_orchestrator.build_minute_price_usd,
+        cost_category="deployment",
+        build_finished_at=finished,
+    )
+
+
+def _parse_time(value: str):
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _reconcile(item: DeploymentItem, build: dict[str, Any]) -> None:

@@ -108,6 +108,20 @@ def get(deployment_id: str) -> DeploymentItem | None:
     return DeploymentItem(**record) if record else None
 
 
+def idempotency_key_for(deployment_id: str) -> str:
+    """Read back the original request key so a failover keeps one identity."""
+    collection = _firestore_collection()
+    if collection is not None:
+        snapshot = collection.document(deployment_id).get()
+        record = snapshot.to_dict() if snapshot.exists else None
+    else:
+        with _lock:
+            record = next(
+                (r for r in _local_load() if r.get("id") == deployment_id), None
+            )
+    return str((record or {}).get("idempotency_key", ""))
+
+
 def find_by_idempotency_key(key: str) -> DeploymentItem | None:
     if not key:
         return None
@@ -178,3 +192,30 @@ def count_for_service(service_name: str) -> int:
         return sum(
             1 for record in _local_load() if record.get("service_name") == service_name
         )
+
+
+def list_unfinished(limit: int = 200) -> list[DeploymentItem]:
+    """Return every request that still claims to be running, across services.
+
+    The reconciliation sweep needs one pass over all services, which the
+    per-service readers cannot express.  GitHub remains the source of truth for
+    execution state; this only finds the candidates to re-read.
+    """
+    collection = _firestore_collection()
+    if collection is not None:
+        records = [snapshot.to_dict() for snapshot in collection.stream()]
+    else:
+        with _lock:
+            records = list(_local_load())
+    items = [
+        DeploymentItem(**record)
+        for record in records
+        if record.get("status") not in _TERMINAL_STORE_STATUSES
+    ]
+    items.sort(key=lambda item: item.created_at)
+    return items[:limit]
+
+
+_TERMINAL_STORE_STATUSES = frozenset(
+    {"SUCCEEDED", "FAILED", "ROLLED_BACK", "ROLLBACK_FAILED"}
+)

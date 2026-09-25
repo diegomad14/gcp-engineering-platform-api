@@ -190,7 +190,9 @@ for _name in (
         ),
         "pre_candidate_hooks": [],
         "candidate_hooks": [],
-        "pre_promote_hooks": [],
+        "pre_promote_hooks": (
+            ["corporate_window_artemis"] if _name == "cgm-artemis-api" else []
+        ),
         "post_promote_hooks": [],
         "recovery_hook": "",
         "rollback_hook": "",

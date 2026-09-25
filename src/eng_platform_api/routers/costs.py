@@ -1,5 +1,6 @@
 """Costs router — BigQuery billing data."""
 
+from datetime import datetime, timezone
 from threading import Lock
 from time import monotonic
 from typing import Callable, TypeVar
@@ -7,7 +8,8 @@ from typing import Callable, TypeVar
 from fastapi import APIRouter, Query
 
 from ..config import config
-from ..models import CostSummary, DailyCostSeries
+from ..models import CloudBuildUsage, CostSummary, DailyCostSeries
+from ..services import release_executions
 from ..services import gcp_billing_bigquery as billing
 
 router = APIRouter(prefix="/api/costs", tags=["costs"])
@@ -45,10 +47,21 @@ def get_cost_summary(
     ),
 ):
     """Get cost summary for the specified time window."""
-    return _cached(
+    summary = _cached(
         ("summary", days, month_to_date),
         lambda: billing.get_cost_summary(days=days, month_to_date=month_to_date),
     )
+    return summary.model_copy(update={"cloud_build": _cloud_build_usage()})
+
+
+def _cloud_build_usage() -> CloudBuildUsage:
+    """Attach the exact Cloud Build usage the platform already meters."""
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    try:
+        usage = release_executions.monthly_cloud_build_usage(month)
+    except Exception:
+        return CloudBuildUsage(month=month)
+    return CloudBuildUsage.model_validate(usage)
 
 
 @router.get("/by-service", response_model=CostSummary)

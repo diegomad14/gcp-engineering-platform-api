@@ -7,7 +7,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..config import config
 from ..security import require_deployer
-from ..services import release_executions, release_orchestrator, release_reconciler
+from ..services import (
+    deployment_commands,
+    release_executions,
+    release_orchestrator,
+    release_reconciler,
+)
 from .release_execution_events import _bearer, _verify_google
 
 router = APIRouter(prefix="/api/internal/release-operations", tags=["internal"])
@@ -52,7 +57,13 @@ def reconcile_due(authorization: str | None = Header(default=None)):
                 )
             except Exception:
                 results.append({"execution_id": execution_id, "status": "error"})
-    return {"reconciled": len(results), "items": results}
+    # The same sweep also fails deployments over when GitHub accepts a dispatch
+    # and never starts a run for a private repository.
+    try:
+        deployments = deployment_commands.reconcile_stalled_dispatches()
+    except Exception as exc:
+        deployments = {"reconciled": 0, "items": [], "error": str(exc)[:200]}
+    return {"reconciled": len(results), "items": results, "deployments": deployments}
 
 
 @router.post("/canaries/{execution_id}/approve", include_in_schema=False)

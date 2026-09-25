@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 from typing import Any
 
@@ -26,6 +26,16 @@ _FAILED_BUILD_STATES = {
     "INTERNAL_ERROR",
 }
 logger = logging.getLogger(__name__)
+
+
+def _age_seconds(value: str) -> float:
+    try:
+        started = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return 0.0
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
 
 
 def _complete_check(
@@ -160,7 +170,7 @@ def _record_build_timing(execution_id: str, build: dict[str, Any]) -> None:
         build_finished_at=finished,
     )
     month = finished[:7]
-    total = release_executions.monthly_cloud_build_minutes(month)
+    total = release_executions.monthly_cloud_build_usage(month)["total_minutes"]
     execution = release_executions.get(execution_id) or {}
     owner = (
         config.github.billing_owner
@@ -516,6 +526,29 @@ def reconcile(execution_id: str) -> dict[str, Any]:
     execution = release_executions.get(execution_id)
     if execution is None:
         raise KeyError(execution_id)
+    if execution.get("status") in {"received", "waiting_github"} and (
+        execution.get("provider") == "github_actions"
+    ):
+        # A private repository whose Actions run never starts must not wait
+        # forever: after the timeout the same immutable execution moves to the
+        # Cloud Build plane instead of blocking the release indefinitely.
+        if _age_seconds(str(execution.get("created_at", ""))) >= (
+            config.release_orchestrator.release_dispatch_timeout_seconds
+        ):
+            owner = (
+                config.github.billing_owner
+                or str(execution.get("repository", "")).split("/", 1)[0]
+            )
+            executor_circuits.open_circuit(
+                owner,
+                reason="github_dispatch_without_run",
+                repository=str(execution.get("repository", "")),
+                evidence=f"execution={execution_id} waited_seconds="
+                f"{config.release_orchestrator.release_dispatch_timeout_seconds}",
+            )
+            execution, _moved = release_executions.transition_to_cloud_build(
+                execution_id, reason="github_dispatch_timeout"
+            )
     if execution.get("status") in {
         "quality_failed",
         "no_release",

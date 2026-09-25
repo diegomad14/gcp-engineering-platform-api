@@ -225,3 +225,22 @@ def accept_event(
         return current, True
 
     return write(transaction)
+
+
+def monthly_cloud_build_minutes(month: str) -> float:
+    """Completed Cloud Build deployment minutes for one UTC YYYY-MM month."""
+    collection = _collection()
+    if collection is None:
+        with _memory_lock:
+            values = [dict(value) for value in _memory.values()]
+    else:
+        values = [snapshot.to_dict() or {} for snapshot in collection.stream()]
+    return round(
+        sum(
+            float(value.get("build_minutes_estimate", 0) or 0)
+            for value in values
+            if value.get("provider") == "cloud_build"
+            and str(value.get("build_finished_at", "")).startswith(month)
+        ),
+        3,
+    )

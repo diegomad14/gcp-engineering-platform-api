@@ -144,6 +144,12 @@ for _name in _ARTEMIS_SERVICES:
         _name,
         3600,
         build_args=(("APP_VERSION", "{tag}"),) if _name == "cgm-artemis-web" else (),
+        # The corporate activation window is an operator gate: the candidate is
+        # deployed and smoked first, then the hook verifies the active window
+        # before any traffic is promoted.
+        pre_promote_hooks=(
+            ("corporate_window_artemis",) if _name == "cgm-artemis-api" else ()
+        ),
         candidate_env_vars=(
             (("APP_RELEASE_SHA", "{sha}"),) if _name != "cgm-artemis-web" else ()
         )
