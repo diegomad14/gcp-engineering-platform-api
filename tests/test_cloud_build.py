@@ -244,6 +244,9 @@ def test_build_request_has_fixed_economy_contract():
     assert request["timeout"] == "1800s"
     assert len(request["steps"]) == 1
     assert "@sha256:" in request["steps"][0]["name"]
+    # The Cloud SDK base ships an earlier interpreter on PATH without PyYAML,
+    # so the executor must be entered through the interpreter the image pins.
+    assert request["steps"][0]["entrypoint"] == "/usr/bin/python3"
     assert request["source"]["connectedRepository"]["revision"] == "b" * 40
 
     serialized = str(request).lower()
