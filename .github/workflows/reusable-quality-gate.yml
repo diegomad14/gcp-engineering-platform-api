@@ -109,7 +109,12 @@ jobs:
           version: v0.72.0
 
       - name: Install quality tools
-        run: python -m pip install --disable-pip-version-check ruff semgrep pytest-cov
+        run: |
+          python -m pip install --disable-pip-version-check ruff pytest-cov
+          python -m venv "$RUNNER_TEMP/eng-platform-semgrep"
+          "$RUNNER_TEMP/eng-platform-semgrep/bin/python" -m pip install \
+            --disable-pip-version-check semgrep==1.176.1
+          echo "$RUNNER_TEMP/eng-platform-semgrep/bin" >> "$GITHUB_PATH"
 
       - name: Run quality gate
         id: gate
