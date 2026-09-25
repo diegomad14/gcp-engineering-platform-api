@@ -99,7 +99,9 @@ def build_request(item: DeploymentItem, service: CatalogService) -> dict[str, An
             {
                 "id": "central-release",
                 "name": config.cloud_build.executor_image,
-                "entrypoint": "python3",
+                # The image pins /usr/bin/python3 because the Cloud SDK base
+                # ships an earlier interpreter on PATH without PyYAML.
+                "entrypoint": "/usr/bin/python3",
                 "args": [
                     "/opt/eng-platform/release_executor.py",
                     "--service=${_SERVICE_NAME}",
