@@ -49,7 +49,7 @@
         "differential_threshold": 80
       },
       "deployment": {
-        "enabled": false,
+        "enabled": true,
         "workflow_file": "platform-deploy.yml",
         "runtime_kind": "cloud_run_service",
         "image_name": "cgm-artemis-api",
@@ -81,7 +81,7 @@
         "differential_threshold": 80
       },
       "deployment": {
-        "enabled": false,
+        "enabled": true,
         "workflow_file": "platform-deploy.yml",
         "runtime_kind": "cloud_run_service",
         "image_name": "cgm-artemis-api",
@@ -113,7 +113,7 @@
         "differential_threshold": 80
       },
       "deployment": {
-        "enabled": false,
+        "enabled": true,
         "workflow_file": "platform-deploy.yml",
         "runtime_kind": "cloud_run_service",
         "image_name": "cgm-artemis-api",
@@ -145,7 +145,7 @@
         "differential_threshold": 80
       },
       "deployment": {
-        "enabled": false,
+        "enabled": true,
         "workflow_file": "platform-deploy.yml",
         "runtime_kind": "cloud_run_service",
         "image_name": "cgm-artemis-api",
@@ -177,7 +177,7 @@
         "differential_threshold": 80
       },
       "deployment": {
-        "enabled": false,
+        "enabled": true,
         "workflow_file": "platform-deploy.yml",
         "runtime_kind": "cloud_run_service",
         "image_name": "cgm-artemis-api",
@@ -209,7 +209,7 @@
         "differential_threshold": 80
       },
       "deployment": {
-        "enabled": false,
+        "enabled": true,
         "workflow_file": "platform-deploy.yml",
         "runtime_kind": "cloud_run_service",
         "image_name": "cgm-artemis-api",
@@ -241,7 +241,7 @@
         "differential_threshold": 80
       },
       "deployment": {
-        "enabled": false,
+        "enabled": true,
         "workflow_file": "platform-deploy.yml",
         "runtime_kind": "cloud_run_job",
         "image_name": "cgm-artemis-api",
@@ -273,7 +273,7 @@
         "differential_threshold": 80
       },
       "deployment": {
-        "enabled": false,
+        "enabled": true,
         "workflow_file": "platform-deploy.yml",
         "runtime_kind": "cloud_run_job",
         "image_name": "cgm-artemis-api",
@@ -305,7 +305,7 @@
         "differential_threshold": 80
       },
       "deployment": {
-        "enabled": false,
+        "enabled": true,
         "workflow_file": "platform-deploy.yml",
         "runtime_kind": "cloud_run_job",
         "image_name": "cgm-artemis-api",
@@ -337,7 +337,7 @@
         "differential_threshold": 80
       },
       "deployment": {
-        "enabled": false,
+        "enabled": true,
         "workflow_file": "platform-deploy.yml",
         "runtime_kind": "cloud_run_job",
         "image_name": "cgm-artemis-api",

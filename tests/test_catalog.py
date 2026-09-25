@@ -28,9 +28,10 @@ def test_list_services():
     ready = {
         service["service_name"] for service in artemis if service["deployment_ready"]
     }
-    # Only the two runtimes that have an independently verified candidate and
-    # rollback path are enabled; the workers and jobs stay gated.
-    assert ready == {"cgm-artemis-api", "cgm-artemis-web"}
+    # Every Artemis runtime now exists (services and Jobs), so all twelve are
+    # deployable through the governed path. Triggers stay paused until cutover.
+    assert ready == {service["service_name"] for service in artemis}
+    assert all(not service["deployment_blockers"] for service in artemis)
     assert all(
         service["repository"].startswith("diegomad14/cgm-artemis-")
         for service in artemis

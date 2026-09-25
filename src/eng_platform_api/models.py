@@ -461,6 +461,20 @@ class CostSummary(BaseModel):
     total_credits: float = 0.0
     total_net_cost: float = 0.0
     items: list[CostItem] = Field(default_factory=list)
+    cloud_build: "CloudBuildUsage | None" = None
+
+
+class CloudBuildUsage(BaseModel):
+    """Server-owned Cloud Build accounting, independent of the billing export."""
+
+    month: str = ""
+    release_minutes: float = 0.0
+    deployment_minutes: float = 0.0
+    total_minutes: float = 0.0
+    estimated_cost_usd: float = 0.0
+    minute_price_usd: float = 0.0
+    alert_thresholds: list[int] = Field(default_factory=list)
+    alert_thresholds_reached: list[int] = Field(default_factory=list)
 
 
 class DailyCost(BaseModel):

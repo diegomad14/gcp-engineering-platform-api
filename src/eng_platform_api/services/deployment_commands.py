@@ -7,8 +7,10 @@ executor, change a release profile, or bypass release evidence.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import uuid
 from collections.abc import Callable
+from typing import Any
 
 from fastapi import HTTPException
 
@@ -29,6 +31,20 @@ from . import (
 )
 
 _GITHUB_UNAVAILABLE = "GitHub unavailable"
+
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _age_seconds(value: str) -> float:
+    try:
+        started = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return 0.0
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
 
 
 def _open_billing_circuit(service, *, reason: str, evidence: str = "") -> None:
@@ -267,6 +283,87 @@ def _retry_failed_dispatch(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=_GITHUB_UNAVAILABLE) from exc
     return deployment_store.save(retried, key)
+
+
+def reconcile_stalled_dispatches(*, limit: int = 50) -> dict[str, Any]:
+    """Fail over deployments GitHub accepted but never started.
+
+    A workflow dispatch can be accepted with HTTP 204 and still create no run
+    when the account cannot allocate a runner for a private repository.  The
+    request then stays queued forever and blocks the service, so this sweep
+    re-reads GitHub, and once the configured timeout elapses it opens the
+    billing circuit and hands the exact same request to the Cloud Build
+    executor using the original idempotency key.
+    """
+    timeout = config.cloud_build.deploy_dispatch_timeout_seconds
+    results: list[dict[str, Any]] = []
+    for item in deployment_store.list_unfinished(limit=limit):
+        execution = deployment_executions.get(item.id)
+        if execution and execution.get("provider") == "cloud_build":
+            continue
+        try:
+            refreshed = github_deployments.refresh(item)
+        except Exception:
+            continue
+        key = deployment_store.idempotency_key_for(refreshed.id)
+        if (
+            refreshed.github_run_id
+            or refreshed.status in github_deployments.TERMINAL_STATUSES
+        ):
+            deployment_store.save(refreshed, key)
+            continue
+        if _age_seconds(refreshed.created_at) < timeout:
+            continue
+        service = catalog.get_service(refreshed.service_name)
+        if service is None:
+            continue
+        _open_billing_circuit(
+            service,
+            reason="github_dispatch_without_run",
+            evidence=f"deployment={refreshed.id} waited_seconds={timeout}",
+        )
+        failed = refreshed.model_copy(
+            update={
+                "status": "FAILED",
+                "current_stage": "dispatch",
+                "error": github_deployments.GITHUB_WORKFLOW_DISPATCH_FAILED,
+                "updated_at": _iso_now(),
+            }
+        )
+        deployment_store.save(failed, key)
+        if not github_actions_quota.should_use_cloud_build(
+            service.service_name, service.repository
+        ):
+            # No fallback is configured for this service: surface it instead of
+            # dispatching a second request that GitHub would silently drop.
+            results.append(
+                {"deployment_id": refreshed.id, "result": "no_fallback_configured"}
+            )
+            continue
+        try:
+            retried = _retry_failed_dispatch(
+                service,
+                failed,
+                key,
+                github_deployments.GITHUB_WORKFLOW_DISPATCH_FAILED,
+            )
+        except Exception as exc:
+            results.append(
+                {
+                    "deployment_id": refreshed.id,
+                    "result": "retry_failed",
+                    "error": str(exc)[:200],
+                }
+            )
+            continue
+        results.append(
+            {
+                "deployment_id": refreshed.id,
+                "result": "cloud_build_fallback",
+                "status": retried.status,
+            }
+        )
+    return {"reconciled": len(results), "items": results}
 
 
 def start_deployment(

@@ -1038,3 +1038,27 @@ def monthly_cloud_build_minutes(month: str) -> float:
         ),
         3,
     )
+
+
+def monthly_cloud_build_usage(month: str) -> dict[str, Any]:
+    """Cloud Build minutes for one UTC month across both execution planes."""
+    release_minutes = monthly_cloud_build_minutes(month)
+    from . import deployment_executions
+
+    deployment_minutes = deployment_executions.monthly_cloud_build_minutes(month)
+    price = config.release_orchestrator.build_minute_price_usd
+    total = round(release_minutes + deployment_minutes, 3)
+    return {
+        "month": month,
+        "release_minutes": release_minutes,
+        "deployment_minutes": deployment_minutes,
+        "total_minutes": total,
+        "estimated_cost_usd": round(total * price, 4),
+        "minute_price_usd": price,
+        "alert_thresholds": list(config.release_orchestrator.usage_alert_minutes),
+        "alert_thresholds_reached": [
+            threshold
+            for threshold in config.release_orchestrator.usage_alert_minutes
+            if total >= threshold
+        ],
+    }

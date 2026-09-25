@@ -6,6 +6,7 @@ integrations require explicit environment variable configuration.
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 
 _RELEASE_PLANNER_BROKEN_DIGEST = (
@@ -88,6 +89,7 @@ class CloudBuildConfig:
     callback_service_account: str = ""
     enabled_services: tuple[str, ...] = ()
     cloud_build_only_services: tuple[str, ...] = ()
+    deploy_dispatch_timeout_seconds: int = 90
 
 
 @dataclass
@@ -118,6 +120,8 @@ class ReleaseOrchestratorConfig:
     github_health_workflow: str = "eng-platform-actions-health.yml"
     build_minute_price_usd: float = 0.006
     usage_alert_minutes: tuple[int, ...] = (2000, 2250, 2500)
+    release_dispatch_timeout_seconds: int = 600
+    artemis_web_sha: str = ""
 
 
 @dataclass
@@ -291,11 +295,16 @@ def load_config() -> PlatformConfig:
             ).split(",")
             if service.strip()
         ),
+        deploy_dispatch_timeout_seconds=int(
+            os.getenv("ENG_PLATFORM_DEPLOY_DISPATCH_TIMEOUT_SECONDS", "90")
+        ),
     )
     if not set(cloud_build.cloud_build_only_services).issubset(
         cloud_build.enabled_services
     ):
         raise ValueError("Cloud Build-only services must be enabled services")
+    if cloud_build.deploy_dispatch_timeout_seconds <= 0:
+        raise ValueError("Deploy dispatch timeout must be positive")
     if cloud_build.enabled:
         if not (
             cloud_build.project_id
@@ -384,6 +393,10 @@ def load_config() -> PlatformConfig:
             ).split(",")
             if value.strip()
         ),
+        release_dispatch_timeout_seconds=int(
+            os.getenv("ENG_PLATFORM_RELEASE_DISPATCH_TIMEOUT_SECONDS", "600")
+        ),
+        artemis_web_sha=os.getenv("ENG_PLATFORM_ARTEMIS_WEB_SHA", "").strip().lower(),
     )
     if release_orchestrator.enabled:
         if not release_orchestrator.webhook_secret:
@@ -461,6 +474,11 @@ def load_config() -> PlatformConfig:
             raise ValueError("Cloud Build minute price cannot be negative")
         if any(value <= 0 for value in release_orchestrator.usage_alert_minutes):
             raise ValueError("Cloud Build usage alert thresholds must be positive")
+        if release_orchestrator.release_dispatch_timeout_seconds <= 0:
+            raise ValueError("Release dispatch timeout must be positive")
+    paired_web_sha = release_orchestrator.artemis_web_sha
+    if paired_web_sha and not re.fullmatch(r"[0-9a-f]{40}", paired_web_sha):
+        raise ValueError("The paired Artemis Web SHA must be a full commit SHA")
 
     auth = AuthConfig(
         github_client_id=os.getenv("ENG_PLATFORM_GITHUB_OAUTH_CLIENT_ID", ""),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
 from threading import Lock
 from time import monotonic
 from typing import Any
@@ -17,6 +18,7 @@ from .github_deployments import github_client
 _CACHE_SECONDS = 300
 _cache: tuple[float, int, int, "Usage | None"] | None = None
 _cache_lock = Lock()
+logger = logging.getLogger(__name__)
 _QUOTA_MARKERS = (
     "billing",
     "spending limit",
@@ -68,6 +70,9 @@ def current_usage(*, force: bool = False) -> Usage | None:
             return _cache[3]
         owner, token = config.github.billing_owner, config.github.token
         if not owner or not token:
+            logger.warning(
+                "github_actions_quota_preflight_inconclusive reason=missing_credentials"
+            )
             _cache = (monotonic(), now.year, now.month, None)
             return None
         endpoint = (
@@ -96,6 +101,12 @@ def current_usage(*, force: bool = False) -> Usage | None:
             )
             usage = Usage(minutes, now)
         except Exception:  # Billing data is an optimization, never an outage.
+            # A silently missing scope must be visible: without this signal the
+            # preflight can never conclude that private minutes are exhausted,
+            # and the reactive detector is the only remaining safety net.
+            logger.warning(
+                "github_actions_quota_preflight_inconclusive reason=billing_lookup_failed"
+            )
             usage = None
         _cache = (monotonic(), now.year, now.month, usage)
         return usage
