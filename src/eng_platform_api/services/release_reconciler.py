@@ -520,6 +520,7 @@ def reconcile(execution_id: str) -> dict[str, Any]:
         "quality_failed",
         "no_release",
         "released",
+        "superseded",
     }:
         return execution
     if execution.get("status") == "failed":
