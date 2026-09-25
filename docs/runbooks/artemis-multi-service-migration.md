@@ -4,7 +4,45 @@ This rollout is deliberately gated. The old `cgm-sanplat-*` resources remain
 authoritative until each new runtime has an independently verified deployment
 and rollback. Never infer activity from the mere existence of a Cloud Run Job.
 
-## Current status (2026-09-24 UTC)
+## Current status (2026-09-25 UTC)
+
+The API and Web runtimes now have the independently verified deployment the
+gate requires. Both deployments ran through the governed Cloud Build executor
+because GitHub cannot allocate runners for these private repositories; the
+deploy path is therefore `ENG_PLATFORM_CLOUD_BUILD_ONLY_SERVICES=cgm-artemis-api,cgm-artemis-web`,
+not `platform-deploy.yml`.
+
+- `cgm-artemis-api` `v1.42.0` (merge `191a6d08df28`) is live on
+  `cgm-artemis-api-ep-c8829215e6`, 100% traffic, digest
+  `sha256:c32f551d7ec2` from `cgm-artemis-repo` tag `v1.42.0`, running as
+  `artemis-api-runtime` with the 26 `cgm-artemis-*` secret aliases,
+  `APP_BACKGROUND_TASKS_ENABLED=false` and the `cgm-artemis-data` bucket.
+  `cgm-artemis-api-ep-ebc83fd5cf` stays at 0% as the rollback revision.
+- `cgm-artemis-web` `v1.37.1` (merge `288a5f4d6b4f`) is live on
+  `cgm-artemis-web-ep-f672b18d5f`, 100% traffic, digest
+  `sha256:2b636c635b37` from `cgm-artemis-repo` tag `v1.37.1`, running as
+  `artemis-web-runtime` with the `cgm-artemis-perseo-*` aliases.
+  `cgm-artemis-web-ep-e74f71a66d` stays at 0% as the rollback revision.
+- Both runtimes stay private: the only service-level binding is
+  `roles/run.developer` for `eng-platform-release-executor`. The catalog marks
+  them `private_runtime=true`, which is what makes the executor smoke the
+  candidate with an identity token.
+- The Cloud Build execution plane needs `roles/run.developer` on those two
+  services and object write access to
+  `gs://cgm-assistant-prod-eng-platform-deployments`; without them the build
+  fails in `_traffic` or in the final summary upload.
+- The pinned executor is
+  `eng-platform-release-executor@sha256:911b9f5044d40ef23fb46dd892e5521558d0493567ee0c0efac66784194bb6f9`
+  (built from `da73d169`). It must be entered through `/usr/bin/python3`; the
+  Cloud SDK base ships an earlier interpreter on `PATH` without PyYAML.
+- Queues stay paused, no Artemis Job or scheduler exists, and the SanPlat
+  services, schedulers, queues and pilots are unchanged by this rollout.
+
+Superseded release plans (`v1.0.0`, and the pre-fix `v1.42.0`/`v1.37.0`) were
+retired with the audited `POST /api/internal/release-operations/executions/{id}/supersede`
+operation rather than published.
+
+## Previous status (2026-09-24 UTC)
 
 - The existing GitHub repositories have been renamed in place: API ID
   `1306114845` is `diegomad14/cgm-artemis-api`; Web ID `1306114872` is
