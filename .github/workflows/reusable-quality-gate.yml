@@ -113,7 +113,7 @@ jobs:
           python -m pip install --disable-pip-version-check ruff pytest-cov
           python -m venv "$RUNNER_TEMP/eng-platform-semgrep"
           "$RUNNER_TEMP/eng-platform-semgrep/bin/python" -m pip install \
-            --disable-pip-version-check semgrep==1.176.1
+            --disable-pip-version-check 'setuptools<81' semgrep==1.136.0
           echo "$RUNNER_TEMP/eng-platform-semgrep/bin" >> "$GITHUB_PATH"
 
       - name: Run quality gate
