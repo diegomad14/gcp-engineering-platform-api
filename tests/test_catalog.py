@@ -35,6 +35,13 @@ def test_list_services():
         service["repository"].startswith("diegomad14/cgm-artemis-")
         for service in artemis
     )
+    # The new API and Web runtimes stay private until the URL cutover, so the
+    # deploy executor must smoke them with an identity token.
+    assert all(
+        service["deployment"]["private_runtime"]
+        for service in artemis
+        if service["service_name"] in {"cgm-artemis-api", "cgm-artemis-web"}
+    )
 
 
 def test_each_service_points_to_its_own_repository():
