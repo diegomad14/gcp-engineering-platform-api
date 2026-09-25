@@ -17,6 +17,7 @@
       },
       "deployment": {
         "enabled": true,
+        "private_runtime": true,
         "workflow_file": "platform-deploy.yml",
         "runtime_kind": "cloud_run_service",
         "image_name": "cgm-artemis-api",
@@ -369,6 +370,7 @@
       },
       "deployment": {
         "enabled": true,
+        "private_runtime": true,
         "workflow_file": "platform-deploy.yml",
         "runtime_kind": "cloud_run_service",
         "image_name": "cgm-artemis-web",
