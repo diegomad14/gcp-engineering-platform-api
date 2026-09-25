@@ -45,6 +45,27 @@ def test_list_services():
     )
 
 
+def test_renamed_repositories_share_quality_evidence_both_ways():
+    services = client.get("/api/catalog/services").json()["services"]
+    by_name = {service["service_name"]: service for service in services}
+
+    # The renamed repository publishes one execution per SHA: the Artemis entry
+    # and its SanPlat alias must accept the same exact evidence, otherwise a
+    # legacy deploy of the still-serving runtime can never be authorized.
+    assert set(by_name["cgm-sanplat-api"]["quality"]["evidence_services"]) == {
+        "cgm-artemis-api",
+        "cgm-sanplat-api",
+    }
+    assert set(by_name["cgm-sanplat-web"]["quality"]["evidence_services"]) == {
+        "cgm-artemis-web",
+        "cgm-sanplat-web",
+    }
+    assert set(by_name["cgm-artemis-api"]["quality"]["evidence_services"]) == {
+        "cgm-artemis-api",
+        "cgm-sanplat-api",
+    }
+
+
 def test_each_service_points_to_its_own_repository():
     services = client.get("/api/catalog/services").json()["services"]
     by_name = {service["service_name"]: service for service in services}
