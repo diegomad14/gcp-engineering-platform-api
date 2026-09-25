@@ -678,6 +678,33 @@ def approve_canary(execution_id: str, *, approved_by: str) -> dict[str, Any]:
     )
 
 
+_SUPERSEDABLE_STATUSES = frozenset(
+    {"quality_passed", "release_planned", "publish_pending"}
+)
+
+
+def supersede(execution_id: str, *, superseded_by: str, reason: str) -> dict[str, Any]:
+    """Retire a release that will never be published.
+
+    Only executions whose provider run already finished can be retired, and a
+    granted canary approval blocks retirement so a tag publication can never
+    race this decision.
+    """
+    execution = release_executions.get(execution_id)
+    if execution is None:
+        raise KeyError(execution_id)
+    if execution.get("canary_approved"):
+        raise ValueError("Execution already has an approved canary publication")
+    if str(execution.get("status", "")) not in _SUPERSEDABLE_STATUSES:
+        raise ValueError("Execution is not awaiting a release decision")
+    return release_executions.save(
+        execution_id,
+        status="superseded",
+        superseded_by=superseded_by,
+        superseded_reason=reason[:500],
+    )
+
+
 def reconcile_verified_github_run(
     *,
     service_name: str,

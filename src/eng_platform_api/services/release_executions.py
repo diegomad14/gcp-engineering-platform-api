@@ -45,20 +45,29 @@ _TRANSITIONS: dict[str, set[str]] = {
         "release_planned",
         "no_release",
         "released",
+        "superseded",
         "failed",
         "unknown",
     },
     "quality_failed": set(),
-    "release_planned": {"publish_pending", "failed", "unknown"},
-    "publish_pending": {"released", "release_planned", "failed", "unknown"},
+    "release_planned": {"publish_pending", "superseded", "failed", "unknown"},
+    "publish_pending": {
+        "released",
+        "release_planned",
+        "superseded",
+        "failed",
+        "unknown",
+    },
     "no_release": set(),
     "released": set(),
+    "superseded": set(),
     "failed": set(),
     "unknown": {
         "submission_pending",
         "running_quality",
         "release_planned",
         "released",
+        "superseded",
         "failed",
     },
 }
@@ -969,7 +978,7 @@ def find(repository: str, head_sha: str, operation: str) -> dict[str, Any] | Non
 
 
 def list_due(*, limit: int = 100) -> list[dict[str, Any]]:
-    terminal = {"quality_failed", "no_release", "released", "failed"}
+    terminal = {"quality_failed", "no_release", "released", "superseded", "failed"}
     collection = _collection()
     if collection is None:
         with _lock:

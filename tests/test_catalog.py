@@ -25,7 +25,12 @@ def test_list_services():
         if service["service_name"].startswith("cgm-artemis-")
     ]
     assert len(artemis) == 12
-    assert all(not service["deployment_ready"] for service in artemis)
+    ready = {
+        service["service_name"] for service in artemis if service["deployment_ready"]
+    }
+    # Only the two runtimes that have an independently verified candidate and
+    # rollback path are enabled; the workers and jobs stay gated.
+    assert ready == {"cgm-artemis-api", "cgm-artemis-web"}
     assert all(
         service["repository"].startswith("diegomad14/cgm-artemis-")
         for service in artemis
