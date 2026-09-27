@@ -164,7 +164,7 @@ class QualityProfilesTest(unittest.TestCase):
             self.assertIn("coverage.reporter=lcov", tests)
 
         bot = quality_profiles.profile_for("cgm-bot-api")
-        self.assertIn("git diff --name-only -z", bot["commands"]["format"])
+        self.assertIn("git diff --relative --name-only -z", bot["commands"]["format"])
         advisory = {item["name"]: item for item in bot["extra"]}
         self.assertFalse(advisory["Mypy advisory"]["blocking"])
         self.assertFalse(advisory["Dependency audit advisory"]["blocking"])

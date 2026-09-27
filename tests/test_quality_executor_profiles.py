@@ -2,6 +2,7 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -34,6 +35,21 @@ def test_artemis_quality_aliases_preserve_profile_and_hash():
     )
     assert profiles.profile_hash("cgm-artemis-web") == profiles.profile_hash(
         "cgm-sanplat-web"
+    )
+
+
+def test_image_profile_contract_is_also_checked_by_api_ci():
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "unittest",
+            "test_quality_executor.QualityProfilesTest.test_profiles_preserve_security_and_coverage_contracts",
+        ],
+        cwd=Path(__file__).resolve().parents[1] / "docker/quality-executor",
+        check=True,
+        capture_output=True,
+        text=True,
     )
 
 
