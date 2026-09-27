@@ -925,7 +925,8 @@ def _deploy_candidate(
         project,
         "--format=value(status.latestCreatedRevisionName)",
     )
-    candidate_tag = "candidate-" + env("CGM_REQUEST_FINGERPRINT")[:12]
+    # Cloud Run limits the combined service name and traffic tag to 46 chars.
+    candidate_tag = "c-" + env("CGM_REQUEST_FINGERPRINT")[:12]
     run(
         "gcloud",
         "run",
