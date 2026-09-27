@@ -250,6 +250,18 @@ def test_scheduler_resumes_checkpoint_after_interrupted_page(monkeypatch):
     assert len(store.rows()) == 2
 
 
+def test_failed_inventory_marks_last_snapshot_stale_immediately(monkeypatch):
+    monkeypatch.setattr(config, "mock_mode", False)
+    monkeypatch.setattr(config.cloud_build, "enabled", True)
+    usage.materialize("2026-09", NOW, complete_inventory=True)
+    monkeypatch.setattr(usage, "Inventory", Mock(side_effect=RuntimeError("offline")))
+    assert usage.reconcile() == {"reconciled": False}
+    assert usage.summary("2026-09", NOW)["data_status"] == "stale"
+    monkeypatch.setattr(store, "claim", Mock(side_effect=RuntimeError("store down")))
+    monkeypatch.setattr(store, "get", Mock(side_effect=RuntimeError("store down")))
+    assert usage.reconcile() == {"reconciled": False}
+
+
 def test_scheduler_bounds_pages_and_publishes_partial_status(monkeypatch):
     monkeypatch.setattr(config, "mock_mode", False)
     monkeypatch.setattr(config.cloud_build, "enabled", True)

@@ -409,6 +409,14 @@ def reconcile() -> dict[str, Any]:
         return {"reconciled": True, "complete": complete}
     except Exception:
         logger.exception("cloud_build_usage_reconciliation_failed")
+        # An interrupted inventory must not keep advertising its last result as
+        # fresh, even if the previous successful sweep was only minutes ago.
+        try:
+            key = "_summary-" + month
+            if store.get(key):
+                store.update(key, lambda old: {**old, "data_status": "stale"})
+        except Exception:
+            logger.warning("cloud_build_usage_snapshot_unavailable")
         return {"reconciled": False}
 
 
