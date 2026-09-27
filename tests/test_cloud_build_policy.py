@@ -38,16 +38,17 @@ def test_timeout_must_be_bounded(timeout):
 
 def test_ci_guards_active_generators_and_workflows():
     root = Path(__file__).resolve().parents[1]
+    historical_rates = {
+        root / "src/eng_platform_api/services/cloud_build_usage.py",
+        root / "scripts/ops/cloud-build-fallback/measure.py",
+    }
     paths = [
-        root / "src/eng_platform_api/services" / name
-        for name in ("cloud_build.py", "release_cloud_build.py")
+        path
+        for directory in ("src", "scripts", ".github", "templates", "examples")
+        for path in (root / directory).rglob("*")
+        if path.suffix in {".py", ".sh", ".yml", ".yaml"}
+        and path not in historical_rates
     ]
-    paths += [
-        root / "scripts/ops/cloud-build-fallback" / name
-        for name in ("prepare.py", "control.py")
-    ]
-    paths += list((root / ".github/workflows").glob("*.yml"))
-    paths += list((root / "templates/github-actions").glob("*.yml"))
     for path in paths:
         text = path.read_text()
         assert "E2_HIGHCPU" not in text, path

@@ -60,6 +60,7 @@ def _execution_link(build: dict[str, Any]) -> tuple[str, str]:
         source = build.get("source", {}).get("connectedRepository", {})
         build_ids = {
             execution.get("build_id"),
+            *(execution.get("previous_build_ids") or []),
             *(a.get("build_id") for a in execution.get("build_attempts", [])),
         }
         if (

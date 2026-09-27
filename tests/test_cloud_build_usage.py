@@ -136,7 +136,7 @@ def test_execution_link_requires_bound_identity_not_just_tags(
     execution = {
         "provider": "cloud_build",
         "build_id": "new-attempt",
-        "build_attempts": [{"build_id": "build-1"}],
+        "previous_build_ids": ["build-1"],
         "fingerprint": "fp",
         "service_name": "service",
         "repository": "owner/repo",
