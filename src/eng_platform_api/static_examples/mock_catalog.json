@@ -507,6 +507,7 @@
         "image_name": "cgm-bot-api",
         "artifact_repository": "cgm-sanplat-repo",
         "build_context": "services/cgm-bot-api",
+        "dockerfile_path": "services/cgm-bot-api/Dockerfile",
         "health_path": "/health"
       },
       "finops": {

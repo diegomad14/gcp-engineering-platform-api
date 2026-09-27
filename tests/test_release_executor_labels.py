@@ -2,9 +2,12 @@
 
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
+
+from eng_platform_api.services.catalog import get_service
 
 
 @pytest.fixture
@@ -115,3 +118,36 @@ def test_executor_dockerfile_uses_python_with_apk_yaml():
         in dockerfile
     )
     assert "\nUSER root\n" in dockerfile
+
+
+def test_bot_catalog_builds_with_repository_relative_dockerfile(
+    engine, monkeypatch, tmp_path
+):
+    service = get_service("cgm-bot-api")
+    assert service is not None
+    _environment(monkeypatch, "cgm-bot-api")
+    monkeypatch.setenv("CGM_IMAGE", "registry.example/bot:v1.17.4")
+    monkeypatch.setenv("CGM_REPOSITORY", service.repository)
+    monkeypatch.setenv("CGM_BUILD_CONTEXT", service.deployment.build_context)
+    monkeypatch.setenv("CGM_DOCKERFILE_PATH", service.deployment.dockerfile_path)
+    monkeypatch.delenv("CGM_CACHE_IMAGE", raising=False)
+    monkeypatch.setattr(engine, "ROOT", tmp_path)
+    dockerfile = tmp_path / "services/cgm-bot-api/Dockerfile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM scratch\n")
+    commands = []
+
+    def run(*args, **_kwargs):
+        commands.append(args)
+        if args[:2] == ("docker", "pull"):
+            raise subprocess.CalledProcessError(1, args)
+        if args[:4] == ("gcloud", "artifacts", "docker", "images"):
+            return "sha256:" + "b" * 64
+        return ""
+
+    monkeypatch.setattr(engine, "run", run)
+    assert engine.image_for_tag().endswith("@sha256:" + "b" * 64)
+    builds = [cmd for cmd in commands if cmd[:2] == ("docker", "build")]
+    assert len(builds) == 1
+    assert builds[0][builds[0].index("--file") + 1] == str(dockerfile)
+    assert builds[0][-1] == str(dockerfile.parent)
