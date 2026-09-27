@@ -428,10 +428,22 @@ def configure_runtime_home() -> None:
         os.environ["HOME"] = "/builder/home"
 
 
+class CommandFailure(subprocess.CalledProcessError):
+    def __str__(self) -> str:
+        command = sanitized_error(" ".join(str(value) for value in self.cmd))
+        detail = sanitized_error(self.stderr or self.stdout or "no diagnostic output")
+        return f"command failed (exit {self.returncode}): {command}: {detail}"
+
+
 def run(*args: str, cwd: pathlib.Path = ROOT) -> str:
-    return subprocess.run(
-        args, cwd=cwd, check=True, text=True, capture_output=True
-    ).stdout.strip()
+    try:
+        return subprocess.run(
+            args, cwd=cwd, check=True, text=True, capture_output=True
+        ).stdout.strip()
+    except subprocess.CalledProcessError as exc:
+        raise CommandFailure(
+            exc.returncode, exc.cmd, output=exc.stdout, stderr=exc.stderr
+        ) from None
 
 
 def emit(stage: str, status: str, **values: str) -> None:
