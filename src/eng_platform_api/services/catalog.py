@@ -96,6 +96,12 @@ def deployment_blockers(service: CatalogService) -> list[str]:
             profile_for(service)
         except ValueError as exc:
             blockers.append(str(exc))
+        if not blockers and not config.mock_mode:
+            from .executor_readiness import availability
+
+            blockers.extend(
+                availability(service.repository, repository, build.executor_image)
+            )
     if deployment.runtime_kind == "cloud_run_service":
         required_fields.append(("deployment.health_path", deployment.health_path))
     if not deployment.enabled:
