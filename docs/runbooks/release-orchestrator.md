@@ -215,6 +215,26 @@ repository; thereafter only the backend changes it with the circuit.
 - The two service lists must be disjoint; configuration validation rejects an
   overlap.
 
+### Production release policy (2026-09-27)
+
+Production uses automatic tag and GitHub Release publication for services that
+have passed the exact `oss-v2` quality gate and produced a valid release plan.
+The API also rechecks that the repository default branch still points to the
+authorized SHA before it publishes. A conflicting tag or Release stops the
+execution for reconciliation. This policy does not start a deployment: an
+operator still selects the eligible tag through UI, REST or MCP, and the
+deployment engine retains its zero-traffic candidate, validation, promotion and
+rollback gates.
+
+`ENG_PLATFORM_RELEASE_CANARY_SERVICES` is empty in production. The enabled
+list contains `cgm-sanplat-web`, `cgm-bot-api`, `cgm-artemis-web`,
+`cgm-artemis-api`, `eng-platform-web` and `communications-ms`. Do not move a
+production service into the canary list as a routine rollout step: that list
+deliberately pauses publication for a separate manual approval. Use it only
+when an explicit release hold is intended. The prior Artemis Web
+`release_planned` hold was resolved before this configuration change; do not
+approve or replay that execution again.
+
 For deployment fallback, independently configure:
 
 ```text
@@ -320,11 +340,13 @@ failed, zero-job, unrelated or forged run leaves it open. If variable updates
 are only partially successful, the API rolls them back to `cloud_build` and
 keeps the circuit open; fix the cause and request a new probe.
 
-## Exact production rollout
+## Historical initial production rollout
 
-This rollout authorizes one real release canary for `eng-platform-web`, one
-manual deploy of its result and one rollback. No synthetic build is run for the
-other five services.
+The steps below record the initial canary rollout and its manual approval. They
+are not instructions for the current automatic publication policy above. That
+rollout authorized one real release canary for `eng-platform-web`, one manual
+deploy of its result and one rollback. No synthetic build was run for the other
+five services.
 
 1. **Prepare without execution.** Install the GitHub App permissions and HMAC
    webhook, connect all six v2 repositories, publish the four digest-pinned
