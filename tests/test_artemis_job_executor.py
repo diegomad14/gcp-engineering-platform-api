@@ -307,7 +307,7 @@ def test_artemis_cloud_build_contract_is_economical(monkeypatch):
             sha="a" * 40,
         )
         request = cloud_build.build_request(item, service)
-        assert request["options"]["machineType"] == "E2_STANDARD_2"
+        assert "machineType" not in request["options"]
         assert request["options"]["logging"] == "CLOUD_LOGGING_ONLY"
         assert len(request["steps"]) == 1
         assert request["steps"][0]["name"] == config.cloud_build.executor_image

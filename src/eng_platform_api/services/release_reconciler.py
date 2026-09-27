@@ -169,26 +169,8 @@ def _record_build_timing(execution_id: str, build: dict[str, Any]) -> None:
         cost_category="release_quality",
         build_finished_at=finished,
     )
-    month = finished[:7]
-    total = release_executions.monthly_cloud_build_usage(month)["total_minutes"]
-    execution = release_executions.get(execution_id) or {}
-    owner = (
-        config.github.billing_owner
-        or str(execution.get("repository", "")).split("/", 1)[0]
-    )
-    for threshold in config.release_orchestrator.usage_alert_minutes:
-        if total >= threshold and executor_circuits.claim_usage_alert(
-            owner,
-            month=month,
-            threshold=threshold,
-            observed_minutes=total,
-        ):
-            logger.warning(
-                "cloud_build_usage_threshold month=%s threshold_minutes=%s observed_minutes=%.3f",
-                month,
-                threshold,
-                total,
-            )
+    # Project-wide alerts are owned by cloud_build_usage, not functional release
+    # reconciliation: callbacks and terminal failures must not hide spending.
 
 
 def _provider_success(execution: dict[str, Any]) -> bool:

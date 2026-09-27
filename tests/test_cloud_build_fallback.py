@@ -144,7 +144,7 @@ def test_tooling_runs_as_nonroot_with_installable_private_environment():
 
 @pytest.mark.parametrize(
     "profile,machine,workers",
-    [("performance", "E2_HIGHCPU_8", 4), ("economy", "E2_STANDARD_2", 2)],
+    [("economy", "DEFAULT", 2)],
 )
 def test_profiles_keep_catalog_owned_quality_and_bound_resources(
     arguments, profile, machine, workers
@@ -157,7 +157,8 @@ def test_profiles_keep_catalog_owned_quality_and_bound_resources(
     assert request["build_profile"] == profile
     assert request["workers"] == workers
     assert request["coverage_threshold"] == 70
-    assert config["options"]["machineType"] == machine
+    assert "machineType" not in config["options"]
+    assert request["machine_type"] == machine
     assert request["repository"] == "diegomad14/cgm-sanplat-api"
     assert request["image"].startswith(
         "us-central1-docker.pkg.dev/cgm-assistant-prod/cgm-sanplat-repo/cgm-sanplat-api:"
@@ -229,7 +230,7 @@ def test_shell_values_remain_single_arguments_and_install_is_not_executed(
     assert f"FALLBACK_SOURCE_SHA={arguments.sha}" in tests
     assert "FALLBACK_REPOSITORY=diegomad14/cgm-sanplat-api" in tests
     assert "FALLBACK_DURATION_PROFILE=/workspace/duration-profile.json" in tests
-    assert "-n 4 --dist worksteal" in tests
+    assert "-n 2 --dist worksteal" in tests
     assert "--cov=. --cov-report=json:quality-reports/coverage.json" in tests
     assert not sentinel.exists()
 

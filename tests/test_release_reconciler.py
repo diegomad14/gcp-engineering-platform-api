@@ -372,7 +372,7 @@ def test_record_build_timing_handles_queue_timestamps(
     assert save.call_args.kwargs["build_queue_seconds"] == queue_seconds
 
 
-def test_record_build_timing_emits_each_usage_alert_only_after_atomic_claim(
+def test_legacy_execution_timing_does_not_emit_partial_project_alerts(
     monkeypatch,
 ):
     monkeypatch.setattr(reconciler.release_executions, "save", mock.Mock())
@@ -399,26 +399,8 @@ def test_record_build_timing_emits_each_usage_alert_only_after_atomic_claim(
 
     reconciler._record_build_timing("execution-1", _build())
 
-    assert claim.call_args_list == [
-        mock.call(
-            "billing-owner",
-            month="2026-09",
-            threshold=2000,
-            observed_minutes=2250.0,
-        ),
-        mock.call(
-            "billing-owner",
-            month="2026-09",
-            threshold=2250,
-            observed_minutes=2250.0,
-        ),
-    ]
-    warning.assert_called_once_with(
-        "cloud_build_usage_threshold month=%s threshold_minutes=%s observed_minutes=%.3f",
-        "2026-09",
-        2250,
-        2250.0,
-    )
+    claim.assert_not_called()
+    warning.assert_not_called()
 
 
 @pytest.mark.parametrize("terminal", [False, True])

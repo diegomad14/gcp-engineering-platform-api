@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import uuid
 from pathlib import Path
@@ -17,6 +18,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PLATFORM = HERE.parents[2]
+sys.path.insert(0, str(PLATFORM / "src"))
+from eng_platform_api.services.cloud_build_policy import economy_options  # noqa: E402
 SHA = re.compile(r"^[0-9a-f]{40}$")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 DIGEST_IMAGE = re.compile(r"^[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{64}$")
@@ -26,7 +29,7 @@ RUNTIME_IMAGE = re.compile(
 DOCKER = "gcr.io/cloud-builders/docker"
 SDK = "gcr.io/google.com/cloudsdktool/google-cloud-cli:slim"
 XDIST_VERSION = "3.8.0"
-BUILD_PROFILES = {"performance": ("E2_HIGHCPU_8", 4), "economy": ("E2_STANDARD_2", 2)}
+BUILD_PROFILES = {"economy": ("DEFAULT", 2)}
 CATALOG_PATH = PLATFORM / "src/eng_platform_api/static_examples/mock_catalog.json"
 TIMEOUT_SECONDS = 1256
 
@@ -227,7 +230,7 @@ def build_config(args: argparse.Namespace) -> dict:
     # Publication is explicit and gate-protected; images[] would push a second time.
     return {
         "timeout": f"{TIMEOUT_SECONDS}s",
-        "options": {"machineType": args.machine_type, "logging": "CLOUD_LOGGING_ONLY"},
+        "options": economy_options(),
         "substitutions": {
             "_RELEASE_SHA": args.sha,
             "_QUALITY_URI": args.report_uri,
@@ -438,7 +441,7 @@ def parser() -> argparse.ArgumentParser:
     for option in ("source", "service", "sha", "base-sha", "evidence-uri", "output"):
         result.add_argument(f"--{option}", required=True)
     result.add_argument(
-        "--profile", choices=tuple(BUILD_PROFILES), default="performance"
+        "--profile", choices=tuple(BUILD_PROFILES), default="economy"
     )
     result.add_argument("--install-command", default="")
     result.add_argument("--branch", default="")

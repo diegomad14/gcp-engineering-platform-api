@@ -11,6 +11,7 @@ from google.auth.transport.requests import AuthorizedSession
 from ..config import config
 from ..models import CatalogService
 from . import release_executions
+from .cloud_build_policy import economy_options, validate_submission
 from .quality_profiles import executor_image, planner_hash, profile_for
 
 _API = "https://cloudbuild.googleapis.com/v1"
@@ -193,11 +194,7 @@ def _planner_retry_request(
         },
         "steps": steps,
         "timeout": f"{profile.timeout_seconds}s",
-        "options": {
-            "machineType": "E2_STANDARD_2",
-            "logging": "CLOUD_LOGGING_ONLY",
-            "substitutionOption": "ALLOW_LOOSE",
-        },
+        "options": economy_options(substitutionOption="ALLOW_LOOSE"),
         "serviceAccount": config.release_orchestrator.service_account,
         "substitutions": substitutions,
         "tags": [
@@ -513,11 +510,7 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
         },
         "steps": steps,
         "timeout": f"{profile.timeout_seconds}s",
-        "options": {
-            "machineType": "E2_STANDARD_2",
-            "logging": "CLOUD_LOGGING_ONLY",
-            "substitutionOption": "ALLOW_LOOSE",
-        },
+        "options": economy_options(substitutionOption="ALLOW_LOOSE"),
         "serviceAccount": config.release_orchestrator.service_account,
         "substitutions": substitutions,
         "tags": [
@@ -621,9 +614,10 @@ def submit(execution_id: str, service: CatalogService) -> dict[str, Any]:
     recovered = _matching_build(execution)
     if recovered:
         return _bind(execution_id, recovered)
+    request = build_request(execution, service)
+    validate_submission(request)
     if not release_executions.claim_submission(execution_id):
         raise ReleaseCloudBuildError("Release build submission is being reconciled")
-    request = build_request(execution, service)
     try:
         response = _session().post(
             f"{_API}/{_location()}/builds", json=request, timeout=30

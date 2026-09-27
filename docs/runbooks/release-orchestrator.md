@@ -361,7 +361,7 @@ other five services.
    same zero-step Billing rejection before it opens the circuit and submits the
    single real release-quality Cloud Build.
 5. **Accept the release canary.** Verify the Cloud Build used
-   `E2_STANDARD_2`, `CLOUD_LOGGING_ONLY`, the exact connected-repository SHA,
+   omitted `machineType` (standard default), `CLOUD_LOGGING_ONLY`, the exact connected-repository SHA,
    the quality Node and planner digests, the dedicated quality service account
    and no unexpected retry. Verify exact `oss-v2` evidence, all four stable
    checks, timing/cost fields and the `v0.17.5` plan. Approve that execution via

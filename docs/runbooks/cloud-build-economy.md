@@ -23,7 +23,7 @@ Every generated Cloud Build request is server-owned and uses:
 
 - a connected Cloud Build v2 repository in `us-central1` and the exact source
   SHA;
-- `E2_STANDARD_2` and `CLOUD_LOGGING_ONLY`;
+- the standard default machine (`machineType` omitted) and `CLOUD_LOGGING_ONLY`;
 - 1,800 seconds for normal profiles and 3,600 seconds for SanPlat profiles;
 - no private pool, extra disk, automatic machine escalation or full-build retry;
 - no source tarball and no repository-owned `cloudbuild.yaml`;

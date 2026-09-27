@@ -14,6 +14,22 @@ from eng_platform_api.services import catalog, cloud_build, deployment_execution
 from eng_platform_api.services.release_profiles import profile_for
 
 
+def test_deploy_submission_rejects_machine_override_before_reserve(monkeypatch):
+    monkeypatch.setattr(
+        cloud_build,
+        "build_request",
+        lambda *_: {
+            "timeout": "1800s",
+            "options": {"machineType": "E2_HIGHCPU_8", "logging": "CLOUD_LOGGING_ONLY"},
+        },
+    )
+    reserve = mock.Mock()
+    monkeypatch.setattr(deployment_executions, "reserve", reserve)
+    with pytest.raises(ValueError):
+        cloud_build.submit(mock.Mock(), mock.Mock(), reason="test")
+    reserve.assert_not_called()
+
+
 class _Snapshot:
     def __init__(self, value):
         self.value = value
@@ -237,7 +253,6 @@ def test_build_request_has_fixed_economy_contract():
     request = cloud_build.build_request(_item(), service)
 
     assert request["options"] == {
-        "machineType": "E2_STANDARD_2",
         "logging": "CLOUD_LOGGING_ONLY",
         "substitutionOption": "ALLOW_LOOSE",
     }

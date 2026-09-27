@@ -32,6 +32,10 @@ def test_disconnect_recovers_remote_build_without_resubmission(
 ):
     monkeypatch.setattr(control, "validate_inputs", lambda _: request_data)
     state = tmp_path / "state.json"
+    control.save(
+        tmp_path / "build" / "cloudbuild.json",
+        {"options": {"logging": "CLOUD_LOGGING_ONLY"}, "timeout": "1800s"},
+    )
     calls = []
     build = {
         "id": "build-1",
@@ -127,6 +131,10 @@ def test_changing_state_file_cannot_duplicate_submission(
     control, request_data, tmp_path, monkeypatch
 ):
     monkeypatch.setattr(control, "validate_inputs", lambda _: request_data)
+    control.save(
+        tmp_path / "build" / "cloudbuild.json",
+        {"options": {"logging": "CLOUD_LOGGING_ONLY"}, "timeout": "1800s"},
+    )
     calls = []
     build = {
         "id": "build-1",
@@ -145,6 +153,26 @@ def test_changing_state_file_cannot_duplicate_submission(
             == "build-1"
         )
     assert sum(call[:2] == ("builds", "submit") for call in calls) == 1
+
+
+def test_old_highcpu_manifest_rejected_before_new_submit(
+    control, request_data, tmp_path, monkeypatch
+):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(control, "validate_inputs", lambda _: request_data)
+    control.save(
+        tmp_path / "build" / "cloudbuild.json",
+        {
+            "options": {"machineType": "E2_HIGHCPU_8", "logging": "CLOUD_LOGGING_ONLY"},
+            "timeout": "1800s",
+        },
+    )
+    remote = Mock()
+    monkeypatch.setattr(control, "cloud", remote)
+    with pytest.raises(ValueError):
+        control.operate(tmp_path / "build", tmp_path / "state.json", submit=True)
+    remote.assert_not_called()
 
 
 def test_confirmation_cannot_reuse_prepared_attempt(control, request_data, tmp_path):
