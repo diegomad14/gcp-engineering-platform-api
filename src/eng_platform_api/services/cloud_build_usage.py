@@ -16,7 +16,6 @@ from google.cloud import bigquery
 
 from ..config import config
 from . import cloud_build_usage_store as store
-from . import deployment_executions, release_executions
 from . import gcp_billing_bigquery as billing
 from .cloud_build_policy import validate_submission
 
@@ -49,14 +48,14 @@ def month_bounds(month: str) -> tuple[datetime, datetime]:
 
 def _execution_link(build: dict[str, Any]) -> tuple[str, str]:
     substitutions = build.get("substitutions", {})
-    for field, category, loader, sha_field in (
-        ("_DEPLOYMENT_ID", "deployment", deployment_executions.get, "sha"),
-        ("_EXECUTION_ID", "release_quality", release_executions.get, "head_sha"),
+    for field, category, sha_field in (
+        ("_DEPLOYMENT_ID", "deployment", "sha"),
+        ("_EXECUTION_ID", "release_quality", "head_sha"),
     ):
         execution_id = str(substitutions.get(field, ""))
         if not execution_id:
             continue
-        execution = loader(execution_id) or {}
+        execution = store.execution(category, execution_id) or {}
         source = build.get("source", {}).get("connectedRepository", {})
         build_ids = {
             execution.get("build_id"),

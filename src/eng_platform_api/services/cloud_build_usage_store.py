@@ -37,6 +37,24 @@ def get(key: str) -> dict[str, Any] | None:
     return snapshot.to_dict() if snapshot.exists else None
 
 
+def execution(category: str, execution_id: str) -> dict[str, Any] | None:
+    """Read identity only; reuse the channel and never update functional state."""
+    if config.mock_mode:
+        return None
+    name = (
+        config.cloud_build.execution_collection
+        if category == "deployment"
+        else config.release_orchestrator.execution_collection
+    )
+    snapshot = (
+        _client(config.cloud_build.project_id)
+        .collection(name)
+        .document(execution_id)
+        .get(timeout=30)
+    )
+    return snapshot.to_dict() if snapshot.exists else None
+
+
 def update(
     key: str, transform: Callable[[dict[str, Any]], dict[str, Any]]
 ) -> dict[str, Any]:

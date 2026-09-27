@@ -27,10 +27,16 @@ def test_firestore_collection_and_transactional_upsert(monkeypatch):
     document.get.return_value.exists = False
     assert store.get("missing") is None
     client.collection.assert_called_with("cloud_build_usage")
+    for category in ("deployment", "release_quality"):
+        document.get.return_value.exists = True
+        assert store.execution(category, "exec") == {"old": 1}
+        document.get.return_value.exists = False
+        assert store.execution(category, "missing") is None
     store._client.cache_clear()
 
 
 def test_mock_collection_and_utc_clock(monkeypatch):
     monkeypatch.setattr(config, "mock_mode", True)
     assert store._collection() is None
+    assert store.execution("deployment", "ignored") is None
     assert store.utc_now().utcoffset().total_seconds() == 0

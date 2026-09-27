@@ -124,14 +124,14 @@ def test_invalid_provider_metadata_is_not_metered(changes):
 
 
 @pytest.mark.parametrize(
-    "category,field,sha_field,module",
+    "category,field,sha_field",
     [
-        ("deployment", "_DEPLOYMENT_ID", "sha", usage.deployment_executions),
-        ("release_quality", "_EXECUTION_ID", "head_sha", usage.release_executions),
+        ("deployment", "_DEPLOYMENT_ID", "sha"),
+        ("release_quality", "_EXECUTION_ID", "head_sha"),
     ],
 )
 def test_execution_link_requires_bound_identity_not_just_tags(
-    monkeypatch, category, field, sha_field, module
+    monkeypatch, category, field, sha_field
 ):
     execution = {
         "provider": "cloud_build",
@@ -142,7 +142,7 @@ def test_execution_link_requires_bound_identity_not_just_tags(
         "repository": "owner/repo",
         sha_field: "a" * 40,
     }
-    monkeypatch.setattr(module, "get", lambda _: execution)
+    monkeypatch.setattr(store, "execution", lambda *_: execution)
     values = {
         "substitutions": {
             field: "execution",
