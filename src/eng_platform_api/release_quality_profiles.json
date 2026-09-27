@@ -70,7 +70,7 @@
         "tests": "python -m pytest -q --cov=app --cov-report=json:quality-reports/coverage.json --cov-fail-under=80",
         "build": "",
         "lint": "ruff check app tests --output-format json --output-file quality-reports/ruff.json",
-        "format": "git diff --name-only -z --diff-filter=ACMR \"$ENG_PLATFORM_RELEASE_BASE_SHA\" \"$ENG_PLATFORM_RELEASE_HEAD_SHA\" -- 'app/**/*.py' 'tests/**/*.py' | xargs -0 -r ruff format --check --",
+        "format": "git diff --relative --name-only -z --diff-filter=ACMR \"$ENG_PLATFORM_RELEASE_BASE_SHA\" \"$ENG_PLATFORM_RELEASE_HEAD_SHA\" -- 'app/**/*.py' 'tests/**/*.py' | xargs -0 -r ruff format --check --",
         "typecheck": "python -m compileall -q app"
       },
       "extra": [
