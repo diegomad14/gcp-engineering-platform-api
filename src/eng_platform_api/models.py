@@ -25,6 +25,7 @@ class ServiceQualityConfig(BaseModel):
 
 
 class ServiceDeploymentConfig(BaseModel):
+    executor: Literal["auto", "cloud_build"] = "auto"
     enabled: bool = True
     workflow_file: str = "platform-deploy.yml"
     image_name: str = ""
@@ -85,6 +86,10 @@ class ServiceDetail(CatalogService):
     status: str = "unknown"
     url: str = ""
     latest_ready_revision: str = ""
+    serving_revision: str = ""
+    runtime_sha: str = ""
+    last_job_execution: str = ""
+    last_job_execution_status: str = ""
     traffic: list[ServiceTraffic] = Field(default_factory=list)
     error: str = ""
 
@@ -220,6 +225,10 @@ class ReleaseAuthorizationConsumeResponse(BaseModel):
 
 
 class DeploymentItem(BaseModel):
+    origin: Literal["managed", "external_verified"] = "managed"
+    reason: str = ""
+    image_digest: str = ""
+    evidence_url: str = ""
     id: str
     service_name: str
     repository: str
@@ -270,6 +279,10 @@ class DeploymentOverviewItem(BaseModel):
     service_name: str
     status: str = "unknown"
     latest_ready_revision: str = ""
+    serving_revision: str = ""
+    runtime_sha: str = ""
+    last_job_execution: str = ""
+    last_job_execution_status: str = ""
     deployment_ready: bool = False
     deployment_blockers: list[str] = Field(default_factory=list)
     last_deployment: DeploymentItem | None = None

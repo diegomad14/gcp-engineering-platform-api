@@ -114,6 +114,11 @@ def current_usage(*, force: bool = False) -> Usage | None:
 
 def should_use_cloud_build(service_name: str, repository: str) -> bool:
     """Choose the managed fallback only when quota evidence is conclusive."""
+    service = catalog.get_service(service_name)
+    if service and service.deployment.executor == "cloud_build":
+        if not service.deployment_ready:
+            raise ValueError("; ".join(service.deployment_blockers))
+        return True
     if not config.cloud_build.enabled:
         return False
     if service_name not in config.cloud_build.enabled_services:

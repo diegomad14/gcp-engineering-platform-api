@@ -7,6 +7,22 @@ from eng_platform_api.services import github_deployments
 
 
 def test_artemis_cloud_build_only_policy_is_backend_owned(monkeypatch):
+    build = quota.config.cloud_build
+    for field in (
+        "project_id",
+        "service_account",
+        "callback_service_account",
+        "evidence_bucket",
+    ):
+        monkeypatch.setattr(build, field, "configured")
+    monkeypatch.setattr(build, "executor_image", "image@sha256:" + "a" * 64)
+    monkeypatch.setattr(
+        build,
+        "repositories",
+        {
+            "cgm-artemis-sync-worker": "projects/p/locations/r/connections/c/repositories/artemis"
+        },
+    )
     monkeypatch.setattr(quota.config.cloud_build, "enabled", True)
     monkeypatch.setattr(
         quota.config.cloud_build, "enabled_services", ("cgm-artemis-sync-worker",)

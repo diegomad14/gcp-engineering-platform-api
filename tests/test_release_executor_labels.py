@@ -86,7 +86,38 @@ def test_cloud_run_job_definition_gets_release_sha_label(engine, monkeypatch):
     commands = []
     image = "image@sha256:" + "b" * 64
     monkeypatch.setenv("CGM_EVIDENCE_BUCKET", "test-evidence")
-    monkeypatch.setattr(engine, "_job_definition", lambda: "job-definition")
+    import yaml
+
+    definition = yaml.safe_dump(
+        {
+            "spec": {
+                "template": {
+                    "spec": {
+                        "template": {
+                            "spec": {
+                                "containers": [
+                                    {
+                                        "args": [
+                                            "-m",
+                                            "cgm_sanplat_param.worker",
+                                            "--type",
+                                            "wm-sweep",
+                                        ],
+                                        "env": [],
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    )
+    monkeypatch.setattr(engine, "_job_definition", lambda: definition)
+    monkeypatch.setattr(engine, "pause_job_schedules", lambda: [])
+    monkeypatch.setattr(engine, "resume_job_schedules", lambda names: None)
+    monkeypatch.setattr(engine, "runtime_grant", lambda *a: None)
+    monkeypatch.setattr(engine, "check_job_runtime", lambda: None)
     monkeypatch.setattr(engine, "_job_operational_spec", lambda *_: {"ok": True})
     images = iter(["prior-image", image])
     monkeypatch.setattr(engine, "_job_image", lambda: next(images))
@@ -102,7 +133,7 @@ def test_cloud_run_job_definition_gets_release_sha_label(engine, monkeypatch):
     updates = [
         cmd for cmd in commands if cmd[:4] == ("gcloud", "run", "jobs", "update")
     ]
-    assert len(updates) == 1
+    assert len(updates) == 2
     assert (
         updates[0][updates[0].index("--update-labels") + 1] == "commit-sha=" + "a" * 40
     )

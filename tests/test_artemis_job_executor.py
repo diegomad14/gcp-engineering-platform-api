@@ -21,59 +21,114 @@ engine = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(engine)
 
 
-def test_job_deploy_snapshots_before_mutation_and_does_not_execute(monkeypatch):
+@pytest.fixture
+def job_runtime(monkeypatch):
+    import yaml
+
     events = []
-    state = {"definition": "before", "image": "repo/old@sha256:old"}
-    monkeypatch.setenv("CGM_SERVICE", "cgm-artemis-fnd-observation-worker")
-    monkeypatch.setenv("CGM_PROFILE", "cgm-artemis-fnd-observation-worker")
-    monkeypatch.setenv("CGM_REGION", "us-central1")
-    monkeypatch.setenv("CGM_PROJECT_ID", "cgm-assistant-prod")
-    monkeypatch.setenv("CGM_EVIDENCE_BUCKET", "evidence-bucket")
-    monkeypatch.setenv("CGM_RELEASE_SHA", "a" * 40)
+    definition = yaml.safe_dump(
+        {
+            "kind": "Job",
+            "metadata": {"name": "cgm-artemis-fnd-observation-worker"},
+            "spec": {
+                "template": {
+                    "spec": {
+                        "template": {
+                            "spec": {
+                                "containers": [
+                                    {
+                                        "image": "repo/old@sha256:old",
+                                        "args": [
+                                            "-m",
+                                            "cgm_sanplat_param.worker",
+                                            "--type",
+                                            "fnd-observation",
+                                        ],
+                                        "env": [],
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            },
+        }
+    )
+    state = {"definition": definition, "image": "repo/old@sha256:old"}
+    for key, value in {
+        "CGM_SERVICE": "cgm-artemis-fnd-observation-worker",
+        "CGM_PROFILE": "cgm-artemis-fnd-observation-worker",
+        "CGM_REGION": "us-central1",
+        "CGM_PROJECT_ID": "cgm-assistant-prod",
+        "CGM_RELEASE_SHA": "a" * 40,
+    }.items():
+        monkeypatch.setenv(key, value)
     monkeypatch.setattr(engine, "_job_definition", lambda: state["definition"])
-    monkeypatch.setattr(engine, "_job_operational_spec", lambda definition: definition)
+    monkeypatch.setattr(engine, "_job_operational_spec", lambda value: value)
     monkeypatch.setattr(engine, "_job_image", lambda: state["image"])
-    monkeypatch.setattr(engine, "emit", lambda *args, **kwargs: events.append(args))
+    monkeypatch.setattr(engine, "emit", lambda *a, **kw: events.append(a))
     monkeypatch.setattr(
         engine,
         "_save_job_definition",
         lambda value: events.append(("snapshot", value)) or "job-" + "a" * 64,
     )
+    monkeypatch.setattr(
+        engine, "pause_job_schedules", lambda: events.append(("pause",)) or ["enabled"]
+    )
+    monkeypatch.setattr(
+        engine, "resume_job_schedules", lambda names: events.append(("resume", names))
+    )
+    monkeypatch.setattr(
+        engine, "runtime_grant", lambda *args: events.append(("grant", *args))
+    )
+    monkeypatch.setattr(engine, "check_job_runtime", lambda: events.append(("check",)))
+    monkeypatch.setattr(
+        engine, "_replace_job", lambda value: state.update(definition=value)
+    )
 
-    def fake_run(*args, **kwargs):
+    def run(*args, **kwargs):
         events.append(args)
-        if args[:4] == ("gcloud", "run", "jobs", "update"):
-            state.update(definition="after", image="repo/new@sha256:new")
+        state.update(image="repo/new@sha256:new")
         return ""
 
-    monkeypatch.setattr(engine, "run", fake_run)
+    monkeypatch.setattr(engine, "run", run)
+    return events, state
+
+
+def test_job_deploy_snapshots_and_checks_before_enabling_business(job_runtime):
+    events, state = job_runtime
+    before = state["definition"]
     result = engine.deploy_job("repo/new@sha256:new")
     assert result["production_revision"] == "job-" + "a" * 64
-    assert events.index(("snapshot", "before")) < next(
-        index
-        for index, event in enumerate(events)
-        if event[:4] == ("gcloud", "run", "jobs", "update")
+    updates = [
+        event for event in events if event[:4] == ("gcloud", "run", "jobs", "update")
+    ]
+    assert events.index(("snapshot", before)) < events.index(updates[0])
+    assert "--check-runtime" in next(
+        arg for arg in updates[0] if arg.startswith("--args=")
     )
-    assert not any("execute" in event for event in events)
+    assert (
+        "APP_RUNTIME_CHECK_ONLY=true"
+        in updates[0][updates[0].index("--update-env-vars") + 1]
+    )
+    assert events.index(("check",)) < events.index(updates[1])
+    assert "APP_RUNTIME_CHECK_ONLY=false" in updates[1]
+    assert events[-1] == ("resume", ["enabled"])
 
 
-def test_job_deploy_restores_definition_on_update_failure(monkeypatch):
-    monkeypatch.setenv("CGM_PROFILE", "cgm-artemis-fnd-observation-worker")
-    restored = []
-    monkeypatch.setattr(engine, "_job_definition", lambda: "before")
-    monkeypatch.setattr(engine, "_job_operational_spec", lambda definition: definition)
-    monkeypatch.setattr(engine, "_job_image", lambda: "repo/old@sha256:old")
-    monkeypatch.setattr(engine, "_save_job_definition", lambda value: "job-" + "a" * 64)
-    monkeypatch.setattr(engine, "_replace_job", restored.append)
-    monkeypatch.setattr(engine, "emit", lambda *args, **kwargs: None)
+def test_job_deploy_restores_definition_on_check_failure(monkeypatch, job_runtime):
+    events, state = job_runtime
+    before = state["definition"]
     monkeypatch.setattr(
         engine,
-        "run",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("update failed")),
+        "check_job_runtime",
+        lambda: (_ for _ in ()).throw(RuntimeError("check failed")),
     )
-    with pytest.raises(engine.AutomaticRollback):
+    with pytest.raises(engine.AutomaticRollback, match="check failed"):
         engine.deploy_job("repo/new@sha256:new")
-    assert restored == ["before"]
+    assert state["definition"] == before
+    assert ("grant", "revoke", "a" * 40) in events
+    assert events[-1] == ("resume", ["enabled"])
 
 
 def test_job_snapshot_identity_is_content_addressed(monkeypatch):
@@ -198,7 +253,7 @@ def test_artemis_worker_profiles_pin_one_task_type(monkeypatch, service, worker_
     monkeypatch.setenv("CGM_RELEASE_SHA", "a" * 40)
     assert engine.candidate_env_args() == [
         "--update-env-vars",
-        f"APP_RELEASE_SHA={'a' * 40},ARTEMIS_WORKER_TYPE={worker_type}",
+        f"APP_RELEASE_SHA={'a' * 40},APP_RELEASE_SCOPE=runtime-v1,APP_RELEASE_RESOURCE={service},ARTEMIS_WORKER_TYPE={worker_type}",
     ]
 
 
@@ -217,7 +272,7 @@ def test_artemis_api_candidate_disables_embedded_background_workers(monkeypatch)
     monkeypatch.setenv("CGM_RELEASE_SHA", "a" * 40)
     assert engine.candidate_env_args() == [
         "--update-env-vars",
-        f"APP_RELEASE_SHA={'a' * 40},APP_BACKGROUND_TASKS_ENABLED=false",
+        f"APP_RELEASE_SHA={'a' * 40},APP_RELEASE_SCOPE=runtime-v1,APP_RELEASE_RESOURCE=cgm-artemis-api,APP_BACKGROUND_TASKS_ENABLED=false",
     ]
 
 

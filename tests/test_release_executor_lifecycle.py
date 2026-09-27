@@ -155,8 +155,12 @@ def test_api_derived_candidates_bind_release_sha_in_runtime(
     _environment(monkeypatch, profile)
     monkeypatch.setenv("CGM_RELEASE_SHA", "a" * 40)
     expected = "APP_RELEASE_SHA=" + "a" * 40
+    if profile.startswith("cgm-artemis-"):
+        expected += f",APP_RELEASE_SCOPE=runtime-v1,APP_RELEASE_RESOURCE={profile}"
     if profile == "cgm-artemis-api":
         expected += ",APP_BACKGROUND_TASKS_ENABLED=false"
+    if profile == "cgm-artemis-wm-sweep-worker":
+        expected += ",APP_RUNTIME_CHECK_ONLY=true,ARTEMIS_WORKER_TYPE=wm-sweep"
     assert engine.candidate_env_args() == ["--update-env-vars", expected]
 
 

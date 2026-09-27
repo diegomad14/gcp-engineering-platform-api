@@ -343,6 +343,34 @@ def _healthy(url: str, health_path: str) -> bool:
         return False
 
 
+def _runtime_healthy(url: str, service: CatalogService, sha: str) -> bool:
+    if service.deployment.executor != "cloud_build":
+        return _healthy(url, service.deployment.health_path)
+    try:
+        headers = {}
+        if service.deployment.private_runtime:
+            from google.auth.transport.requests import Request
+            from google.oauth2 import id_token
+
+            headers["Authorization"] = "Bearer " + id_token.fetch_id_token(
+                Request(), url
+            )
+        request = urllib.request.Request(url.rstrip("/") + "/ready", headers=headers)
+        with urllib.request.urlopen(request, timeout=20) as response:
+            payload = json.load(response)
+            return response.status == 200 and all(
+                (
+                    payload.get("status") == "ready",
+                    payload.get("reason") == "active",
+                    payload.get("resource") == service.service_name,
+                    payload.get("scope") == "runtime-v1",
+                    payload.get("release_sha") == sha,
+                )
+            )
+    except Exception:
+        return False
+
+
 def _record_build_timing(deployment_id: str, build: dict[str, Any]) -> None:
     """Account one completed deployment build, including retries and queueing."""
     started = str(build.get("startTime", ""))
@@ -428,9 +456,7 @@ def _reconcile(item: DeploymentItem, build: dict[str, Any]) -> None:
             else f"{item.service_name}-ep-{fingerprint(item, service)[:10]}"
         )
         runtime_url = runtime.get("uri", "")
-        if hundred == expected and _healthy(
-            runtime_url, service.deployment.health_path
-        ):
+        if hundred == expected and _runtime_healthy(runtime_url, service, item.sha):
             item.production_revision = expected
             item.production_url = runtime_url
             item.status = "ROLLED_BACK" if item.kind == "rollback" else "SUCCEEDED"

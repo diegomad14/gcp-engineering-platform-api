@@ -427,6 +427,10 @@ def test_deployment_overview_aggregates_services(client):
         return_value=SimpleNamespace(
             status="healthy",
             latest_ready_revision="eng-platform-api-00010-abc",
+            serving_revision="eng-platform-api-00009-abc",
+            runtime_sha="a" * 40,
+            last_job_execution="",
+            last_job_execution_status="",
         ),
     ):
         response = client.get("/api/deployments/overview")
@@ -1606,3 +1610,15 @@ def test_rollback_dispatch_error_store_save_failure_is_github_unavailable(client
         )
     assert response.status_code == 502
     assert response.json()["detail"] == "GitHub unavailable"
+
+
+def test_verified_external_event_is_not_reinterpreted_as_a_github_attempt(monkeypatch):
+    from eng_platform_api.routers import deployments
+
+    item = _succeeded_deployment().model_copy(update={"origin": "external_verified"})
+    monkeypatch.setattr(
+        deployments.github_deployments,
+        "refresh",
+        lambda *args: pytest.fail("external event was reinterpreted"),
+    )
+    assert deployments._refresh(item) is item
