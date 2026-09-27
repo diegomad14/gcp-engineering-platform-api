@@ -14,6 +14,7 @@ from google.auth.transport.requests import AuthorizedSession
 from ..config import config
 from ..models import CatalogService, DeploymentItem
 from . import deployment_executions
+from .cloud_build_policy import economy_options, validate_submission
 from .release_profiles import profile_for
 from .repository_identity import aliases
 
@@ -138,14 +139,12 @@ def build_request(item: DeploymentItem, service: CatalogService) -> dict[str, An
             }
         ],
         "timeout": f"{profile.timeout_seconds}s",
-        "options": {
-            "machineType": "E2_STANDARD_2",
-            "logging": "CLOUD_LOGGING_ONLY",
+        "options": economy_options(
             # Identity fields intentionally remain recorded as substitutions
             # even when the executor receives their already-validated values
             # through env. Reconciliation verifies those immutable fields.
-            "substitutionOption": "ALLOW_LOOSE",
-        },
+            substitutionOption="ALLOW_LOOSE",
+        ),
         "serviceAccount": config.cloud_build.service_account,
         "substitutions": substitutions,
         "tags": ["eng-platform", "economy", f"deployment-{item.id}"],
@@ -222,6 +221,7 @@ def submit(
 ) -> DeploymentItem:
     """Submit once.  Any uncertain response is recoverable by fingerprint."""
     request = build_request(item, service)
+    validate_submission(request)
     request_fingerprint = request["substitutions"]["_REQUEST_FINGERPRINT"]
     existing = deployment_executions.reserve(
         item.id,

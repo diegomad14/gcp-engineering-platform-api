@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..config import config
 from ..security import require_deployer
 from ..services import (
+    cloud_build_usage,
     deployment_commands,
     release_executions,
     release_orchestrator,
@@ -41,6 +42,8 @@ def reconcile_due(authorization: str | None = Header(default=None)):
         _bearer(authorization),
         expected_identity=config.release_orchestrator.reconciler_service_account,
     )
+    # Accounting runs even if the functional execution query later fails.
+    usage = cloud_build_usage.reconcile()
     results = []
     for execution in release_executions.list_due(limit=100):
         execution_id = str(execution["execution_id"])
@@ -63,7 +66,12 @@ def reconcile_due(authorization: str | None = Header(default=None)):
         deployments = deployment_commands.reconcile_stalled_dispatches()
     except Exception as exc:
         deployments = {"reconciled": 0, "items": [], "error": str(exc)[:200]}
-    return {"reconciled": len(results), "items": results, "deployments": deployments}
+    return {
+        "reconciled": len(results),
+        "items": results,
+        "deployments": deployments,
+        "usage": usage,
+    }
 
 
 @router.post("/canaries/{execution_id}/approve", include_in_schema=False)

@@ -90,6 +90,7 @@ class CloudBuildConfig:
     enabled_services: tuple[str, ...] = ()
     cloud_build_only_services: tuple[str, ...] = ()
     deploy_dispatch_timeout_seconds: int = 90
+    usage_enabled: bool = False
 
 
 @dataclass
@@ -265,6 +266,10 @@ def load_config() -> PlatformConfig:
         == "true",
         mode=os.getenv("ENG_PLATFORM_DEPLOY_EXECUTOR_MODE", "auto").strip(),
         project_id=os.getenv("ENG_PLATFORM_CLOUD_BUILD_PROJECT_ID", "").strip(),
+        usage_enabled=os.getenv(
+            "ENG_PLATFORM_CLOUD_BUILD_USAGE_ENABLED", "false"
+        ).lower()
+        == "true",
         region=os.getenv("ENG_PLATFORM_CLOUD_BUILD_REGION", "us-central1").strip(),
         service_account=os.getenv(
             "ENG_PLATFORM_CLOUD_BUILD_SERVICE_ACCOUNT", ""

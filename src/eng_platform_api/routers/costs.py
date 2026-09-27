@@ -9,7 +9,7 @@ from fastapi import APIRouter, Query
 
 from ..config import config
 from ..models import CloudBuildUsage, CostSummary, DailyCostSeries
-from ..services import release_executions
+from ..services import cloud_build_usage
 from ..services import gcp_billing_bigquery as billing
 
 router = APIRouter(prefix="/api/costs", tags=["costs"])
@@ -54,14 +54,13 @@ def get_cost_summary(
     return summary.model_copy(update={"cloud_build": _cloud_build_usage()})
 
 
-def _cloud_build_usage() -> CloudBuildUsage:
-    """Attach the exact Cloud Build usage the platform already meters."""
+def _cloud_build_usage() -> CloudBuildUsage | None:
+    """Read the collector snapshot; never make provider calls from a UI poll."""
+    if not config.cloud_build.usage_enabled:
+        return None
     month = datetime.now(timezone.utc).strftime("%Y-%m")
-    try:
-        usage = release_executions.monthly_cloud_build_usage(month)
-    except Exception:
-        return CloudBuildUsage(month=month)
-    return CloudBuildUsage.model_validate(usage)
+    usage = cloud_build_usage.summary(month)
+    return CloudBuildUsage.model_validate(usage) if usage else None
 
 
 @router.get("/by-service", response_model=CostSummary)

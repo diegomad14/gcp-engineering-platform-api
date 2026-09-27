@@ -31,6 +31,7 @@ def test_scheduler_reconciliation_uses_dedicated_identity(monkeypatch):
         "reconciled": 0,
         "items": [],
         "deployments": {"reconciled": 0, "items": []},
+        "usage": {"skipped": True},
     }
     assert observed == {
         "token": "scheduler-token",

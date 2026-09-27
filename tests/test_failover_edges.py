@@ -140,6 +140,11 @@ def test_billing_preflight_reports_inconclusive(monkeypatch, caplog):
 
 
 def test_cost_summary_exposes_cloud_build_usage(monkeypatch):
+    monkeypatch.setattr(config.cloud_build, "usage_enabled", True)
+    monkeypatch.setattr(
+        "eng_platform_api.routers.costs.cloud_build_usage.summary",
+        lambda month: {"month": month, "project_minutes": 663.032},
+    )
     period = CostPeriod(start="2026-09-01", end="2026-09-30", days=30)
     monkeypatch.setattr(
         "eng_platform_api.routers.costs.billing.get_cost_summary",

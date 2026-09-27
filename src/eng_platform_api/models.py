@@ -471,7 +471,24 @@ class CloudBuildUsage(BaseModel):
     release_minutes: float = 0.0
     deployment_minutes: float = 0.0
     total_minutes: float = 0.0
+    project_id: str = ""
+    other_minutes: float = 0.0
+    project_minutes: float = 0.0
     estimated_cost_usd: float = 0.0
+    project_estimated_cost_usd: float = 0.0
+    billed_cost_usd: float | None = None
+    billed_credits_usd: float | None = None
+    billed_net_cost_usd: float | None = None
+    billing_exported_at: str | None = None
+    billing_updated_at: str | None = None
+    updated_at: str | None = None
+    data_status: str = "partial"
+    billing_data_status: str = "unavailable"
+    build_count: int = 0
+    pending_build_count: int = 0
+    policy_violation_count: int = 0
+    unpriced_build_count: int = 0
+    alert_scope: str = "project"
     minute_price_usd: float = 0.0
     alert_thresholds: list[int] = Field(default_factory=list)
     alert_thresholds_reached: list[int] = Field(default_factory=list)

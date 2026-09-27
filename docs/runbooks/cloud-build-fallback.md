@@ -20,19 +20,20 @@ python scripts/ops/cloud-build-fallback/prepare.py \
   --source /path/to/cgm-sanplat-api \
   --service cgm-sanplat-api \
   --sha FULL_RELEASE_SHA --base-sha FULL_BASE_SHA \
-  --profile performance \
+  --profile economy \
   --evidence-uri gs://cgm-sanplat-data/corporate-release/fallback \
   --install-command 'python -m pip install --no-build-isolation -e ".[dev,sqlserver,postgresql]" "ruff==0.15.22"' \
-  --output /path/to/evidence/performance
+  --output /path/to/evidence/economy
 
 python scripts/ops/cloud-build-fallback/control.py submit \
-  --build-dir /path/to/evidence/performance \
-  --state-file /path/to/evidence/performance.state.json \
-  --experiment /path/to/evidence/experiment.json --slot performance
+  --build-dir /path/to/evidence/economy \
+  --state-file /path/to/evidence/economy.state.json \
+  --experiment /path/to/evidence/experiment.json --slot economy
 ```
 
-`performance` uses the existing default-pool `E2_HIGHCPU_8` with four pytest
-workers. `economy` uses default-pool `E2_STANDARD_2` with two workers. Both use
+`economy` is the only preparation profile: standard default pool, omitted
+`machineType`, two pytest workers. New submissions reject every explicit machine,
+private pool and extra disk, including previously prepared manifests. It uses
 `worksteal`, the same SHA/base, pinned tooling, complete suite and merged coverage.
 Historical timings balance the initial contiguous worksteal blocks. Each worker
 starts a different long case. This only permutes collected tests: it never skips
@@ -60,8 +61,8 @@ attempt. If the client disconnects, run `status` with the same prepared director
 and state file. Never delete state to retry. An uncertain submission searches
 Cloud Build for the exact request fingerprint and never resubmits automatically.
 
-The optional experiment ledger permits one `performance`, one `economy` and one
-`confirmation` attempt; failed or uncertain submissions consume their slot.
+The optional experiment ledger retains historical `performance` slots for audit.
+New preparations use `economy`; failed or uncertain submissions consume their slot.
 Confirmation requires a fresh preparation of the same SHA/base. The ledger and
 all state files must remain outside the immutable input directory.
 
@@ -86,8 +87,8 @@ secure credential flow, then run:
 
 ```bash
 python scripts/ops/cloud-build-fallback/control.py register-quality \
-  --build-dir /path/to/evidence/performance \
-  --state-file /path/to/evidence/performance.state.json \
+  --build-dir /path/to/evidence/economy \
+  --state-file /path/to/evidence/economy.state.json \
   --quality-api-url https://eng-platform-api-pzzhmu7una-uc.a.run.app
 ```
 
@@ -95,7 +96,11 @@ This verifies successful build identity, the uploaded report hash and canonical
 policy, and registers the report idempotently. It does not repeat the suite or
 promote the release. Do not include credentials in CLI arguments or evidence.
 
-## Measure cost and select a profile
+## Historical cost comparison (not a current machine selection procedure)
+
+The following rates, experiments and HIGHCPU references are historical evidence.
+They do not authorize new submissions. Current policy is documented in
+[Cloud Build metering](cloud-build-metering.md); billing must confirm actual savings.
 
 Reference: SanPlat WM SHA `d262a099f3305433f881b1da0a3c8325ec69a3b4`, base
 `0d512eb38b68245ce919fb1d35f9b724ce771866`, Cloud Build

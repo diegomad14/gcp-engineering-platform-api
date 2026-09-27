@@ -25,6 +25,28 @@ REPOSITORY_RESOURCE = (
 )
 
 
+def test_submit_rejects_machine_override_before_claim_or_post(monkeypatch):
+    execution = _execution()
+    monkeypatch.setattr(cloud_build.release_executions, "get", lambda _: execution)
+    monkeypatch.setattr(cloud_build, "_matching_build", lambda _: None)
+    monkeypatch.setattr(
+        cloud_build,
+        "build_request",
+        lambda *_: {
+            "timeout": "1800s",
+            "options": {"machineType": "E2_HIGHCPU_8", "logging": "CLOUD_LOGGING_ONLY"},
+        },
+    )
+    claim = mock.Mock()
+    session = mock.Mock()
+    monkeypatch.setattr(cloud_build.release_executions, "claim_submission", claim)
+    monkeypatch.setattr(cloud_build, "_session", session)
+    with pytest.raises(ValueError):
+        cloud_build.submit(execution["execution_id"], _service())
+    claim.assert_not_called()
+    session.assert_not_called()
+
+
 @dataclass
 class Response:
     status_code: int = 200
@@ -219,7 +241,6 @@ def test_pr_build_request_is_economical_fixed_and_source_pinned(configured):
         }
     }
     assert request["options"] == {
-        "machineType": "E2_STANDARD_2",
         "logging": "CLOUD_LOGGING_ONLY",
         "substitutionOption": "ALLOW_LOOSE",
     }
@@ -414,7 +435,7 @@ def test_planner_retry_reuses_passed_evidence_without_quality_steps(configured):
         "publish-release-plan",
     ]
     assert request["substitutions"]["_PLANNER_RETRY_ATTEMPT"] == "1"
-    assert request["options"]["machineType"] == "E2_STANDARD_2"
+    assert "machineType" not in request["options"]
     assert request["options"]["logging"] == "CLOUD_LOGGING_ONLY"
     assert "quality" not in {step["id"] for step in request["steps"]}
     assert "publish-quality" not in {step["id"] for step in request["steps"]}
@@ -667,7 +688,7 @@ def test_sanplat_profile_keeps_bounded_long_timeout(configured, monkeypatch):
     request = cloud_build.build_request(execution, service)
 
     assert request["timeout"] == "3600s"
-    assert request["options"]["machineType"] == "E2_STANDARD_2"
+    assert "machineType" not in request["options"]
     assert request["steps"][0]["name"] == DIGEST
 
 
@@ -876,7 +897,11 @@ def test_submit_marks_uncertain_when_transport_raises(configured, monkeypatch):
     monkeypatch.setattr(
         cloud_build.release_executions, "claim_submission", lambda _: True
     )
-    monkeypatch.setattr(cloud_build, "build_request", lambda *_: {"build": "request"})
+    monkeypatch.setattr(
+        cloud_build,
+        "build_request",
+        lambda *_: {"options": {"logging": "CLOUD_LOGGING_ONLY"}, "timeout": "1800s"},
+    )
     session = mock.Mock()
     session.post.side_effect = TimeoutError("network timeout with sensitive details")
     monkeypatch.setattr(cloud_build, "_session", lambda: session)
@@ -899,7 +924,11 @@ def test_submit_marks_terminal_failure_for_explicit_http_error(configured, monke
     monkeypatch.setattr(
         cloud_build.release_executions, "claim_submission", lambda _: True
     )
-    monkeypatch.setattr(cloud_build, "build_request", lambda *_: {})
+    monkeypatch.setattr(
+        cloud_build,
+        "build_request",
+        lambda *_: {"options": {"logging": "CLOUD_LOGGING_ONLY"}, "timeout": "1800s"},
+    )
     session = mock.Mock()
     session.post.return_value = Response(status_code=429, payload={"error": "secret"})
     monkeypatch.setattr(cloud_build, "_session", lambda: session)
@@ -922,7 +951,11 @@ def test_submit_records_google_validation_error_privately(configured, monkeypatc
     monkeypatch.setattr(
         cloud_build.release_executions, "claim_submission", lambda _: True
     )
-    monkeypatch.setattr(cloud_build, "build_request", lambda *_: {})
+    monkeypatch.setattr(
+        cloud_build,
+        "build_request",
+        lambda *_: {"options": {"logging": "CLOUD_LOGGING_ONLY"}, "timeout": "1800s"},
+    )
     session = mock.Mock()
     session.post.return_value = Response(
         status_code=400,
@@ -958,7 +991,11 @@ def test_submit_rejects_uncertain_response_identity(configured, monkeypatch, bui
     monkeypatch.setattr(
         cloud_build.release_executions, "claim_submission", lambda _: True
     )
-    monkeypatch.setattr(cloud_build, "build_request", lambda *_: {})
+    monkeypatch.setattr(
+        cloud_build,
+        "build_request",
+        lambda *_: {"options": {"logging": "CLOUD_LOGGING_ONLY"}, "timeout": "1800s"},
+    )
     session = mock.Mock()
     session.post.return_value = Response(payload={"metadata": {"build": build}})
     monkeypatch.setattr(cloud_build, "_session", lambda: session)
@@ -1139,7 +1176,7 @@ def test_submit_binds_verified_operation_response(configured, monkeypatch, neste
     monkeypatch.setattr(
         cloud_build.release_executions, "claim_submission", lambda _: True
     )
-    request = {"fixed": "request"}
+    request = {"options": {"logging": "CLOUD_LOGGING_ONLY"}, "timeout": "1800s"}
     monkeypatch.setattr(cloud_build, "build_request", lambda *_: request)
     session = mock.Mock()
     session.post.return_value = Response(payload=payload)

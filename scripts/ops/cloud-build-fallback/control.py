@@ -16,6 +16,9 @@ import tempfile
 import urllib.parse
 import urllib.request
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
+from eng_platform_api.services.cloud_build_policy import validate_submission  # noqa: E402
+
 
 def read(path: Path) -> dict:
     value = json.loads(path.read_text())
@@ -208,6 +211,7 @@ def operate(
             return build
         if not submit:
             raise ValueError("No saved submission; inspect the correct state file")
+        validate_submission(read(directory / "cloudbuild.json"))
         reserve(experiment, slot, request, state_file)
         state = {
             "status": "SUBMISSION_PENDING",
