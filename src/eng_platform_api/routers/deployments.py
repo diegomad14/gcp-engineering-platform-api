@@ -263,6 +263,10 @@ def _overview_item(
         service_name=service.service_name,
         status=detail.status if detail else "degraded",
         latest_ready_revision=detail.latest_ready_revision if detail else "",
+        serving_revision=detail.serving_revision if detail else "",
+        runtime_sha=detail.runtime_sha if detail else "",
+        last_job_execution=detail.last_job_execution if detail else "",
+        last_job_execution_status=detail.last_job_execution_status if detail else "",
         deployment_ready=service.deployment_ready,
         deployment_blockers=service.deployment_blockers,
         last_deployment=last_deployment,
@@ -318,6 +322,8 @@ def get_deployment(deployment_id: str):
 
 
 def _refresh(item: DeploymentItem) -> DeploymentItem:
+    if item.origin == "external_verified":
+        return item
     execution = deployment_executions.get(item.id)
     if execution and execution.get("provider") == "cloud_build":
         refreshed = cloud_build.refresh(item)

@@ -8,6 +8,7 @@ Sources:
 
 import json
 import pathlib
+import re
 from functools import lru_cache
 from threading import Lock
 from time import monotonic
@@ -58,12 +59,43 @@ def deployment_blockers(service: CatalogService) -> list[str]:
         ("repository", service.repository),
         ("project_id", service.project_id),
         ("region", service.region),
-        ("deployment.workflow_file", deployment.workflow_file),
         ("deployment.image_name", deployment.image_name),
         ("deployment.artifact_repository", deployment.artifact_repository),
         ("deployment.build_context", deployment.build_context),
         ("deployment.dockerfile_path", deployment.dockerfile_path),
     ]
+    if deployment.executor != "cloud_build":
+        required_fields.append(("deployment.workflow_file", deployment.workflow_file))
+    else:
+        from .release_profiles import profile_for
+
+        build = config.cloud_build
+        if not build.enabled:
+            blockers.append("Cloud Build executor is disabled")
+        if service.service_name not in build.enabled_services:
+            blockers.append("Cloud Build executor is not enabled for this resource")
+        for name in (
+            "project_id",
+            "region",
+            "service_account",
+            "evidence_bucket",
+            "callback_service_account",
+        ):
+            if not getattr(build, name):
+                blockers.append(f"Cloud Build {name} is required")
+        if not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", build.executor_image):
+            blockers.append("Cloud Build executor image must be pinned by digest")
+        repository = build.repositories.get(service.service_name, "")
+        if (
+            not repository.startswith("projects/")
+            or "/connections/" not in repository
+            or "/repositories/" not in repository
+        ):
+            blockers.append("Cloud Build connected repository is missing or invalid")
+        try:
+            profile_for(service)
+        except ValueError as exc:
+            blockers.append(str(exc))
     if deployment.runtime_kind == "cloud_run_service":
         required_fields.append(("deployment.health_path", deployment.health_path))
     if not deployment.enabled:
@@ -186,17 +218,29 @@ def get_service_detail(service_name: str) -> Optional[ServiceDetail]:
             ready = _is_ready(live_job) and not bool(live_job.reconciling)
             latest = getattr(live_job, "latest_created_execution", None)
             completion = getattr(getattr(latest, "completion_status", None), "name", "")
-            detail.status = (
-                "healthy"
-                if ready
-                and completion not in {"EXECUTION_FAILED", "EXECUTION_CANCELLED"}
-                else "degraded"
-            )
+            detail.status = "healthy" if ready else "degraded"
+            detail.last_job_execution = getattr(latest, "name", "") or ""
+            detail.last_job_execution_status = completion
             detail.latest_ready_revision = (
                 f"job-generation-{live_job.generation}" if ready else ""
             )
-            if detail.status != "healthy":
-                detail.error = "Cloud Run Job is not Ready or its last execution failed"
+            detail.serving_revision = detail.latest_ready_revision
+            containers = getattr(
+                getattr(getattr(live_job, "template", None), "template", None),
+                "containers",
+                [],
+            )
+            if containers:
+                detail.runtime_sha = next(
+                    (
+                        item.value
+                        for item in containers[0].env
+                        if item.name == "APP_RELEASE_SHA"
+                    ),
+                    "",
+                )
+            if not ready:
+                detail.error = "Cloud Run Job definition is not Ready"
             with _detail_cache_lock:
                 _detail_cache[service_name] = (monotonic(), detail)
             return detail
@@ -223,6 +267,26 @@ def get_service_detail(service_name: str) -> Optional[ServiceDetail]:
             )
             for target in traffic
         ]
+        serving = sorted(
+            (target for target in detail.traffic if target.percent),
+            key=lambda target: -target.percent,
+        )
+        if serving:
+            detail.serving_revision = serving[0].revision.split("/")[-1]
+            revision = run_v2.RevisionsClient().get_revision(
+                name=(
+                    f"projects/{service.project_id}/locations/{service.region}/services/"
+                    f"{service.service_name}/revisions/{detail.serving_revision}"
+                )
+            )
+            detail.runtime_sha = next(
+                (
+                    item.value
+                    for item in revision.containers[0].env
+                    if item.name == "APP_RELEASE_SHA"
+                ),
+                "",
+            )
         if detail.status != "healthy":
             detail.error = "Cloud Run service is not Ready"
     except Exception as exc:

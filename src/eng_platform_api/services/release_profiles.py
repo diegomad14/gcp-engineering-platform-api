@@ -102,6 +102,7 @@ _ARTEMIS_SERVICES = (
     "cgm-artemis-clock-sync-worker",
     "cgm-artemis-data-recovery-worker",
     "cgm-artemis-fnd-ip-sync-worker",
+    "cgm-artemis-mcp-worker",
 )
 _ARTEMIS_JOBS = (
     "cgm-artemis-fnd-observation-worker",
@@ -114,6 +115,7 @@ _ARTEMIS_TASK_WORKERS = {
     "cgm-artemis-clock-sync-worker": "clock-sync",
     "cgm-artemis-data-recovery-worker": "data-recovery",
     "cgm-artemis-fnd-ip-sync-worker": "fnd-ip-sync",
+    "cgm-artemis-mcp-worker": "mcp-parameterization",
 }
 _ARTEMIS_DISPATCHER_ENV = (
     ("JOB_WORKER_PREFIX", "cgm-artemis"),
@@ -144,14 +146,15 @@ for _name in _ARTEMIS_SERVICES:
         _name,
         3600,
         build_args=(("APP_VERSION", "{tag}"),) if _name == "cgm-artemis-web" else (),
-        # The corporate activation window is an operator gate: the candidate is
-        # deployed and smoked first, then the hook verifies the active window
-        # before any traffic is promoted.
-        pre_promote_hooks=(
-            ("corporate_window_artemis",) if _name == "cgm-artemis-api" else ()
-        ),
+        # Runtime activation and API/web compatibility are enforced centrally.
         candidate_env_vars=(
-            (("APP_RELEASE_SHA", "{sha}"),) if _name != "cgm-artemis-web" else ()
+            (
+                ("APP_RELEASE_SHA", "{sha}"),
+                ("APP_RELEASE_SCOPE", "runtime-v1"),
+                ("APP_RELEASE_RESOURCE", _name),
+            )
+            if _name != "cgm-artemis-web"
+            else ()
         )
         + (
             (("APP_BACKGROUND_TASKS_ENABLED", "false"),)
@@ -170,7 +173,16 @@ for _name in _ARTEMIS_JOBS:
     _PROFILES[_name] = ReleaseProfile(
         _name,
         3600,
-        candidate_env_vars=(("APP_RELEASE_SHA", "{sha}"),),
+        candidate_env_vars=(
+            ("APP_RELEASE_SHA", "{sha}"),
+            ("APP_RELEASE_SCOPE", "runtime-v1"),
+            ("APP_RELEASE_RESOURCE", _name),
+            ("APP_RUNTIME_CHECK_ONLY", "true"),
+            (
+                "ARTEMIS_WORKER_TYPE",
+                _name.removeprefix("cgm-artemis-").removesuffix("-worker"),
+            ),
+        ),
         rollback_mode="job_definition",
     )
 

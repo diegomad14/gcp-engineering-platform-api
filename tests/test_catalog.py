@@ -14,8 +14,8 @@ def test_list_services():
     response = client.get("/api/catalog/services")
     assert response.status_code == 200
     data = response.json()
-    assert data["total"] == 18
-    assert len(data["services"]) == 18
+    assert data["total"] == 19
+    assert len(data["services"]) == 19
     assert all("display_name" not in service for service in data["services"])
     names = {service["service_name"] for service in data["services"]}
     assert {"cgm-sanplat-api", "cgm-sanplat-web", "eng-platform-api"} <= names
@@ -24,14 +24,17 @@ def test_list_services():
         for service in data["services"]
         if service["service_name"].startswith("cgm-artemis-")
     ]
-    assert len(artemis) == 12
+    assert len(artemis) == 13
     ready = {
         service["service_name"] for service in artemis if service["deployment_ready"]
     }
-    # Every Artemis runtime now exists (services and Jobs), so all twelve are
-    # deployable through the governed path. Triggers stay paused until cutover.
-    assert ready == {service["service_name"] for service in artemis}
-    assert all(not service["deployment_blockers"] for service in artemis)
+    # Backend deployment is blocked until Cloud Build routing is configured.
+    assert ready == {"cgm-artemis-web"}
+    assert all(
+        service["deployment_blockers"]
+        for service in artemis
+        if service["service_name"] != "cgm-artemis-web"
+    )
     assert all(
         service["repository"].startswith("diegomad14/cgm-artemis-")
         for service in artemis

@@ -24,7 +24,8 @@
         "artifact_repository": "cgm-artemis-repo",
         "build_context": ".",
         "dockerfile_path": "Dockerfile",
-        "health_path": "/health"
+        "health_path": "/ready",
+        "executor": "cloud_build"
       },
       "finops": {
         "service": "cgm-artemis-api",
@@ -56,7 +57,8 @@
         "artifact_repository": "cgm-artemis-repo",
         "build_context": ".",
         "dockerfile_path": "Dockerfile",
-        "health_path": "/ready"
+        "health_path": "/ready",
+        "executor": "cloud_build"
       },
       "finops": {
         "service": "cgm-artemis-job-dispatcher",
@@ -88,7 +90,8 @@
         "artifact_repository": "cgm-artemis-repo",
         "build_context": ".",
         "dockerfile_path": "Dockerfile",
-        "health_path": "/ready"
+        "health_path": "/ready",
+        "executor": "cloud_build"
       },
       "finops": {
         "service": "cgm-artemis-job-worker",
@@ -120,7 +123,8 @@
         "artifact_repository": "cgm-artemis-repo",
         "build_context": ".",
         "dockerfile_path": "Dockerfile",
-        "health_path": "/ready"
+        "health_path": "/ready",
+        "executor": "cloud_build"
       },
       "finops": {
         "service": "cgm-artemis-sync-worker",
@@ -152,7 +156,8 @@
         "artifact_repository": "cgm-artemis-repo",
         "build_context": ".",
         "dockerfile_path": "Dockerfile",
-        "health_path": "/ready"
+        "health_path": "/ready",
+        "executor": "cloud_build"
       },
       "finops": {
         "service": "cgm-artemis-clock-sync-worker",
@@ -184,7 +189,8 @@
         "artifact_repository": "cgm-artemis-repo",
         "build_context": ".",
         "dockerfile_path": "Dockerfile",
-        "health_path": "/ready"
+        "health_path": "/ready",
+        "executor": "cloud_build"
       },
       "finops": {
         "service": "cgm-artemis-data-recovery-worker",
@@ -216,7 +222,8 @@
         "artifact_repository": "cgm-artemis-repo",
         "build_context": ".",
         "dockerfile_path": "Dockerfile",
-        "health_path": "/ready"
+        "health_path": "/ready",
+        "executor": "cloud_build"
       },
       "finops": {
         "service": "cgm-artemis-fnd-ip-sync-worker",
@@ -248,7 +255,8 @@
         "artifact_repository": "cgm-artemis-repo",
         "build_context": ".",
         "dockerfile_path": "Dockerfile",
-        "health_path": ""
+        "health_path": "",
+        "executor": "cloud_build"
       },
       "finops": {
         "service": "cgm-artemis-fnd-observation-worker",
@@ -280,7 +288,8 @@
         "artifact_repository": "cgm-artemis-repo",
         "build_context": ".",
         "dockerfile_path": "Dockerfile",
-        "health_path": ""
+        "health_path": "",
+        "executor": "cloud_build"
       },
       "finops": {
         "service": "cgm-artemis-readings-export-worker",
@@ -312,7 +321,8 @@
         "artifact_repository": "cgm-artemis-repo",
         "build_context": ".",
         "dockerfile_path": "Dockerfile",
-        "health_path": ""
+        "health_path": "",
+        "executor": "cloud_build"
       },
       "finops": {
         "service": "cgm-artemis-smarti-prevention-worker",
@@ -344,7 +354,8 @@
         "artifact_repository": "cgm-artemis-repo",
         "build_context": ".",
         "dockerfile_path": "Dockerfile",
-        "health_path": ""
+        "health_path": "",
+        "executor": "cloud_build"
       },
       "finops": {
         "service": "cgm-artemis-wm-sweep-worker",
@@ -389,10 +400,34 @@
     {
       "service_name": "cgm-sanplat-api",
       "operational_secrets": [
-        {"key": "WM_BASE_URL", "secret_id": "wm-base-url", "description": "URL HTTPS de WM", "required": true, "editable": true},
-        {"key": "WM_USERNAME", "secret_id": "wm-username", "description": "Usuario de WM", "required": true, "editable": true},
-        {"key": "WM_PASSWORD", "secret_id": "wm-password", "description": "Contraseña de WM", "required": true, "editable": true},
-        {"key": "WM_API_KEY", "secret_id": "wm-api-key", "description": "API key opcional de WM", "required": false, "editable": true}
+        {
+          "key": "WM_BASE_URL",
+          "secret_id": "wm-base-url",
+          "description": "URL HTTPS de WM",
+          "required": true,
+          "editable": true
+        },
+        {
+          "key": "WM_USERNAME",
+          "secret_id": "wm-username",
+          "description": "Usuario de WM",
+          "required": true,
+          "editable": true
+        },
+        {
+          "key": "WM_PASSWORD",
+          "secret_id": "wm-password",
+          "description": "Contrase\u00f1a de WM",
+          "required": true,
+          "editable": true
+        },
+        {
+          "key": "WM_API_KEY",
+          "secret_id": "wm-api-key",
+          "description": "API key opcional de WM",
+          "required": false,
+          "editable": true
+        }
       ],
       "repository": "diegomad14/cgm-sanplat-api",
       "owner": "cgm",
@@ -605,6 +640,39 @@
         "env": "prod",
         "owner": "platform",
         "cost_center": "platform"
+      }
+    },
+    {
+      "service_name": "cgm-artemis-mcp-worker",
+      "repository": "diegomad14/cgm-artemis-api",
+      "owner": "cgm",
+      "cost_center": "cgm",
+      "project_id": "cgm-assistant-prod",
+      "region": "us-central1",
+      "environment": "prod",
+      "quality": {
+        "enabled": true,
+        "profile": "python",
+        "coverage_threshold": 70,
+        "policy_version": "oss-v2",
+        "differential_threshold": 80
+      },
+      "deployment": {
+        "enabled": true,
+        "workflow_file": "platform-deploy.yml",
+        "runtime_kind": "cloud_run_service",
+        "image_name": "cgm-artemis-api",
+        "artifact_repository": "cgm-artemis-repo",
+        "build_context": ".",
+        "dockerfile_path": "Dockerfile",
+        "health_path": "/ready",
+        "executor": "cloud_build"
+      },
+      "finops": {
+        "service": "cgm-artemis-mcp-worker",
+        "env": "prod",
+        "owner": "cgm",
+        "cost_center": "cgm"
       }
     }
   ]
