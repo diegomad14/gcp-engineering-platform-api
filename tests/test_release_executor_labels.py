@@ -51,7 +51,7 @@ def test_cloud_run_service_candidate_gets_release_sha_label(engine, monkeypatch)
                     "status": {
                         "traffic": [
                             {
-                                "tag": "candidate-ffffffffffff",
+                                "tag": "c-ffffffffffff",
                                 "url": "https://candidate.example.test",
                             }
                         ]
@@ -79,6 +79,47 @@ def test_cloud_run_service_candidate_gets_release_sha_label(engine, monkeypatch)
         "commit-sha=" + "a" * 40,
     ) == updates[0][updates[0].index("--update-labels") :][:2]
     assert "--no-traffic" in updates[0]
+
+
+@pytest.mark.parametrize(
+    "service",
+    [
+        "cgm-artemis-api",
+        "cgm-artemis-job-dispatcher",
+        "cgm-artemis-job-worker",
+        "cgm-artemis-sync-worker",
+        "cgm-artemis-clock-sync-worker",
+        "cgm-artemis-data-recovery-worker",
+        "cgm-artemis-fnd-ip-sync-worker",
+        "cgm-artemis-mcp-worker",
+    ],
+)
+def test_artemis_candidate_tag_fits_cloud_run_limit(engine, monkeypatch, service):
+    _environment(monkeypatch, service)
+    tags = []
+    revision = service + "-ep-ffffffffff"
+
+    def run(*args, **kwargs):
+        if "--update-tags" in args:
+            tag, target = args[args.index("--update-tags") + 1].split("=")
+            assert len(tag) + len(service) <= 46
+            assert target == revision
+            tags.append(tag)
+        if "--format=value(status.latestCreatedRevisionName)" in args:
+            return revision
+        if "--format=json(status.traffic)" in args:
+            return json.dumps(
+                {"status": {"traffic": [{"tag": tags[0], "url": "https://ready"}]}}
+            )
+        return ""
+
+    monkeypatch.setattr(engine, "run", run)
+    monkeypatch.setattr(engine, "emit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(engine, "candidate_env_args", lambda: [])
+    assert engine._deploy_candidate("image", service, "r", "p") == (
+        revision,
+        "https://ready",
+    )
 
 
 def test_cloud_run_job_definition_gets_release_sha_label(engine, monkeypatch):
