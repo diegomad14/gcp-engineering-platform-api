@@ -339,6 +339,11 @@ def test_billing_query_uses_same_utc_usage_window(monkeypatch):
     sql = client.query.call_args.args[0]
     assert "usage_start_time >= @start" in sql
     assert "_PARTITIONTIME" not in sql
+    client.query.return_value.result.return_value = [
+        Mock(cost=None, credits=None, export_time=None)
+    ]
+    with pytest.raises(ValueError, match="no data"):
+        original("test-project", "2026-09")
     monkeypatch.setattr(usage.billing, "_billing_table_exists", lambda: None)
     with pytest.raises(ValueError, match="unavailable"):
         original("test-project", "2026-09")

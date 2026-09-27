@@ -259,7 +259,9 @@ def query_billing(project: str, month: str) -> dict[str, Any]:
             .result()
         )
     )
-    cost, credits = float(row.cost or 0), float(row.credits or 0)
+    if row.cost is None:
+        raise ValueError("Billing export has no data for this UTC usage month")
+    cost, credits = float(row.cost), float(row.credits or 0)
     return {
         "billed_cost_usd": round(cost, 6),
         "billed_credits_usd": round(credits, 6),
