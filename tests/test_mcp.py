@@ -20,7 +20,7 @@ from eng_platform_api.mcp_server import list_services, start_deployment
 from eng_platform_api.models import DeploymentItem, ReleaseTag, ReleaseTagPage
 from eng_platform_api.routers import deployments as deployment_routes
 from eng_platform_api.services import mcp_store
-from eng_platform_api.services.mcp_auth import provider
+from eng_platform_api.services.mcp_auth import _SCOPES, provider
 
 
 @pytest.fixture(autouse=True)
@@ -150,6 +150,31 @@ def test_oauth_metadata_matches_public_pkce_dcr_contract(monkeypatch):
     assert metadata["revocation_endpoint_auth_methods_supported"] == ["none"]
     assert metadata["code_challenge_methods_supported"] == ["S256"]
     assert metadata["registration_endpoint"] == "http://testserver/register"
+    assert metadata["scopes_supported"] == sorted(_SCOPES)
+    assert "eng-platform.cost-alerts.send" in metadata["scopes_supported"]
+
+
+def test_advertised_cost_alert_scopes_can_register_without_deploy_permissions(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.mcp, "enabled", True)
+    with TestClient(app) as client:
+        metadata = client.get("/.well-known/oauth-authorization-server").json()
+        scopes = {"eng-platform.read", "eng-platform.cost-alerts.send"}
+        assert scopes.issubset(metadata["scopes_supported"])
+        response = client.post(
+            "/register",
+            json={
+                "client_name": "Cost alert contract test",
+                "redirect_uris": ["http://localhost:3333/callback"],
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "none",
+                "scope": " ".join(sorted(scopes)),
+            },
+        )
+    assert response.status_code == 201
+    assert set(response.json()["scope"].split()) == scopes
 
 
 def test_http_dcr_accepts_public_pkce_and_rejects_confidential_method(monkeypatch):
