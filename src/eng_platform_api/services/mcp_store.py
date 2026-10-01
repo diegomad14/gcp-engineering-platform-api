@@ -13,6 +13,7 @@ from ..config import config
 _memory: dict[str, dict[str, dict[str, Any]]] = {
     "client": {},
     "state": {},
+    "consent": {},
     "code": {},
     "access": {},
     "refresh": {},
@@ -75,6 +76,30 @@ def delete(kind: str, key: str) -> None:
         _memory.setdefault(kind, {}).pop(key, None)
         return
     collection.document(key).delete()
+
+
+_consent_lock = RLock()
+
+
+def consume_consent(key: str) -> dict[str, Any] | None:
+    """Consume one approved OAuth consent atomically; never issue two codes on replay."""
+    collection = _collection("consent")
+    if collection is None:
+        with _consent_lock:
+            return _memory["consent"].pop(key, None)
+    from google.cloud.firestore import transactional
+
+    document = collection.document(key)
+
+    @transactional
+    def consume(transaction):
+        snapshot = document.get(transaction=transaction)
+        if not snapshot.exists:
+            return None
+        transaction.delete(document)
+        return snapshot.to_dict()
+
+    return consume(document._client.transaction())
 
 
 def delete_access_session(session_id: str) -> None:

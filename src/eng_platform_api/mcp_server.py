@@ -16,6 +16,7 @@ from mcp.server.auth.settings import (
 )
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import CallToolResult, TextContent, Tool
 from pydantic import AnyHttpUrl
 
 from .config import config
@@ -33,8 +34,25 @@ from .services.mcp_auth import _SCOPES, provider
 _BASE_URL = config.mcp.public_base_url or "http://localhost:8000"
 _RESOURCE_URL = f"{_BASE_URL}/mcp"
 _PUBLIC_ORIGIN = urlparse(_BASE_URL)
+_COST_ALERT_SCOPES = ["eng-platform.read", "eng-platform.cost-alerts.send"]
 
-mcp = FastMCP(
+
+class _ScopedFastMCP(FastMCP):
+    async def list_tools(self) -> list[Tool]:
+        tools = await super().list_tools()
+        for index, tool in enumerate(tools):
+            if tool.name == "send_cost_alert":
+                schemes = [{"type": "oauth2", "scopes": _COST_ALERT_SCOPES}]
+                tools[index] = tool.model_copy(
+                    update={
+                        "securitySchemes": schemes,
+                        "meta": {**(tool.meta or {}), "securitySchemes": schemes},
+                    }
+                )
+        return tools
+
+
+mcp = _ScopedFastMCP(
     "eng-platform",
     instructions=(
         "Use eng-platform only for read-only release insight and authorized tagged "
@@ -397,13 +415,48 @@ def get_billing_status() -> dict[str, Any]:
     return _read("get_billing_status", {}, costs.get_billing_status)
 
 
-@mcp.tool()
 def send_cost_alert() -> dict[str, Any]:
     """Send only a server-built cost alert to the explicitly approved private Diego recipient."""
     from .services import cost_alerts
 
     return _mutate(
         "send_cost_alert", {}, "eng-platform.cost-alerts.send", cost_alerts.send
+    )
+
+
+@mcp.tool(name="send_cost_alert", structured_output=False)
+def _send_cost_alert_tool() -> CallToolResult:
+    """Send a server-built cost alert after explicit private-recipient authorization."""
+    token = get_access_token()
+    if (
+        token is None
+        or not token.subject
+        or not set(_COST_ALERT_SCOPES).issubset(token.scopes)
+    ):
+        error = (
+            "invalid_token"
+            if token is None or not token.subject
+            else "insufficient_scope"
+        )
+        challenge = (
+            f'Bearer error="{error}", error_description="Explicit cost alert authorization required", '
+            f'resource_metadata="{_BASE_URL}/.well-known/oauth-protected-resource/mcp/cost-alerts", '
+            f'scope="{" ".join(_COST_ALERT_SCOPES)}"'
+        )
+        return CallToolResult(
+            isError=True,
+            content=[
+                TextContent(
+                    type="text",
+                    text="Authorize reading costs and sending private cost alerts to continue.",
+                )
+            ],
+            _meta={"mcp/www_authenticate": [challenge]},
+        )
+    result = send_cost_alert()
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(result))],
+        structuredContent=result,
     )
 
 
