@@ -7,6 +7,7 @@ MCP clients are opaque, short-lived, scoped, and stored only by hash.
 from __future__ import annotations
 
 import time
+import secrets
 from typing import Any
 from urllib.parse import urlparse
 
@@ -171,11 +172,29 @@ class MCPAuthProvider:
             raise AuthorizeError(
                 "access_denied", "GitHub user is not allowed to access eng-platform"
             )
+        if "eng-platform.cost-alerts.send" in pending["scopes"]:
+            from .cost_alerts import OWNER_LOGIN
+
+            if login != OWNER_LOGIN:
+                raise AuthorizeError(
+                    "access_denied", "Private cost alerts belong to the approved owner"
+                )
+            consent = mcp_store.opaque_id()
+            mcp_store.save(
+                "consent",
+                mcp_store.token_key(consent),
+                {**pending, "subject": login, "expires_at": time.time() + 300},
+            )
+            return f"{config.mcp.public_base_url}/mcp/consent?consent={consent}"
+        return self._authorization_redirect({**pending, "subject": login})
+
+    @staticmethod
+    def _authorization_redirect(pending: dict[str, Any]) -> str:
         code = mcp_store.opaque_id()
         mcp_store.save(
             "code",
             mcp_store.token_key(code),
-            {**pending, "subject": login, "expires_at": time.time() + 120},
+            {**pending, "expires_at": time.time() + 120},
         )
         separator = "&" if "?" in pending["redirect_uri"] else "?"
         from urllib.parse import urlencode
@@ -183,6 +202,54 @@ class MCPAuthProvider:
         values = {"code": code}
         if pending.get("client_state") is not None:
             values["state"] = pending["client_state"]
+        return f"{pending['redirect_uri']}{separator}{urlencode(values)}"
+
+    def bind_consent_browser(self, destination: str) -> str | None:
+        from urllib.parse import parse_qs
+
+        prefix = f"{config.mcp.public_base_url}/mcp/consent?"
+        if not destination.startswith(prefix):
+            return None
+        consent = parse_qs(urlparse(destination).query).get("consent", [""])[0]
+        key = mcp_store.token_key(consent)
+        pending = mcp_store.get("consent", key)
+        if not pending or _expires_at(pending) < time.time():
+            raise AuthorizeError("access_denied", "Consent is invalid or expired")
+        nonce = mcp_store.opaque_id()
+        mcp_store.save(
+            "consent",
+            key,
+            {**pending, "browser_nonce_hash": mcp_store.token_key(nonce)},
+        )
+        return nonce
+
+    def consent_record(self, consent: str, nonce: str) -> dict[str, Any] | None:
+        pending = mcp_store.get("consent", mcp_store.token_key(consent))
+        if (
+            not pending
+            or _expires_at(pending) < time.time()
+            or not nonce
+            or not secrets.compare_digest(
+                str(pending.get("browser_nonce_hash", "")), mcp_store.token_key(nonce)
+            )
+        ):
+            return None
+        return pending
+
+    def complete_consent(self, consent: str, nonce: str, allow: bool) -> str:
+        from urllib.parse import urlencode
+
+        if self.consent_record(consent, nonce) is None:
+            raise AuthorizeError("access_denied", "Consent is invalid or expired")
+        pending = mcp_store.consume_consent(mcp_store.token_key(consent))
+        if not pending:
+            raise AuthorizeError("access_denied", "Consent was already consumed")
+        if allow:
+            return self._authorization_redirect(pending)
+        values = {"error": "access_denied"}
+        if pending.get("client_state") is not None:
+            values["state"] = pending["client_state"]
+        separator = "&" if "?" in pending["redirect_uri"] else "?"
         return f"{pending['redirect_uri']}{separator}{urlencode(values)}"
 
     async def load_authorization_code(

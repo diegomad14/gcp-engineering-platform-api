@@ -40,7 +40,7 @@ durations only with `ENG_PLATFORM_MCP_ACCESS_TOKEN_TTL_SECONDS` and
 
 All tools require `eng-platform.read`. `start_deployment` additionally requires
 `eng-platform.deploy`; `start_rollback` requires `eng-platform.rollback`.
-Mutating tools require a non-empty `reason` and `idempotency_key`; they are
+Deployment tools require a non-empty `reason` and `idempotency_key`; they are
 limited to 10 per allowlisted user each hour by default.
 
 Read tools return only existing public DTOs: catalog/service health, eligible
@@ -52,6 +52,33 @@ override.
 Every MCP invocation produces a private audit record with GitHub subject,
 OAuth client, tool, a hash of sanitized input, correlated deployment id and
 outcome. Prompts, bearer tokens and secret values are not recorded.
+
+## Private cost-alert connection
+
+Keep the ordinary `/mcp` connection and its registration default read-only.
+For the approved owner, use a separate opt-in server connection at
+`${ENG_PLATFORM_MCP_PUBLIC_BASE_URL}/mcp/cost-alerts`. Its discovery and initial
+challenge request only `eng-platform.read` and `eng-platform.cost-alerts.send`,
+never deployment or rollback. Let ChatGPT perform its supported public PKCE/DCR
+flow; do not create a client, token, or authorization URL by hand.
+
+A previous DCR client registered with only read cannot request send with that
+registration. Reusing its refresh token also cannot add permission. The opt-in
+server URL gives the client a distinct connection that can register the two
+explicitly requested scopes without editing existing registrations or tokens.
+
+GitHub authenticates identity using `read:user`. When send is requested, the
+API then shows its own browser-bound consent page to the approved owner. Only
+an explicit authorization issues the MCP authorization code; cancellation,
+expiry, replay, a different browser or another allowed reader cannot grant it.
+The send tool declares its OAuth scopes and returns the documented
+`_meta["mcp/www_authenticate"]` challenge so ChatGPT can surface its linking UI.
+
+After promotion, refresh the connection's tool catalog and verify the consent
+and granted scopes. This permission alone does not enable delivery:
+`ENG_PLATFORM_COST_ALERTS_ENABLED` remains off until the separately approved
+server destination and credential configuration are complete. The tool takes
+no caller-supplied message or recipient and owns its daily idempotency key.
 
 ## Incident handling
 

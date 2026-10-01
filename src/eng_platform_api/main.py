@@ -25,6 +25,7 @@ from .routers import (
     github_events,
     health,
     metrics,
+    mcp_consent,
     quality,
     release_authorizations,
     release_execution_events,
@@ -48,6 +49,45 @@ class _FeatureFlagMCPApp:
             await send({"type": "http.response.start", "status": 404, "headers": []})
             await send({"type": "http.response.body", "body": b"Not Found"})
             return
+        if scope.get("path") == "/.well-known/oauth-protected-resource/mcp/cost-alerts":
+            base = config.mcp.public_base_url
+            response = JSONResponse(
+                {
+                    "resource": f"{base}/mcp/cost-alerts",
+                    "authorization_servers": [
+                        f"{(config.mcp.issuer_url or base).rstrip('/')}/"
+                    ],
+                    "scopes_supported": [
+                        "eng-platform.read",
+                        "eng-platform.cost-alerts.send",
+                    ],
+                    "bearer_methods_supported": ["header"],
+                }
+            )
+            await response(scope, receive, send)
+            return
+        if scope.get("path") == "/mcp/cost-alerts":
+            # An opt-in connection negotiates read + alerts without changing /mcp's read default.
+            rewritten = {**scope, "path": "/mcp", "raw_path": b"/mcp"}
+
+            async def scoped_send(message):
+                if message["type"] == "http.response.start":
+                    headers = []
+                    for name, value in message.get("headers", []):
+                        if name.lower() == b"www-authenticate":
+                            value = (
+                                value.decode().replace(
+                                    f'{config.mcp.public_base_url}/.well-known/oauth-protected-resource/mcp"',
+                                    f'{config.mcp.public_base_url}/.well-known/oauth-protected-resource/mcp/cost-alerts"',
+                                )
+                                + ', scope="eng-platform.read eng-platform.cost-alerts.send"'
+                            ).encode()
+                        headers.append((name, value))
+                    message = {**message, "headers": headers}
+                await send(message)
+
+            await self.app(rewritten, receive, scoped_send)
+            return
         await self.app(scope, receive, send)
 
 
@@ -56,6 +96,8 @@ class _MCPRoute(BaseRoute):
 
     _paths = {
         "/mcp",
+        "/mcp/cost-alerts",
+        "/.well-known/oauth-protected-resource/mcp/cost-alerts",
         "/.well-known/oauth-authorization-server",
         "/.well-known/oauth-protected-resource/mcp",
         "/authorize",
@@ -123,6 +165,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(mcp_consent.router)
 app.include_router(health.router)
 app.include_router(catalog.router)
 app.include_router(releases.router)

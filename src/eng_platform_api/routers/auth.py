@@ -121,9 +121,22 @@ async def github_callback(request: Request):
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="MCP GitHub authorization was not accepted",
             ) from exc
-        return RedirectResponse(
+        response = RedirectResponse(
             destination, status_code=302, headers={"Cache-Control": "no-store"}
         )
+        nonce = mcp_provider.bind_consent_browser(destination)
+        if nonce:
+            response.set_cookie(
+                "eng_platform_mcp_consent",
+                nonce,
+                max_age=300,
+                httponly=True,
+                secure=not config.mock_mode,
+                samesite="lax",
+                path="/mcp/consent",
+            )
+            response.headers["Referrer-Policy"] = "no-referrer"
+        return response
     if not _configured():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
