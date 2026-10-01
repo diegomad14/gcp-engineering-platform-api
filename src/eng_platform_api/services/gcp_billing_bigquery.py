@@ -14,6 +14,7 @@ from ..config import config
 from ..models import (
     BillingQuality,
     CostChange,
+    CostComponentCoverage,
     CostComparison,
     CostItem,
     CostPeriod,
@@ -117,14 +118,28 @@ def _build_items_sql(
     table_fqn: str, where_clause: str, group_by: str = "resource"
 ) -> str:
     dimensions, grouping = _ITEMS_DIMENSIONS[group_by]
+    # Preserve coverage for each resource/SKU before aggregating any display
+    # dimension. One exported component cannot hide another component's lag.
     return f"""
-    SELECT {dimensions}, currency,
-      SUM(cost) AS cost, {_CREDITS_SUM} AS credits,
-      SUM(cost) + {_CREDITS_SUM} AS net_cost,
-      MIN(usage_start_time) AS first_usage_at, MAX(usage_end_time) AS latest_usage_at,
-      COUNT(DISTINCT TIMESTAMP_TRUNC(usage_start_time, HOUR)) AS observed_hours
-    FROM `{table_fqn}` WHERE {where_clause}
-    {grouping} ORDER BY net_cost DESC, cost DESC
+    WITH components AS (
+      SELECT {dimensions}, currency,
+        TO_JSON_STRING(STRUCT(COALESCE(resource.name, '') AS resource_name,
+          COALESCE(sku.id, '') AS sku_id)) AS component_id,
+        LOGICAL_AND(COALESCE(resource.name, '') != '' AND COALESCE(sku.id, '') != '') AS attributed,
+        SUM(cost) AS cost, {_CREDITS_SUM} AS credits,
+        MIN(usage_start_time) AS first_usage_at, MAX(usage_end_time) AS latest_usage_at,
+        COUNT(DISTINCT TIMESTAMP_TRUNC(usage_start_time, HOUR)) AS observed_hours
+      FROM `{table_fqn}` WHERE {where_clause}
+      {grouping}, component_id
+    )
+    SELECT project_id, gcp_service, service_name, currency,
+      SUM(cost) AS cost, SUM(credits) AS credits,
+      SUM(cost) + SUM(credits) AS net_cost,
+      MIN(first_usage_at) AS first_usage_at, MAX(latest_usage_at) AS latest_usage_at,
+      MAX(observed_hours) AS observed_hours,
+      ARRAY_AGG(STRUCT(component_id, attributed, first_usage_at, latest_usage_at, observed_hours)) AS components
+    FROM components GROUP BY project_id, gcp_service, service_name, currency
+    ORDER BY net_cost DESC, cost DESC
     """
 
 
@@ -144,6 +159,16 @@ def _query_billing(table_fqn: str, where_clause: str, group_by: str = "resource"
                 first_usage_at=_iso(getattr(row, "first_usage_at", None)),
                 latest_usage_at=_iso(getattr(row, "latest_usage_at", None)),
                 observed_hours=int(getattr(row, "observed_hours", 0)),
+                components=[
+                    CostComponentCoverage(
+                        component_id=c.component_id,
+                        attributed=bool(c.attributed),
+                        first_usage_at=_iso(c.first_usage_at),
+                        latest_usage_at=_iso(c.latest_usage_at),
+                        observed_hours=int(c.observed_hours),
+                    )
+                    for c in (getattr(row, "components", None) or [])
+                ],
             )
             for row in client.query(
                 _build_items_sql(table_fqn, where_clause, group_by)
@@ -286,12 +311,28 @@ def get_daily_costs(days: int = 30, month_to_date: bool = False) -> DailyCostSer
         except Exception:
             quality.status, quality.reason = "unavailable", "billing_query_unavailable"
     series, prev_total = _split_daily_rows(rows, current, previous)
+    # The plotted current series keeps all requested observed rows. Its prior
+    # total is only comparable if the full requested cut has verified equal
+    # coverage; otherwise expose unknown instead of a misleading decrease.
+    comparison = _comparison(days, month_to_date, "service", now)
+    comparable = (
+        quality.status == "partial"
+        and comparison.comparable
+        and comparison.current_start_at == start.isoformat()
+        and comparison.current_end_at == end.isoformat()
+        and comparison.previous_start_at == prev_start.isoformat()
+        and comparison.previous_end_at == prev_end.isoformat()
+    )
     return DailyCostSeries(
         currency=summary.currency,
         period=current,
         days=series,
         previous_period=previous,
-        previous_total_net_cost=prev_total,
+        previous_total_net_cost=prev_total if comparable else None,
+        previous_comparable=comparable,
+        previous_comparison_reason="equivalent_exported_windows_provisional"
+        if comparable
+        else "incomplete_or_unequal_daily_coverage",
         data_quality=quality,
     )
 
@@ -339,6 +380,34 @@ def _matched_item(
         ):
             change.reason = "incomplete_resource_coverage"
             return change
+    current_components = {c.component_id: c for c in current.components}
+    previous_components = {c.component_id: c for c in previous.components}
+    if (
+        not current_components
+        or current_components.keys() != previous_components.keys()
+    ):
+        change.reason = "missing_or_changed_component_coverage"
+        return change
+    for components, begin, stop in [
+        (current_components, start, end),
+        (previous_components, prev_start, prev_end),
+    ]:
+        for component in components.values():
+            first, last = (
+                _timestamp(component.first_usage_at),
+                _timestamp(component.latest_usage_at),
+            )
+            if (
+                not component.attributed
+                or first is None
+                or last is None
+                or first > begin
+                or last < stop
+                or component.observed_hours
+                < math.ceil((stop - begin).total_seconds() / 3600)
+            ):
+                change.reason = "incomplete_component_coverage"
+                return change
     change.comparable, change.reason = True, "equivalent_exported_windows_provisional"
     change.net_change = round(current.net_cost - previous.net_cost, 6)
     if previous.net_cost:
@@ -351,7 +420,12 @@ def _matched_item(
 def get_cost_comparison(
     days: int = 1, month_to_date: bool = False, group_by: str = "resource"
 ) -> CostComparison:
-    now = utc_now()
+    return _comparison(days, month_to_date, group_by, utc_now())
+
+
+def _comparison(
+    days: int, month_to_date: bool, group_by: str, now: datetime
+) -> CostComparison:
     start, end, prev_start, prev_end = _windows(days, month_to_date, now)
     table = _billing_table_exists()
     duration = min(end - start, prev_end - prev_start)

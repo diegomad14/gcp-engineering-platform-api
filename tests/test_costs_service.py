@@ -119,13 +119,14 @@ def test_daily_costs_real_path_fills_gaps(real_billing):
     today = date(2026, 10, 1)
     first = today.replace(day=1).isoformat()
     assert series.period.start == first
-    # every day of the window is present, gaps filled with zeros
+    # every date is present; absent exported rows remain unknown
     assert len(series.days) == today.day
     assert by_date[first].net_cost == 0.75
     if today.day >= 2:
         assert by_date[today.replace(day=2).isoformat()].net_cost is None
-    # mid-previous-month row lands in the previous window
-    assert series.previous_total_net_cost == 3.0
+    # Aggregate fixture does not prove equivalent component coverage.
+    assert series.previous_total_net_cost is None
+    assert not series.previous_comparable
 
 
 def test_daily_costs_rolling_window(real_billing):

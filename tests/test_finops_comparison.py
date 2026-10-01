@@ -14,7 +14,15 @@ UTC = timezone.utc
 NOW = datetime(2026, 10, 1, 12, tzinfo=UTC)
 
 
-def records(day, hours, cost=1, currency="USD", resource="db", service="Cloud SQL"):
+def records(
+    day,
+    hours,
+    cost=1,
+    currency="USD",
+    resource="db",
+    service="Cloud SQL",
+    sku="compute",
+):
     start = datetime.fromisoformat(day).replace(hour=5, tzinfo=UTC)
     return [
         dict(
@@ -26,6 +34,7 @@ def records(day, hours, cost=1, currency="USD", resource="db", service="Cloud SQ
             currency=currency,
             resource=resource,
             service=service,
+            sku=sku,
         )
         for h in range(hours)
     ]
@@ -79,7 +88,15 @@ class OfflineBilling:
                 key = (
                     r["start"].astimezone(ZoneInfo("America/Bogota")).date()
                     if "usage_date" in sql
-                    else (r["resource"], r["service"], r["currency"])
+                    else (
+                        ""
+                        if "'' AS service_name" in sql
+                        else r["resource"]
+                        if "COALESCE(resource.name, '') AS service_name" in sql
+                        else r["sku"],
+                        r["service"],
+                        r["currency"],
+                    )
                 )
                 groups.setdefault(key, []).append(r)
             out = []
@@ -105,6 +122,33 @@ class OfflineBilling:
                             first_usage_at=min(r["start"] for r in values),
                             latest_usage_at=max(r["end"] for r in values),
                             observed_hours=len({r["start"] for r in values}),
+                            components=[
+                                SimpleNamespace(
+                                    component_id=resource + ":" + sku,
+                                    attributed=bool(resource and sku),
+                                    first_usage_at=min(
+                                        r["start"]
+                                        for r in values
+                                        if (r["resource"], r["sku"]) == (resource, sku)
+                                    ),
+                                    latest_usage_at=max(
+                                        r["end"]
+                                        for r in values
+                                        if (r["resource"], r["sku"]) == (resource, sku)
+                                    ),
+                                    observed_hours=len(
+                                        {
+                                            r["start"]
+                                            for r in values
+                                            if (r["resource"], r["sku"])
+                                            == (resource, sku)
+                                        }
+                                    ),
+                                )
+                                for resource, sku in {
+                                    (r["resource"], r["sku"]) for r in values
+                                }
+                            ],
                         )
                     )
         return SimpleNamespace(result=lambda: out)
@@ -212,7 +256,8 @@ def test_currency_credit_and_unattributed_resource(dataset):
     )
     result = billing.get_cost_comparison()
     assert result.items[0].current.attributed is False
-    assert result.net_change == 3  # credit-adjusted, not gross 4
+    assert result.current.total_net_cost == 6  # credit-adjusted, not gross 8
+    assert result.net_change is None  # resource attribution is insufficient
     dataset.rows += records("2026-10-01", 1, currency="COP")
     summary = billing.get_cost_summary()
     assert summary.currency == "mixed" and summary.total_cost is None
@@ -294,3 +339,52 @@ def test_estimated_build_ledger_is_separate_at_bogota_month_boundary(
     assert result.cloud_build.estimated_cost_usd == 1000
     assert not result.estimates_included_in_total
     assert result.total_cost is None  # export rows arrive later than this snapshot
+
+
+def test_missing_sku_cannot_be_hidden_by_another_component(dataset):
+    from eng_platform_api.services.cost_alerts import _text
+
+    dataset.rows = (
+        records("2026-10-01", 4)
+        + records("2026-09-30", 4)
+        + records("2026-09-30", 4, sku="storage")
+    )
+    result = billing.get_cost_comparison()
+    assert result.current.total_net_cost < result.previous.total_net_cost
+    assert result.items[0].reason == "missing_or_changed_component_coverage"
+    assert not result.comparable and result.net_change is None
+    assert _text(result, NOW) is None
+
+
+def test_gap_in_component_cannot_be_hidden_by_full_compute_hours(dataset):
+    dataset.rows = records("2026-10-01", 4) + records("2026-09-30", 4)
+    dataset.rows += records("2026-10-01", 3, sku="storage") + records(
+        "2026-09-30", 4, sku="storage"
+    )
+    result = billing.get_cost_comparison()
+    assert result.items[0].reason == "incomplete_component_coverage"
+    assert not result.comparable and result.net_change is None
+
+
+def test_service_aggregation_cannot_hide_missing_resource_same_sku(dataset):
+    dataset.rows = (
+        records("2026-10-01", 4)
+        + records("2026-09-30", 4)
+        + records("2026-09-30", 4, resource="other-db")
+    )
+    result = billing.get_cost_comparison(group_by="service")
+    assert len(result.items) == 1
+    assert result.items[0].reason == "missing_or_changed_component_coverage"
+    assert not result.comparable and result.net_change is None
+
+
+def test_daily_previous_total_requires_full_equal_observed_coverage(dataset):
+    dataset.rows = records("2026-10-01", 4) + records("2026-09-30", 7)
+    result = billing.get_daily_costs(days=1)
+    assert result.days[0].net_cost == 3
+    assert result.previous_total_net_cost is None and not result.previous_comparable
+    assert billing.get_cost_comparison().net_change == 0
+    dataset.rows = records("2026-10-01", 7) + records("2026-09-30", 7)
+    result = billing.get_daily_costs(days=1)
+    assert result.previous_comparable and result.previous_total_net_cost == 5.25
+    assert result.days[0].net_cost == result.previous_total_net_cost

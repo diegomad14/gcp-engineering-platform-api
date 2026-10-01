@@ -453,6 +453,14 @@ class MetricsSummary(BaseModel):
 # ── Costs ────────────────────────────────────────────────────────────
 
 
+class CostComponentCoverage(BaseModel):
+    component_id: str = ""
+    attributed: bool = False
+    first_usage_at: str | None = None
+    latest_usage_at: str | None = None
+    observed_hours: int = 0
+
+
 class CostItem(BaseModel):
     project_id: str = ""
     service_name: str = ""
@@ -463,6 +471,7 @@ class CostItem(BaseModel):
     currency: str = "USD"
     attributed: bool = True
     observed_hours: int = 0
+    components: list[CostComponentCoverage] = Field(default_factory=list)
     first_usage_at: str | None = None
     latest_usage_at: str | None = None
 
@@ -541,6 +550,8 @@ class DailyCostSeries(BaseModel):
     days: list[DailyCost] = Field(default_factory=list)
     previous_period: CostPeriod
     previous_total_net_cost: float | None = None
+    previous_comparable: bool = False
+    previous_comparison_reason: str = "incomplete_or_unequal_daily_coverage"
     data_quality: BillingQuality = Field(default_factory=BillingQuality)
 
 
