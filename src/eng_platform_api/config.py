@@ -150,6 +150,21 @@ class MCPConfig:
 
 
 @dataclass
+class CostAlertsConfig:
+    """Explicit server attestation; notification stays disabled until separately approved."""
+
+    enabled: bool = False
+    allowed_logins: tuple[str, ...] = ()
+    recipient_owner_login: str = ""
+    recipient_id: str = ""
+    private_destination_confirmed: bool = False
+    recipient_address: str = field(default="", repr=False)
+    communications_api_key: str = field(default="", repr=False)
+    minimum_change: float = 0.10
+    maximum_export_age_hours: int = 48
+
+
+@dataclass
 class SonarQubeConfig:
     enabled: bool = False
     token: str = ""
@@ -177,6 +192,7 @@ class PlatformConfig:
     )
     auth: AuthConfig = field(default_factory=AuthConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
+    cost_alerts: CostAlertsConfig = field(default_factory=CostAlertsConfig)
     sonarqube: SonarQubeConfig = field(default_factory=SonarQubeConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
 
@@ -542,6 +558,32 @@ def load_config() -> PlatformConfig:
         ),
     )
 
+    cost_alerts = CostAlertsConfig(
+        enabled=os.getenv("ENG_PLATFORM_COST_ALERTS_ENABLED", "false").lower()
+        == "true",
+        allowed_logins=tuple(
+            login.strip().lower()
+            for login in os.getenv("ENG_PLATFORM_COST_ALERTS_ALLOWED_LOGINS", "").split(
+                ","
+            )
+            if login.strip()
+        ),
+        recipient_id=os.getenv("ENG_PLATFORM_COST_ALERTS_RECIPIENT_ID", "").strip(),
+        recipient_owner_login=os.getenv("ENG_PLATFORM_COST_ALERTS_OWNER_LOGIN", "")
+        .strip()
+        .lower(),
+        private_destination_confirmed=os.getenv(
+            "ENG_PLATFORM_COST_ALERTS_PRIVATE_DESTINATION_CONFIRMED", "false"
+        ).lower()
+        == "true",
+        recipient_address=os.getenv(
+            "ENG_PLATFORM_COST_ALERTS_RECIPIENT_ADDRESS", ""
+        ).strip(),
+        communications_api_key=os.getenv(
+            "ENG_PLATFORM_COST_ALERTS_COMMUNICATIONS_API_KEY", ""
+        ).strip(),
+    )
+
     return PlatformConfig(
         mock_mode=mock_mode,
         billing=billing,
@@ -551,6 +593,7 @@ def load_config() -> PlatformConfig:
         release_orchestrator=release_orchestrator,
         auth=auth,
         mcp=mcp,
+        cost_alerts=cost_alerts,
         sonarqube=sonarqube,
         quality=quality,
     )

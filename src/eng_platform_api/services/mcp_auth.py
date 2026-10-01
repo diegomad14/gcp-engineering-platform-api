@@ -26,7 +26,12 @@ from pydantic import AnyUrl
 from ..config import config
 from . import mcp_store
 
-_SCOPES = {"eng-platform.read", "eng-platform.deploy", "eng-platform.rollback"}
+_SCOPES = {
+    "eng-platform.read",
+    "eng-platform.deploy",
+    "eng-platform.rollback",
+    "eng-platform.cost-alerts.send",
+}
 _GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 _GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 _GITHUB_USER_URL = "https://api.github.com/user"

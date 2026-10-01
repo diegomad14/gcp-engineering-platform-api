@@ -1,6 +1,6 @@
 """Costs router — BigQuery billing data."""
 
-from datetime import datetime, timezone
+from typing import Literal
 from threading import Lock
 from time import monotonic
 from typing import Callable, TypeVar
@@ -8,7 +8,7 @@ from typing import Callable, TypeVar
 from fastapi import APIRouter, Query
 
 from ..config import config
-from ..models import CloudBuildUsage, CostSummary, DailyCostSeries
+from ..models import CloudBuildUsage, CostComparison, CostSummary, DailyCostSeries
 from ..services import cloud_build_usage
 from ..services import gcp_billing_bigquery as billing
 
@@ -22,6 +22,8 @@ _T = TypeVar("_T")
 def _cached(key: tuple[object, ...], loader: Callable[[], _T]) -> _T:
     if config.mock_mode:
         return loader()
+    # A five-minute cache must not carry yesterday across local midnight.
+    key = (*key, billing.utc_now().astimezone(billing._TIMEZONE).date().isoformat())
     with _cache_lock:
         cached = _cache.get(key)
         now = monotonic()
@@ -43,7 +45,7 @@ def get_cost_summary(
     days: int = Query(default=30, ge=1, le=365),
     month_to_date: bool = Query(
         default=False,
-        description="Current calendar month (matches the GCP console); ignores `days`.",
+        description="Consumption month in America/Bogota; ignores `days`.",
     ),
 ):
     """Get cost summary for the specified time window."""
@@ -58,7 +60,9 @@ def _cloud_build_usage() -> CloudBuildUsage | None:
     """Read the collector snapshot; never make provider calls from a UI poll."""
     if not config.cloud_build.usage_enabled:
         return None
-    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    # The collector owns a UTC monthly ledger; estimates stay separate from
+    # Bogota consumption billing and must never be added to exported totals.
+    month = billing.utc_now().strftime("%Y-%m")
     usage = cloud_build_usage.summary(month)
     return CloudBuildUsage.model_validate(usage) if usage else None
 
@@ -92,11 +96,24 @@ def get_daily_costs(
     days: int = Query(default=30, ge=1, le=365),
     month_to_date: bool = Query(
         default=False,
-        description="Current calendar month (previous period = previous month); ignores `days`.",
+        description="Bogota month to date; previous period uses equivalent elapsed time.",
     ),
 ):
     """Daily net cost series plus the previous window's total for comparison."""
     return _cached(
         ("daily", days, month_to_date),
         lambda: billing.get_daily_costs(days=days, month_to_date=month_to_date),
+    )
+
+
+@router.get("/comparison", response_model=CostComparison)
+def get_cost_comparison(
+    days: int = Query(default=1, ge=1, le=365),
+    month_to_date: bool = Query(default=False),
+    group_by: Literal["resource", "service", "sku"] = "resource",
+):
+    """Equivalent Bogota consumption windows, limited by observed usage freshness."""
+    return _cached(
+        ("comparison", days, month_to_date, group_by),
+        lambda: billing.get_cost_comparison(days, month_to_date, group_by),
     )

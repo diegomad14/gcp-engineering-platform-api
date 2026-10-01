@@ -38,7 +38,8 @@ mcp = FastMCP(
     "eng-platform",
     instructions=(
         "Use eng-platform only for read-only release insight and authorized tagged "
-        "deployments or rollbacks. The platform, not the client, chooses its executor."
+        "deployments or rollbacks, plus explicitly scoped cost alerts to the approved private recipient. "
+        "The platform, not the client, chooses its executor."
     ),
     auth_server_provider=provider,
     streamable_http_path="/mcp",
@@ -341,6 +342,68 @@ def get_cost_summary(days: int = 30, month_to_date: bool = False) -> dict[str, A
         "get_cost_summary",
         {"days": days, "month_to_date": month_to_date},
         lambda: costs.get_cost_summary(max(1, min(days, 365)), month_to_date),
+    )
+
+
+@mcp.tool()
+def get_cost_comparison(
+    days: int = 1,
+    month_to_date: bool = False,
+    group_by: Literal["resource", "service", "sku"] = "resource",
+) -> dict[str, Any]:
+    """Compare equivalent Bogota exported-usage windows; absent data is unknown."""
+    return _read(
+        "get_cost_comparison",
+        {"days": days, "month_to_date": month_to_date, "group_by": group_by},
+        lambda: costs.get_cost_comparison(
+            max(1, min(days, 365)), month_to_date, group_by
+        ),
+    )
+
+
+@mcp.tool()
+def get_daily_costs(days: int = 30, month_to_date: bool = False) -> dict[str, Any]:
+    """Bogota consumption days, explicit missing data and export freshness."""
+    return _read(
+        "get_daily_costs",
+        {"days": days, "month_to_date": month_to_date},
+        lambda: costs.get_daily_costs(max(1, min(days, 365)), month_to_date),
+    )
+
+
+@mcp.tool()
+def get_cost_by_service(days: int = 30, month_to_date: bool = False) -> dict[str, Any]:
+    """Exported cost by GCP service; estimates are separate."""
+    return _read(
+        "get_cost_by_service",
+        {"days": days, "month_to_date": month_to_date},
+        lambda: costs.get_cost_by_service(max(1, min(days, 365)), month_to_date),
+    )
+
+
+@mcp.tool()
+def get_cost_by_sku(days: int = 30, month_to_date: bool = False) -> dict[str, Any]:
+    """Exported SKU cost, currency and freshness."""
+    return _read(
+        "get_cost_by_sku",
+        {"days": days, "month_to_date": month_to_date},
+        lambda: costs.get_cost_by_sku(max(1, min(days, 365)), month_to_date),
+    )
+
+
+@mcp.tool()
+def get_billing_status() -> dict[str, Any]:
+    """Billing export coverage and availability; no realtime price promise."""
+    return _read("get_billing_status", {}, costs.get_billing_status)
+
+
+@mcp.tool()
+def send_cost_alert() -> dict[str, Any]:
+    """Send only a server-built cost alert to the explicitly approved private Diego recipient."""
+    from .services import cost_alerts
+
+    return _mutate(
+        "send_cost_alert", {}, "eng-platform.cost-alerts.send", cost_alerts.send
     )
 
 
