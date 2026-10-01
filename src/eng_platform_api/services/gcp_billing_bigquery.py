@@ -161,11 +161,11 @@ def _query_billing(table_fqn: str, where_clause: str, group_by: str = "resource"
                 observed_hours=int(getattr(row, "observed_hours", 0)),
                 components=[
                     CostComponentCoverage(
-                        component_id=c.component_id,
-                        attributed=bool(c.attributed),
-                        first_usage_at=_iso(c.first_usage_at),
-                        latest_usage_at=_iso(c.latest_usage_at),
-                        observed_hours=int(c.observed_hours),
+                        component_id=c["component_id"],
+                        attributed=bool(c["attributed"]),
+                        first_usage_at=_iso(c["first_usage_at"]),
+                        latest_usage_at=_iso(c["latest_usage_at"]),
+                        observed_hours=int(c["observed_hours"]),
                     )
                     for c in (getattr(row, "components", None) or [])
                 ],
