@@ -6,12 +6,54 @@ import re
 from zoneinfo import ZoneInfo
 
 import pytest
+from google.cloud.bigquery import Row, SchemaField, _helpers
 
 from eng_platform_api.services import gcp_billing_bigquery as billing
 from eng_platform_api.routers import costs
 
 UTC = timezone.utc
 NOW = datetime(2026, 10, 1, 12, tzinfo=UTC)
+COMPONENT_SCHEMA = [
+    SchemaField("component_id", "STRING"),
+    SchemaField("attributed", "BOOLEAN"),
+    SchemaField("first_usage_at", "TIMESTAMP"),
+    SchemaField("latest_usage_at", "TIMESTAMP"),
+    SchemaField("observed_hours", "INTEGER"),
+]
+
+
+def sdk_result_rows(rows):
+    """Decode nested REST records with BigQuery's actual result converter."""
+    result = []
+    for row in rows:
+        values = vars(row).copy()
+        if "components" in values:
+            cells = [
+                {
+                    "v": {
+                        "f": [
+                            {"v": c.component_id},
+                            {"v": str(c.attributed).lower()},
+                            {"v": str(int(c.first_usage_at.timestamp() * 1_000_000))},
+                            {"v": str(int(c.latest_usage_at.timestamp() * 1_000_000))},
+                            {"v": str(c.observed_hours)},
+                        ]
+                    }
+                }
+                for c in values["components"]
+            ]
+            values["components"] = _helpers._rows_from_json(
+                [{"f": [{"v": cells}]}],
+                [
+                    SchemaField(
+                        "components", "RECORD", mode="REPEATED", fields=COMPONENT_SCHEMA
+                    )
+                ],
+            )[0].components
+        result.append(
+            Row(tuple(values.values()), {name: i for i, name in enumerate(values)})
+        )
+    return result
 
 
 def records(
@@ -151,7 +193,7 @@ class OfflineBilling:
                             ],
                         )
                     )
-        return SimpleNamespace(result=lambda: out)
+        return SimpleNamespace(result=lambda: sdk_result_rows(out))
 
 
 @pytest.fixture
@@ -191,6 +233,67 @@ def test_latest_consumption_watermark_matches_previous_elapsed_hours(dataset):
     assert result.net_change == 3
     assert result.current.data_quality.latest_export_at is not None
     assert not result.is_final and not result.current.data_quality.is_complete
+
+
+@pytest.mark.parametrize("currency", ["USD", "COP"])
+@pytest.mark.parametrize("group_by", ["resource", "service", "sku"])
+def test_sdk_rows_reach_summary_and_comparison_dtos(
+    dataset, monkeypatch, currency, group_by
+):
+    dataset.rows = records("2026-10-01", 4, 2, currency=currency) + records(
+        "2026-09-30", 7, currency=currency
+    )
+    monkeypatch.setattr(costs.config.cloud_build, "usage_enabled", False)
+    costs._cache.clear()
+    loader = {
+        "resource": costs.get_cost_summary,
+        "service": costs.get_cost_by_service,
+        "sku": costs.get_cost_by_sku,
+    }[group_by]
+    summary = loader(days=1, month_to_date=False).model_dump(mode="json")
+    assert summary["data_quality"]["status"] == "partial"
+    assert summary["data_quality"]["timezone"] == "America/Bogota"
+    assert summary["currency"] == currency
+    assert (
+        summary["total_cost"],
+        summary["total_credits"],
+        summary["total_net_cost"],
+    ) == (8, -2, 6)
+    component = summary["items"][0]["components"][0]
+    assert component["first_usage_at"] == "2026-10-01T05:00:00+00:00"
+    assert component["latest_usage_at"] == "2026-10-01T09:00:00+00:00"
+    assert component["observed_hours"] == 4 and component["attributed"]
+    comparison = costs.get_cost_comparison(
+        days=1, month_to_date=False, group_by=group_by
+    ).model_dump(mode="json")
+    assert comparison["comparable"]
+    assert comparison["net_change"] == 3
+    assert comparison["current"]["total_net_cost"] == 6
+    assert comparison["previous"]["total_net_cost"] == 3
+    assert (
+        comparison["current"]["data_quality"]["latest_export_at"]
+        == "2026-10-01T11:50:00+00:00"
+    )
+    costs._cache.clear()
+
+
+def test_nested_components_also_accept_bigquery_row(dataset, monkeypatch):
+    query = dataset.query
+
+    def nested_rows(sql):
+        result = list(query(sql).result())
+        for row in result:
+            if "components" in row.keys():
+                for i, component in enumerate(row.components):
+                    row.components[i] = Row(
+                        tuple(component.values()),
+                        {name: j for j, name in enumerate(component)},
+                    )
+        return SimpleNamespace(result=lambda: result)
+
+    monkeypatch.setattr(dataset, "query", nested_rows)
+    result = billing.get_cost_comparison()
+    assert result.comparable and result.net_change == 3
 
 
 def test_late_ingestion_is_not_a_consumption_boundary(dataset):
