@@ -34,6 +34,7 @@ from .routers import (
     secrets as operational_secrets_router,
 )
 from .mcp_server import mcp as mcp_server
+from .services.mcp_auth import _SCOPES
 
 
 class _FeatureFlagMCPApp:
@@ -181,11 +182,7 @@ async def oauth_authorization_server_metadata():
             "authorization_endpoint": issuer + "/authorize",
             "token_endpoint": issuer + "/token",
             "registration_endpoint": issuer + "/register",
-            "scopes_supported": [
-                "eng-platform.deploy",
-                "eng-platform.read",
-                "eng-platform.rollback",
-            ],
+            "scopes_supported": sorted(_SCOPES),
             "response_types_supported": ["code"],
             "grant_types_supported": ["authorization_code", "refresh_token"],
             "token_endpoint_auth_methods_supported": ["none"],
