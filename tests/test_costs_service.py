@@ -1,6 +1,6 @@
 """Tests for the billing service's BigQuery paths, using a fake client."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -56,21 +56,28 @@ def real_billing(monkeypatch):
                 net_cost=3.0,
             ),
         ],
-        totals_rows=[SimpleNamespace(total_cost=10.0, total_credits=-2.0, n=42)],
+        totals_rows=[
+            SimpleNamespace(
+                total_cost=10.0,
+                total_credits=-2.0,
+                n=42,
+                currencies=["USD"],
+                latest_export_at=datetime(2026, 10, 1, 11, tzinfo=timezone.utc),
+            )
+        ],
         daily_rows=[
             # first day of the current month and mid previous month, so the
             # windows are stable regardless of when the test runs
+            SimpleNamespace(usage_date=date(2026, 10, 1), cost=1.0, credits=-0.25),
             SimpleNamespace(
-                usage_date=date.today().replace(day=1), cost=1.0, credits=-0.25
-            ),
-            SimpleNamespace(
-                usage_date=(date.today().replace(day=1) - timedelta(days=1)).replace(
-                    day=15
-                ),
+                usage_date=date(2026, 9, 1),
                 cost=4.0,
                 credits=-1.0,
             ),
         ],
+    )
+    monkeypatch.setattr(
+        billing, "utc_now", lambda: datetime(2026, 10, 1, 12, tzinfo=timezone.utc)
     )
     monkeypatch.setattr(billing.config, "mock_mode", False)
     monkeypatch.setattr(billing, "_table_cache", None)
@@ -103,27 +110,28 @@ def test_billing_status_real_path(real_billing):
     status = billing.get_billing_status()
     assert status["billing_export_enabled"] is True
     assert status["row_count"] == 42
-    assert "Real cost data" in status["message"]
+    assert status["data_quality"]["status"] == "partial"
 
 
 def test_daily_costs_real_path_fills_gaps(real_billing):
     series = billing.get_daily_costs(days=30, month_to_date=True)
     by_date = {d.date: d for d in series.days}
-    today = date.today()
+    today = date(2026, 10, 1)
     first = today.replace(day=1).isoformat()
     assert series.period.start == first
-    # every day of the window is present, gaps filled with zeros
+    # every date is present; absent exported rows remain unknown
     assert len(series.days) == today.day
     assert by_date[first].net_cost == 0.75
     if today.day >= 2:
-        assert by_date[today.replace(day=2).isoformat()].net_cost == 0.0
-    # mid-previous-month row lands in the previous window
-    assert series.previous_total_net_cost == 3.0
+        assert by_date[today.replace(day=2).isoformat()].net_cost is None
+    # Aggregate fixture does not prove equivalent component coverage.
+    assert series.previous_total_net_cost is None
+    assert not series.previous_comparable
 
 
 def test_daily_costs_rolling_window(real_billing):
     series = billing.get_daily_costs(days=7)
-    assert len(series.days) == 8  # start..today inclusive
+    assert len(series.days) == 7  # exactly seven Bogota dates
     assert series.previous_period.end < series.period.start
 
 
@@ -147,6 +155,8 @@ def test_query_billing_error_returns_empty(monkeypatch):
     monkeypatch.setattr(billing.bigquery, "Client", lambda project=None: BrokenClient())
     summary = billing.get_cost_summary(days=30)
     assert summary.items == []
-    assert summary.total_cost == 0.0
+    assert summary.total_cost is None
+    assert summary.data_quality.status == "unavailable"
     series = billing.get_daily_costs(days=7)
-    assert all(d.net_cost == 0.0 for d in series.days)
+    assert all(d.net_cost is None for d in series.days)
+    assert series.data_quality.status == "unavailable"

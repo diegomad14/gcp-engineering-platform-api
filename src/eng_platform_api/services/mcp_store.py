@@ -6,6 +6,7 @@ import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from threading import RLock
 
 from ..config import config
 
@@ -124,3 +125,29 @@ def mutation_count(subject: str) -> int:
         .where("created_at", ">=", cutoff.isoformat())
     )
     return sum(1 for _ in query.stream())
+
+
+_alert_lock = RLock()
+
+
+def update_cost_alert(key: str, transform):
+    """Reserve notification state atomically in the existing private MCP store."""
+    collection = _collection("cost_alert")
+    if collection is None:
+        with _alert_lock:
+            current = get("cost_alert", key) or {}
+            result = transform(current)
+            save("cost_alert", key, result)
+            return result
+    from google.cloud.firestore import transactional
+
+    document = collection.document(key)
+
+    @transactional
+    def update(transaction):
+        snapshot = document.get(transaction=transaction)
+        result = transform(snapshot.to_dict() or {})
+        transaction.set(document, result)
+        return result
+
+    return update(document._client.transaction())

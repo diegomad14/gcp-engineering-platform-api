@@ -41,21 +41,22 @@ def test_build_cost_query_project_level():
     query = build_cost_query(group_by="project")
     assert "SUM(cost)" in query
     assert "GROUP BY" in query
-    assert "_PARTITIONTIME" in query
+    assert "usage_start_time" in query
+    assert "_PARTITIONTIME" not in query
     assert "UNNEST(labels)" not in query
 
 
 def test_build_cost_query_by_service():
     query = build_cost_query(group_by="service")
     assert "service.description" in query
-    assert "resource.name" in query
+    assert "AS component_id" in query
     assert " app" not in query.lower()
 
 
 def test_build_cost_query_by_sku():
     query = build_cost_query(group_by="sku")
-    assert "sku.id" in query
     assert "sku.description" in query
+    assert "currency" in query
 
 
 def test_cost_by_sku_endpoint():
@@ -86,7 +87,7 @@ def test_items_sql_by_resource():
 
 def test_items_sql_by_service():
     query = _build_items_sql("t", "cost_type = 'regular'", group_by="service")
-    assert "resource.name" not in query
+    assert "AS component_id" in query
     assert "sku.description" not in query
     assert "GROUP BY project_id, gcp_service" in query
 
@@ -94,7 +95,7 @@ def test_items_sql_by_service():
 def test_items_sql_by_sku():
     query = _build_items_sql("t", "cost_type = 'regular'", group_by="sku")
     assert "sku.description" in query
-    assert "resource.name" not in query
+    assert "AS component_id" in query
 
 
 def test_split_daily_rows_fills_gaps_and_splits_windows():
@@ -117,6 +118,7 @@ def test_split_daily_rows_fills_gaps_and_splits_windows():
         "2026-07-05",
     ]
     assert series[0].net_cost == 0.75
-    assert series[1].net_cost == 0.0  # gap filled with zeros
+    assert series[1].net_cost is None  # missing is unknown
+    assert not series[1].has_data
     assert series[2].net_cost == 3.0
     assert previous_total == 1.5

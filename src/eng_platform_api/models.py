@@ -453,6 +453,14 @@ class MetricsSummary(BaseModel):
 # ── Costs ────────────────────────────────────────────────────────────
 
 
+class CostComponentCoverage(BaseModel):
+    component_id: str = ""
+    attributed: bool = False
+    first_usage_at: str | None = None
+    latest_usage_at: str | None = None
+    observed_hours: int = 0
+
+
 class CostItem(BaseModel):
     project_id: str = ""
     service_name: str = ""
@@ -460,6 +468,12 @@ class CostItem(BaseModel):
     cost: float = 0.0
     credits: float = 0.0
     net_cost: float = 0.0
+    currency: str = "USD"
+    attributed: bool = True
+    observed_hours: int = 0
+    components: list[CostComponentCoverage] = Field(default_factory=list)
+    first_usage_at: str | None = None
+    latest_usage_at: str | None = None
 
 
 class CostPeriod(BaseModel):
@@ -467,14 +481,29 @@ class CostPeriod(BaseModel):
     end: str
 
 
+class BillingQuality(BaseModel):
+    status: Literal["partial", "no_data", "unavailable", "mixed_currency"] = "no_data"
+    basis: str = "exported_usage"
+    timezone: str = "America/Bogota"
+    is_complete: bool = False
+    retrieved_at: str | None = None
+    latest_export_at: str | None = None
+    first_usage_at: str | None = None
+    latest_usage_at: str | None = None
+    rows: int = 0
+    reason: str = ""
+
+
 class CostSummary(BaseModel):
     currency: str = "USD"
     period: CostPeriod
-    total_cost: float = 0.0
-    total_credits: float = 0.0
-    total_net_cost: float = 0.0
+    total_cost: float | None = None
+    total_credits: float | None = None
+    total_net_cost: float | None = None
     items: list[CostItem] = Field(default_factory=list)
+    data_quality: BillingQuality = Field(default_factory=BillingQuality)
     cloud_build: "CloudBuildUsage | None" = None
+    estimates_included_in_total: bool = False
 
 
 class CloudBuildUsage(BaseModel):
@@ -508,10 +537,11 @@ class CloudBuildUsage(BaseModel):
 
 
 class DailyCost(BaseModel):
-    date: str  # ISO YYYY-MM-DD, usage date in the billing account timezone
-    cost: float = 0.0
-    credits: float = 0.0
-    net_cost: float = 0.0
+    date: str  # ISO YYYY-MM-DD, consumption date in America/Bogota
+    cost: float | None = None
+    credits: float | None = None
+    net_cost: float | None = None
+    has_data: bool = False
 
 
 class DailyCostSeries(BaseModel):
@@ -519,7 +549,38 @@ class DailyCostSeries(BaseModel):
     period: CostPeriod
     days: list[DailyCost] = Field(default_factory=list)
     previous_period: CostPeriod
-    previous_total_net_cost: float = 0.0
+    previous_total_net_cost: float | None = None
+    previous_comparable: bool = False
+    previous_comparison_reason: str = "incomplete_or_unequal_daily_coverage"
+    data_quality: BillingQuality = Field(default_factory=BillingQuality)
+
+
+class CostChange(BaseModel):
+    project_id: str = ""
+    gcp_service: str = ""
+    service_name: str = ""
+    currency: str = "USD"
+    current: CostItem | None = None
+    previous: CostItem | None = None
+    comparable: bool = False
+    reason: str = "missing_data"
+    net_change: float | None = None
+    percent_change: float | None = None
+
+
+class CostComparison(BaseModel):
+    timezone: str = "America/Bogota"
+    current: CostSummary
+    previous: CostSummary
+    current_start_at: str
+    current_end_at: str
+    previous_start_at: str
+    previous_end_at: str
+    items: list[CostChange] = Field(default_factory=list)
+    comparable: bool = False
+    net_change: float | None = None
+    reason: str = "missing_data"
+    is_final: bool = False
 
 
 # ── Service Factory ──────────────────────────────────────────────────
