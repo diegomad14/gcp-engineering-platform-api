@@ -14,6 +14,38 @@ from pathlib import Path
 REQUIRED_STEPS = ("source", "tooling", "postgres", "runtime", "quality")
 
 
+def smarti_quality_errors(service: str, quality: dict) -> list[str]:
+    if service not in {"cgm-sanplat-api", "cgm-artemis-api"}:
+        return []
+    supplied = quality.get("checks", [])
+    if not isinstance(supplied, list):
+        return ["Missing blocking Smarti PostgreSQL evidence"]
+    checks = [
+        check
+        for check in supplied
+        if isinstance(check, dict) and check.get("category") == "smarti_postgres"
+    ]
+    if len(checks) != 1:
+        return ["Missing or duplicate blocking Smarti PostgreSQL evidence"]
+    check = checks[0]
+    details = check.get("details", "")
+    evidence = re.fullmatch(
+        r"Smarti PostgreSQL: tests/test_smarti_prevention_postgres\.py: (\d+) executed; "
+        r"tests/test_smarti_publication\.py: (\d+) executed; no skips",
+        details if isinstance(details, str) and len(details) <= 500 else "",
+    )
+    if (
+        check.get("status") != "PASSED"
+        or check.get("findings", 0) != 0
+        or check.get("blocking_findings", 0) != 0
+        or evidence is None
+        or int(evidence[1]) < 1
+        or int(evidence[2]) < 40
+    ):
+        return ["Missing or failed blocking Smarti PostgreSQL execution evidence"]
+    return []
+
+
 def read_json(path: Path) -> dict:
     try:
         value = json.loads(path.read_text())
@@ -92,6 +124,7 @@ def errors_for(workspace: Path, *, published: bool = False) -> list[str]:
             errors.append(f"Quality identity mismatch: {field}")
     if not published:
         errors.extend(canonical_quality_errors(workspace, quality))
+    errors.extend(smarti_quality_errors(request.get("service_name", ""), quality))
     if published:
         for field, variable in (
             ("commit_sha", "FALLBACK_RELEASE_SHA"),

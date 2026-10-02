@@ -349,12 +349,20 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
                         '-e POSTGRES_DB=wm_test "$$ENG_PLATFORM_POSTGRES_IMAGE"; '
                         "for attempt in $(seq 1 30); do "
                         "if docker exec eng-platform-postgres pg_isready -U postgres "
-                        "-d wm_test >/dev/null 2>&1; then "
+                        "-d wm_test -h 127.0.0.1 >/dev/null 2>&1; then break; "
+                        "fi; sleep 1; done; "
+                        "docker exec eng-platform-postgres pg_isready -U postgres "
+                        "-d wm_test -h 127.0.0.1; "
                         "for create_attempt in $(seq 1 10); do "
                         "if docker exec eng-platform-postgres createdb -U postgres "
-                        "fnd_test >/dev/null 2>&1; then exit 0; fi; sleep 1; done; "
-                        "fi; sleep 1; done; "
-                        "docker exec eng-platform-postgres createdb -U postgres fnd_test"
+                        "fnd_test >/dev/null 2>&1; then break; fi; sleep 1; done; "
+                        "docker exec eng-platform-postgres psql -U postgres "
+                        "-d fnd_test -c 'SELECT 1' >/dev/null; "
+                        "for create_attempt in $(seq 1 10); do "
+                        "if docker exec eng-platform-postgres createdb -U postgres "
+                        "smarti_test >/dev/null 2>&1; then break; fi; sleep 1; done; "
+                        "docker exec eng-platform-postgres psql -U postgres "
+                        "-d smarti_test -c 'SELECT 1' >/dev/null"
                     ),
                 ],
                 "env": [
@@ -399,6 +407,8 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
                 "postgresql://postgres:quality-only@127.0.0.1:5432/fnd_test",
                 "WM_TEST_POSTGRES_DSN="
                 "postgresql://postgres:quality-only@127.0.0.1:5432/wm_test",
+                "SMARTI_TEST_POSTGRES_URL="
+                "postgresql://postgres:quality-only@127.0.0.1:5432/smarti_test",
             ]
         )
         quality_step.update(
@@ -412,6 +422,13 @@ def build_request(execution: dict[str, Any], service: CatalogService) -> dict[st
                         "socat TCP-LISTEN:5432,bind=127.0.0.1,fork,reuseaddr "
                         "TCP:eng-platform-postgres:5432 & proxy=$!; "
                         "trap 'kill $proxy >/dev/null 2>&1 || true' EXIT; "
+                        "for proxy_attempt in $(seq 1 30); do "
+                        "if python3 -c 'import socket; "
+                        'socket.create_connection(("127.0.0.1", 5432), timeout=1).close()\' '
+                        ">/dev/null 2>&1; then break; fi; "
+                        "kill -0 $proxy; sleep 1; done; "
+                        "python3 -c 'import socket; "
+                        'socket.create_connection(("127.0.0.1", 5432), timeout=1).close()\'; '
                         'python3 /opt/eng-platform/quality_executor.py "$@"'
                     ),
                     "quality-with-postgres",

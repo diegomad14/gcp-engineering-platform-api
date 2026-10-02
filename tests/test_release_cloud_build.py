@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import os
+import subprocess
+import sys
 from unittest import mock
 
 import pytest
@@ -623,6 +626,13 @@ def test_postgres_profile_uses_pinned_image_and_isolated_test_dsn(
         "docker exec eng-platform-postgres createdb -U postgres fnd_test"
         in postgres["args"][3]
     )
+    assert (
+        "docker exec eng-platform-postgres createdb -U postgres smarti_test"
+        in postgres["args"][3]
+    )
+    assert "-d wm_test -h 127.0.0.1" in postgres["args"][3]
+    assert "-d fnd_test -c 'SELECT 1'" in postgres["args"][3]
+    assert "-d smarti_test -c 'SELECT 1'" in postgres["args"][3]
     assert postgres["env"] == [f"ENG_PLATFORM_POSTGRES_IMAGE={POSTGRES}"]
     assert postgres["waitFor"] == ["prepare"]
     assert "volumes" not in postgres
@@ -633,12 +643,175 @@ def test_postgres_profile_uses_pinned_image_and_isolated_test_dsn(
     wm_dsn = "postgresql://postgres:quality-only@127.0.0.1:5432/wm_test"
     assert f"FND_TEST_POSTGRES_DSN={fnd_dsn}" in quality["env"]
     assert f"WM_TEST_POSTGRES_DSN={wm_dsn}" in quality["env"]
+    smarti_url = "postgresql://postgres:quality-only@127.0.0.1:5432/smarti_test"
+    assert f"SMARTI_TEST_POSTGRES_URL={smarti_url}" in quality["env"]
     assert quality["entrypoint"] == "/bin/bash"
     assert quality["args"][:3] == ["-euo", "pipefail", "-c"]
     assert "socat TCP-LISTEN:5432,bind=127.0.0.1" in quality["args"][3]
     assert "TCP:eng-platform-postgres:5432" in quality["args"][3]
+    assert "for proxy_attempt in $(seq 1 30)" in quality["args"][3]
+    assert "socket.create_connection" in quality["args"][3]
     assert quality["args"][5:7] == ["--mode", "run"]
     assert all(volume["name"] != "release-control" for volume in quality["volumes"])
+
+
+@pytest.fixture
+def postgres_request(configured, monkeypatch):
+    service = _service(
+        name="cgm-sanplat-api",
+        repository="owner/cgm-sanplat-api",
+        runtime="python",
+        coverage=70,
+    )
+    monkeypatch.setattr(
+        cloud_build.config.release_orchestrator,
+        "enabled_services",
+        (service.service_name,),
+    )
+    monkeypatch.setattr(
+        cloud_build.config.cloud_build,
+        "repositories",
+        {service.service_name: REPOSITORY_RESOURCE},
+    )
+    return cloud_build.build_request(_execution_for(service), service)
+
+
+@pytest.mark.parametrize(
+    "mode,passed",
+    [
+        ("ready", True),
+        ("transient", True),
+        ("not-ready", False),
+        ("fnd-fails", False),
+        ("smarti-fails", False),
+        ("probe-fails", False),
+    ],
+)
+def test_postgres_script_provisions_both_databases_and_fails_closed(
+    postgres_request, tmp_path, mode, passed
+):
+    """Execute the actual generated shell against local Docker test doubles."""
+    bin_directory = tmp_path / "bin"
+    bin_directory.mkdir()
+    log = tmp_path / "calls.jsonl"
+    state = tmp_path / "state.json"
+    docker = bin_directory / "docker"
+    docker.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "with open(os.environ['CALL_LOG'], 'a') as log: log.write(json.dumps(args) + '\\n')\n"
+        "path = Path(os.environ['DB_STATE'])\n"
+        "state = json.loads(path.read_text()) if path.exists() else {}\n"
+        "mode = os.environ['TEST_MODE']\n"
+        "status = 0\n"
+        "if 'pg_isready' in args:\n"
+        "    state['ready'] = state.get('ready', 0) + 1\n"
+        "    status = int(mode == 'not-ready' or (mode == 'transient' and state['ready'] == 1))\n"
+        "elif 'createdb' in args:\n"
+        "    database = args[-1]\n"
+        "    key = 'create_' + database\n"
+        "    state[key] = state.get(key, 0) + 1\n"
+        "    status = int(mode == database.removesuffix('_test') + '-fails' or (mode == 'transient' and state[key] == 1))\n"
+        "    if not status: state[database] = True\n"
+        "elif 'psql' in args:\n"
+        "    database = args[args.index('-d') + 1]\n"
+        "    status = int(not state.get(database) or (mode == 'probe-fails' and database == 'smarti_test'))\n"
+        "path.write_text(json.dumps(state))\n"
+        "sys.exit(status)\n"
+    )
+    docker.chmod(0o755)
+    sleep = bin_directory / "sleep"
+    sleep.write_text("#!/bin/sh\nexit 0\n")
+    sleep.chmod(0o755)
+    step = next(step for step in postgres_request["steps"] if step["id"] == "postgres")
+    # Cloud Build unescapes $$ before executing the requested shell.
+    command = step["args"][3].replace("$$", "$")
+    completed = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", command],
+        env={
+            **os.environ,
+            "PATH": f"{bin_directory}:{os.environ['PATH']}",
+            "CALL_LOG": str(log),
+            "DB_STATE": str(state),
+            "TEST_MODE": mode,
+            "ENG_PLATFORM_POSTGRES_IMAGE": POSTGRES,
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert (completed.returncode == 0) is passed, completed.stderr
+    assert calls[0][-1] == POSTGRES
+    if mode == "not-ready":
+        assert not any("createdb" in call for call in calls)
+    if passed:
+        for database in ("fnd_test", "smarti_test"):
+            assert any("createdb" in call and database in call for call in calls)
+            assert any("psql" in call and database in call for call in calls)
+        assert json.loads(state.read_text())["smarti_test"] is True
+
+
+@pytest.mark.parametrize("ready", [True, False])
+def test_postgres_proxy_readiness_precedes_quality_and_propagates_smarti(
+    postgres_request, tmp_path, ready
+):
+    bin_directory = tmp_path / "bin"
+    bin_directory.mkdir()
+    log = tmp_path / "calls.jsonl"
+    proxy = bin_directory / "socat"
+    proxy.write_text("#!/bin/sh\nexec /bin/sleep 20\n")
+    proxy.chmod(0o755)
+    python = bin_directory / "python3"
+    python.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "args = sys.argv[1:]\n"
+        "with open(os.environ['CALL_LOG'], 'a') as log:\n"
+        "    log.write(json.dumps({'args': args, 'smarti': os.environ.get('SMARTI_TEST_POSTGRES_URL')}) + '\\n')\n"
+        "if args[0] == '-c': sys.exit(0 if os.environ['PROXY_READY'] == 'yes' else 1)\n"
+    )
+    python.chmod(0o755)
+    sleep = bin_directory / "sleep"
+    sleep.write_text("#!/bin/sh\nexit 0\n")
+    sleep.chmod(0o755)
+    step = next(step for step in postgres_request["steps"] if step["id"] == "quality")
+    smarti = next(
+        value.split("=", 1)[1]
+        for value in step["env"]
+        if value.startswith("SMARTI_TEST_POSTGRES_URL=")
+    )
+    completed = subprocess.run(
+        ["bash", *step["args"]],
+        env={
+            **os.environ,
+            "PATH": f"{bin_directory}:{os.environ['PATH']}",
+            "CALL_LOG": str(log),
+            "PROXY_READY": "yes" if ready else "no",
+            "SMARTI_TEST_POSTGRES_URL": smarti,
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert (completed.returncode == 0) is ready, completed.stderr
+    assert calls[0]["args"][0] == "-c"
+    executors = [call for call in calls if call["args"][0] != "-c"]
+    if ready:
+        assert len(executors) == 1
+        assert executors[0]["args"] == [
+            "/opt/eng-platform/quality_executor.py",
+            *step["args"][5:],
+        ]
+        assert (
+            executors[0]["smarti"]
+            == "postgresql://postgres:quality-only@127.0.0.1:5432/smarti_test"
+        )
+    else:
+        assert not executors
 
 
 def test_postgres_profile_rejects_unpinned_database_image(configured, monkeypatch):

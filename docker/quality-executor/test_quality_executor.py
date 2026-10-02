@@ -170,6 +170,83 @@ class QualityProfilesTest(unittest.TestCase):
         self.assertFalse(advisory["Dependency audit advisory"]["blocking"])
 
 
+class MandatorySmartiEvidenceTest(unittest.TestCase):
+    def _report(self, service: str, status: str = "PASSED"):
+        profile = quality_profiles.profile_for(service)
+        identity = {
+            "service_name": service,
+            "repository": "diegomad14/" + service,
+            "head_sha": "a" * 40,
+            "base_sha": "b" * 40,
+        }
+        extra = next(
+            extra
+            for extra in profile["extra"]
+            if extra["category"] in {"smarti_ux", "smarti_postgres"}
+        )
+        report = {
+            "service_name": identity["service_name"],
+            "repository": identity["repository"],
+            "commit_sha": identity["head_sha"],
+            "base_sha": identity["base_sha"],
+            "policy_version": "oss-v2",
+            "profile": profile["runtime"],
+            "checks": [
+                {
+                    "name": extra["name"],
+                    "category": extra["category"],
+                    "status": status,
+                    "findings": int(status == "FAILED"),
+                    "blocking_findings": int(status == "FAILED"),
+                }
+            ],
+        }
+        if profile.get("container_smoke"):
+            report["checks"].append({"category": "container_smoke"})
+        return report, identity, profile
+
+    def test_both_mandatory_categories_record_passes_and_failures(self):
+        for service in ("cgm-artemis-api", "cgm-artemis-web"):
+            for status in ("PASSED", "FAILED"):
+                with self.subTest(service=service, status=status):
+                    report, identity, profile = self._report(service, status)
+                    self.assertEqual(
+                        64,
+                        len(
+                            quality_executor._validate_report(report, identity, profile)
+                        ),
+                    )
+
+    def test_missing_duplicate_skipped_and_advisory_evidence_fail_closed(self):
+        for service in ("cgm-artemis-api", "cgm-artemis-web"):
+            for mutation in ("missing", "duplicate", "skipped", "advisory", "name"):
+                with self.subTest(service=service, mutation=mutation):
+                    report, identity, profile = self._report(service)
+                    if mutation == "missing":
+                        report["checks"][0]["category"] = "tests"
+                    elif mutation == "duplicate":
+                        report["checks"].append(dict(report["checks"][0]))
+                    elif mutation == "skipped":
+                        report["checks"][0]["status"] = "SKIPPED"
+                    elif mutation == "name":
+                        report["checks"][0]["name"] = "unreviewed replacement"
+                    else:
+                        report["checks"][0].update(status="FAILED", findings=1)
+                    with self.assertRaisesRegex(
+                        quality_executor.QualityExecutorError,
+                        "Smarti quality result",
+                    ):
+                        quality_executor._validate_report(report, identity, profile)
+
+    def test_undeclared_smarti_evidence_is_rejected(self):
+        report, identity, profile = self._report("cgm-artemis-web")
+        profile["extra"] = []
+        with self.assertRaisesRegex(
+            quality_executor.QualityExecutorError, "Unexpected mandatory Smarti"
+        ):
+            quality_executor._validate_report(report, identity, profile)
+
+
 class QualityIsolationTest(unittest.TestCase):
     def _identity_environment(self) -> dict[str, str]:
         return {
@@ -204,6 +281,52 @@ class QualityIsolationTest(unittest.TestCase):
                 Path(directory), identity, profile
             )
         self.assertTrue(quality_executor._SENSITIVE_ENV_NAMES.isdisjoint(environment))
+
+    def test_smarti_browser_environment_uses_only_the_immutable_image_path(
+        self,
+    ) -> None:
+        identity = {"head_sha": "a" * 40, "base_sha": "b" * 40}
+        profile = quality_profiles.profile_for("cgm-artemis-web")
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.dict(
+                os.environ,
+                {
+                    "PLAYWRIGHT_BROWSERS_PATH": "/untrusted/override",
+                    "GITHUB_TOKEN": "must-not-leak",
+                    "GOOGLE_APPLICATION_CREDENTIALS": "/untrusted/credentials",
+                },
+            ),
+        ):
+            environment = quality_executor._child_environment(
+                Path(tmp), identity, profile
+            )
+        self.assertEqual(
+            environment["PLAYWRIGHT_BROWSERS_PATH"],
+            "/opt/eng-platform/playwright-browsers",
+        )
+        self.assertEqual(environment["PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"], "1")
+        self.assertTrue(quality_executor._SENSITIVE_ENV_NAMES.isdisjoint(environment))
+
+    def test_failed_smarti_extra_is_blocking_without_changing_its_category(
+        self,
+    ) -> None:
+        extra = next(
+            check
+            for check in quality_profiles.profile_for("cgm-artemis-web")["extra"]
+            if check["category"] == "smarti_ux"
+        )
+        with mock.patch.object(
+            quality_executor.subprocess,
+            "run",
+            return_value=mock.Mock(returncode=1, stdout="Smarti UX FAILED"),
+        ):
+            result = quality_executor._extra_check(
+                extra, Path("/checkout"), Path("/environment"), Path("/reports"), 100.0
+            )
+        self.assertEqual(result["status"], "FAILED")
+        self.assertEqual(result["category"], "smarti_ux")
+        self.assertEqual(result["blocking_findings"], 1)
 
     def test_event_token_is_private_and_required_on_callback(self) -> None:
         token = "secret-" + "x" * 58
@@ -442,18 +565,24 @@ while not os.path.exists(os.environ["ATTEMPT_MARKER"]):
             self.assertEqual(124, completed.returncode, completed.stdout)
             self.assertLess(time.monotonic() - started, 2)
 
-    def test_postgres_profile_passes_both_disposable_loopback_dsns(self) -> None:
+    def test_postgres_profile_passes_all_disposable_loopback_dsns(self) -> None:
         fnd = "postgresql://postgres:disposable@127.0.0.1:5432/fnd_test"
         wm = "postgresql+psycopg://postgres:disposable@localhost/wm_test"
+        smarti = "postgresql://postgres:disposable@127.0.0.1:5432/smarti_test"
         with mock.patch.dict(
             os.environ,
-            {"FND_TEST_POSTGRES_DSN": fnd, "WM_TEST_POSTGRES_DSN": wm},
+            {
+                "FND_TEST_POSTGRES_DSN": fnd,
+                "WM_TEST_POSTGRES_DSN": wm,
+                "SMARTI_TEST_POSTGRES_URL": smarti,
+            },
             clear=True,
         ):
             self.assertEqual(
                 {
                     "FND_TEST_POSTGRES_DSN": fnd,
                     "WM_TEST_POSTGRES_DSN": wm,
+                    "SMARTI_TEST_POSTGRES_URL": smarti,
                 },
                 quality_executor._postgres_environment(),
             )
@@ -476,6 +605,78 @@ while not os.path.exists(os.environ["ATTEMPT_MARKER"]):
                 quality_executor.QualityExecutorError, "must use loopback"
             ):
                 quality_executor._postgres_environment()
+
+    def test_smarti_postgres_url_is_required_and_fail_closed(self) -> None:
+        environment = {
+            "FND_TEST_POSTGRES_DSN": "postgresql://postgres@127.0.0.1:5432/fnd_test",
+            "WM_TEST_POSTGRES_DSN": "postgresql://postgres@127.0.0.1:5432/wm_test",
+        }
+        unsafe_urls = (
+            "",
+            "postgresql+psycopg://postgres@127.0.0.1:5432/smarti_test",
+            "postgresql://postgres@production.example:5432/smarti_test",
+            "postgresql://postgres@10.0.0.1:5432/smarti_test",
+            "postgresql:///smarti_test",
+            "postgresql://postgres@127.0.0.1:5433/smarti_test",
+            "postgresql://postgres@127.0.0.1:invalid/smarti_test",
+            "postgresql://postgres@127.0.0.1:5432/wm_test",
+            "postgresql://postgres@127.0.0.1:5432/fnd_test",
+            "postgresql://postgres@127.0.0.1:5432/",
+            "postgresql://postgres@127.0.0.1:5432/smarti_test?hostaddr=10.0.0.1",
+            "postgresql://postgres@127.0.0.1:5432/smarti_test?service=production",
+            "postgresql://postgres@127.0.0.1:5432/smarti_test?",
+            "postgresql://postgres@127.0.0.1:5432/smarti_test#fragment",
+            "postgresql://postgres@127.0.0.1:5432/smarti_test#",
+            "postgresql://postgres@127.0.0.1:5432/smarti_\ntest",
+        )
+        for value in unsafe_urls:
+            with (
+                self.subTest(url=value),
+                mock.patch.dict(
+                    os.environ,
+                    {**environment, "SMARTI_TEST_POSTGRES_URL": value},
+                    clear=True,
+                ),
+                self.assertRaisesRegex(
+                    quality_executor.QualityExecutorError,
+                    "SMARTI_TEST_POSTGRES_URL",
+                ),
+            ):
+                quality_executor._postgres_environment()
+        with mock.patch.dict(os.environ, environment, clear=True):
+            with self.assertRaisesRegex(
+                quality_executor.QualityExecutorError, "SMARTI_TEST_POSTGRES_URL"
+            ):
+                quality_executor._postgres_environment()
+
+    def test_postgres_child_environment_propagates_smarti_without_pg_overrides(
+        self,
+    ) -> None:
+        smarti = "postgresql://postgres@127.0.0.1:5432/smarti_test"
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.dict(
+                os.environ,
+                {
+                    "FND_TEST_POSTGRES_DSN": "postgresql://postgres@127.0.0.1/fnd_test",
+                    "WM_TEST_POSTGRES_DSN": "postgresql://postgres@127.0.0.1/wm_test",
+                    "SMARTI_TEST_POSTGRES_URL": smarti,
+                    "PGHOSTADDR": "10.0.0.1",
+                    "PGSERVICE": "production",
+                    "GOOGLE_APPLICATION_CREDENTIALS": "/tmp/private.json",
+                },
+                clear=True,
+            ),
+        ):
+            environment = quality_executor._child_environment(
+                Path(directory),
+                {"head_sha": "a" * 40, "base_sha": "b" * 40},
+                {"runtime": "node", "postgres": True, "extra": []},
+            )
+        self.assertEqual(smarti, environment["SMARTI_TEST_POSTGRES_URL"])
+        self.assertNotIn("PGHOSTADDR", environment)
+        self.assertNotIn("PGSERVICE", environment)
+        self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", environment)
 
     def test_prepare_fetches_exact_repository_with_host_scoped_token(self) -> None:
         identity = {

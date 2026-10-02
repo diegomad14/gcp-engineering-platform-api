@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import shlex
 import subprocess
+import sys
 
 import pytest
 
@@ -116,6 +117,89 @@ def test_gate_dependencies_allow_independent_work_but_never_early_push(prepared)
     assert all(f"${key}" in step_config for key in config["substitutions"])
 
 
+def test_quality_provisions_and_exports_separate_smarti_database(prepared):
+    config = json.loads((prepared / "cloudbuild.json").read_text())
+    quality = next(step for step in config["steps"] if step["id"] == "quality")
+    assert "container:cgm-fallback-pg" in quality["args"]
+    assert (
+        "SMARTI_TEST_POSTGRES_URL=postgresql://postgres@127.0.0.1:5432/smarti_test"
+        in quality["args"]
+    )
+    assert (
+        "WM_TEST_POSTGRES_DSN=postgresql://postgres@127.0.0.1:5432/wm_test"
+        in quality["args"]
+    )
+    assert (
+        "FND_TEST_POSTGRES_DSN=postgresql://postgres@127.0.0.1:5432/wm_test"
+        in quality["args"]
+    )
+    postgres = (prepared / "postgres.sh").read_text()
+    assert "-d wm_test -h 127.0.0.1" in postgres
+    assert "createdb -U postgres smarti_test" in postgres
+    assert "psql -U postgres -d smarti_test -c 'SELECT 1'" in postgres
+
+
+@pytest.mark.parametrize("mode", ["ready", "not-ready", "create-fails", "probe-fails"])
+def test_prepared_postgres_script_waits_provisions_and_fails_closed(
+    prepared, tmp_path, mode
+):
+    bin_directory = tmp_path / "bin"
+    bin_directory.mkdir()
+    log = tmp_path / "calls.jsonl"
+    docker = bin_directory / "docker"
+    docker.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "args = sys.argv[1:]\n"
+        "with open(os.environ['CALL_LOG'], 'a') as log: log.write(json.dumps(args) + '\\n')\n"
+        "mode = os.environ['TEST_MODE']\n"
+        "status = int(('pg_isready' in args and mode == 'not-ready') or ('createdb' in args and mode == 'create-fails') or ('psql' in args and mode == 'probe-fails'))\n"
+        "sys.exit(status)\n"
+    )
+    docker.chmod(0o755)
+    sleep = bin_directory / "sleep"
+    sleep.write_text("#!/bin/sh\nexit 0\n")
+    sleep.chmod(0o755)
+    completed = subprocess.run(
+        ["bash", str(prepared / "postgres.sh")],
+        env={
+            **os.environ,
+            "PATH": f"{bin_directory}:{os.environ['PATH']}",
+            "CALL_LOG": str(log),
+            "TEST_MODE": mode,
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert (completed.returncode == 0) is (mode == "ready"), completed.stderr
+    if mode == "not-ready":
+        assert not any("createdb" in call for call in calls)
+    if mode == "create-fails":
+        assert not any("psql" in call for call in calls)
+    if mode == "ready":
+        assert calls[-2] == [
+            "exec",
+            "cgm-fallback-pg",
+            "createdb",
+            "-U",
+            "postgres",
+            "smarti_test",
+        ]
+        assert calls[-1] == [
+            "exec",
+            "cgm-fallback-pg",
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            "smarti_test",
+            "-c",
+            "SELECT 1",
+        ]
+
+
 def test_source_permissions_allow_quality_writes_without_changing_runtime_modes(
     prepared,
 ):
@@ -140,6 +224,10 @@ def test_tooling_runs_as_nonroot_with_installable_private_environment():
     assert 'PATH="/opt/quality/bin:${PATH}"' in dockerfile
     assert "safe.directory /workspace/repo" in dockerfile
     assert "safe.directory '*'" not in dockerfile
+    assert "COPY smarti_pg.py test_smarti_pg.py /opt/eng-platform/" in dockerfile
+    assert "chmod 0555 /opt/eng-platform/smarti_pg.py" in dockerfile
+    assert "python -m unittest -q test_smarti_pg.py" in dockerfile
+    assert dockerfile.index("COPY smarti_pg.py") < dockerfile.index("USER quality")
 
 
 @pytest.mark.parametrize(
@@ -232,17 +320,38 @@ def test_shell_values_remain_single_arguments_and_install_is_not_executed(
     assert "FALLBACK_DURATION_PROFILE=/workspace/duration-profile.json" in tests
     assert "-n 2 --dist worksteal" in tests
     assert "--cov=. --cov-report=json:quality-reports/coverage.json" in tests
+    extras = json.loads(tokens[tokens.index("--extra-checks-json") + 1])
+    assert extras == prepare.extra_checks("cgm-sanplat-api")
+    assert extras[0]["blocking"] is True
+    assert extras[0]["command"] == "python /opt/eng-platform/smarti_pg.py"
     assert not sentinel.exists()
 
 
 def test_duration_hints_and_plugin_are_frozen_prepared_inputs(prepared):
     request = json.loads((prepared / "request.json").read_text())
-    for filename in ("pytest_schedule.py", "duration-profile.json"):
+    for filename in (
+        "pytest_schedule.py",
+        "duration-profile.json",
+        "smarti_pg.py",
+        "test_smarti_pg.py",
+    ):
         assert (
             request["input_hashes"][filename]
             == hashlib.sha256((prepared / filename).read_bytes()).hexdigest()
         )
         assert filename in (prepared / "input-manifest.sha256").read_text()
+    assert request["required_extra_categories"] == ["smarti_postgres"]
+
+
+@pytest.mark.parametrize("service", ["cgm-sanplat-api", "cgm-artemis-api"])
+def test_both_smarti_api_identities_require_the_same_blocking_extra(service):
+    assert prepare.extra_checks(service) == prepare.extra_checks("cgm-sanplat-api")
+    assert prepare.extra_checks(service)[0]["blocking"] is True
+
+
+def test_other_python_services_do_not_acquire_smarti_requirements():
+    assert prepare.extra_checks("cgm-bot-api") == []
+    assert prepare.extra_checks("cgm-artemis-job-worker") == []
 
 
 @pytest.fixture
@@ -284,7 +393,18 @@ def passing_evidence(prepared, monkeypatch):
         "differential_coverage": 90,
         "differential_threshold": 80,
         "checks": [
-            {"name": name, "category": name, "status": "PASSED"}
+            {
+                "name": name,
+                "category": name,
+                "status": "PASSED",
+                **(
+                    {
+                        "details": "Smarti PostgreSQL: tests/test_smarti_prevention_postgres.py: 1 executed; tests/test_smarti_publication.py: 40 executed; no skips"
+                    }
+                    if name == "smarti_postgres"
+                    else {}
+                ),
+            }
             for name in (
                 "setup",
                 "tests",
@@ -295,6 +415,7 @@ def passing_evidence(prepared, monkeypatch):
                 "dependencies",
                 "secrets",
                 "misconfiguration",
+                "smarti_postgres",
                 "differential_coverage",
             )
         ],
@@ -308,6 +429,64 @@ def test_publication_accepts_only_canonical_complete_quality(passing_evidence):
     assert result.errors_for(workspace) == []
     assert result.main(workspace, "verify") == 0
     assert (workspace / "evidence/approved").read_text() == "yes"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda checks: checks.clear(),
+        lambda checks: checks.pop(),
+        lambda checks: checks[0].update(status="SKIPPED"),
+        lambda checks: checks[0].update(status="FAILED"),
+        lambda checks: checks[0].update(details=""),
+        lambda checks: checks[0].update(details=None),
+        lambda checks: checks[0].update(findings=1),
+        lambda checks: checks.append(dict(checks[0])),
+    ],
+)
+def test_missing_skipped_failed_or_empty_smarti_execution_evidence_blocks_publication(
+    passing_evidence, mutation
+):
+    workspace, quality = passing_evidence
+    smarti = [
+        check for check in quality["checks"] if check["category"] == "smarti_postgres"
+    ]
+    mutation(smarti)
+    quality["checks"] = [
+        check for check in quality["checks"] if check["category"] != "smarti_postgres"
+    ] + smarti
+    (workspace / "quality-report.json").write_text(json.dumps(quality))
+    assert any("Smarti PostgreSQL" in error for error in result.errors_for(workspace))
+    assert result.main(workspace, "verify") == 1
+    assert (workspace / "evidence/approved").read_text() == "no"
+
+
+@pytest.mark.parametrize("service", ["cgm-sanplat-api", "cgm-artemis-api"])
+def test_smarti_evidence_counts_and_schema_are_required_for_both_api_names(service):
+    for quality in (
+        {"checks": None},
+        {"checks": [{"category": "smarti_postgres", "status": "PASSED"}]},
+        {
+            "checks": [
+                {
+                    "category": "smarti_postgres",
+                    "status": "PASSED",
+                    "details": "Smarti PostgreSQL: tests/test_smarti_prevention_postgres.py: 0 executed; tests/test_smarti_publication.py: 40 executed; no skips",
+                }
+            ]
+        },
+        {
+            "checks": [
+                {
+                    "category": "smarti_postgres",
+                    "status": "PASSED",
+                    "details": "Smarti PostgreSQL: tests/test_smarti_prevention_postgres.py: 1 executed; tests/test_smarti_publication.py: 39 executed; no skips",
+                }
+            ]
+        },
+    ):
+        assert result.smarti_quality_errors(service, quality)
+    assert not result.smarti_quality_errors("cgm-bot-api", {"checks": []})
 
 
 @pytest.mark.parametrize(

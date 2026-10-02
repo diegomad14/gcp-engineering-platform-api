@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -284,6 +285,31 @@ def register_quality(directory: Path, build: dict, api_url: str) -> dict:
     for key in ("repository", "service_name", "commit_sha", "base_sha"):
         if report.get(key) != request[key]:
             raise ValueError("Report does not match the prepared release")
+    if request.get("service_name") in {"cgm-sanplat-api", "cgm-artemis-api"}:
+        supplied = report.get("checks", [])
+        checks = [
+            check
+            for check in (supplied if isinstance(supplied, list) else [])
+            if isinstance(check, dict) and check.get("category") == "smarti_postgres"
+        ]
+        details = checks[0].get("details", "") if len(checks) == 1 else ""
+        evidence = re.fullmatch(
+            r"Smarti PostgreSQL: tests/test_smarti_prevention_postgres\.py: (\d+) executed; "
+            r"tests/test_smarti_publication\.py: (\d+) executed; no skips",
+            details if isinstance(details, str) and len(details) <= 500 else "",
+        )
+        if (
+            len(checks) != 1
+            or checks[0].get("status") != "PASSED"
+            or checks[0].get("findings", 0) != 0
+            or checks[0].get("blocking_findings", 0) != 0
+            or evidence is None
+            or int(evidence[1]) < 1
+            or int(evidence[2]) < 40
+        ):
+            raise ValueError(
+                "Missing or failed blocking Smarti PostgreSQL execution evidence"
+            )
     errors = policy_errors(
         QualityReportCreate.model_validate(report),
         CatalogService.model_validate(read(directory / "catalog-service.json")),

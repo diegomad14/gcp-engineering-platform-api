@@ -83,6 +83,7 @@ def environment(second_database="test"):
     return {
         "WM_TEST_POSTGRES_DSN": "postgresql://postgres@127.0.0.1/wm_test",
         "FND_TEST_POSTGRES_DSN": f"postgresql://postgres@127.0.0.1/{second_database}",
+        "SMARTI_TEST_POSTGRES_URL": "postgresql://postgres@127.0.0.1:5432/smarti_test",
     }
 
 
@@ -106,34 +107,89 @@ def test_rejects_nonlocal_or_implicit_destinations_before_any_connection(dsn):
     assert not driver.connections
 
 
-def test_requires_both_integration_suites_to_be_configured():
-    with pytest.raises(ValueError, match="Both WM_TEST"):
+def test_requires_all_integration_suites_to_be_configured():
+    with pytest.raises(ValueError, match="SMARTI_TEST_POSTGRES_URL"):
         plugin.WorkerDatabases(
             {"WM_TEST_POSTGRES_DSN": environment()["WM_TEST_POSTGRES_DSN"]},
             FakeDriver(),
         )
 
 
-def test_workers_get_unique_fnd_databases_and_preserve_wm_schema_isolation():
+@pytest.mark.parametrize("variable", plugin.DSN_VARIABLES)
+def test_missing_suite_fails_before_any_connection(variable):
+    driver = FakeDriver()
+    settings = environment()
+    del settings[variable]
+    with pytest.raises(ValueError, match="are required"):
+        plugin.WorkerDatabases(settings, driver)
+    assert not driver.connections
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql+psycopg://postgres@127.0.0.1:5432/smarti_test",
+        "postgresql://postgres@production.example:5432/smarti_test",
+        "postgresql://postgres@10.0.0.1:5432/smarti_test",
+        "postgresql:///smarti_test",
+        "postgresql://postgres@127.0.0.1:5433/smarti_test",
+        "postgresql://postgres@127.0.0.1:invalid/smarti_test",
+        "postgresql://postgres@127.0.0.1:5432/wm_test",
+        "postgresql://postgres@127.0.0.1:5432/fnd_test",
+        "postgresql://postgres@127.0.0.1:5432/",
+        "postgresql://postgres@127.0.0.1:5432/smarti_test?hostaddr=10.0.0.1",
+        "postgresql://postgres@127.0.0.1:5432/smarti_test?service=production",
+        "postgresql://postgres@127.0.0.1:5432/smarti_test?",
+        "postgresql://postgres@127.0.0.1:5432/smarti_test#fragment",
+        "postgresql://postgres@127.0.0.1:5432/smarti_test#",
+        "postgresql://postgres@127.0.0.1:5432/smarti_\ntest",
+    ],
+)
+def test_unsafe_smarti_url_fails_before_any_connection(url):
+    driver = FakeDriver()
+    settings = environment()
+    settings["SMARTI_TEST_POSTGRES_URL"] = url
+    with pytest.raises(ValueError, match="Smarti"):
+        plugin.WorkerDatabases(settings, driver)
+    assert not driver.connections
+
+
+def test_workers_get_unique_fnd_and_smarti_databases_and_preserve_wm_isolation():
     driver = FakeDriver()
     state = plugin.WorkerDatabases(environment(), driver)
     first, second = state.allocate("gw0"), state.allocate("gw1")
     assert urlsplit(first["WM_TEST_POSTGRES_DSN"]).path == "/wm_test"
     assert first["WM_TEST_POSTGRES_DSN"] == second["WM_TEST_POSTGRES_DSN"]
     assert first["FND_TEST_POSTGRES_DSN"] != second["FND_TEST_POSTGRES_DSN"]
+    smarti = urlsplit(first["SMARTI_TEST_POSTGRES_URL"])
+    assert smarti.scheme == "postgresql"
+    assert smarti.hostname == "127.0.0.1"
+    assert smarti.port == 5432
+    assert smarti.path.startswith("/smarti_")
+    assert smarti.path != "/smarti_test"
+    assert not smarti.query and not smarti.fragment
+    assert first["SMARTI_TEST_POSTGRES_URL"] != second["SMARTI_TEST_POSTGRES_URL"]
+    assert smarti.path != urlsplit(first["FND_TEST_POSTGRES_DSN"]).path
     assert first != second
-    assert len(driver.connections) == 2
+    assert len(driver.connections) == 4
     assert state.allocate("gw0") == first
-    assert len(driver.connections) == 2
+    assert len(driver.connections) == 4
     assert all(item["dbname"] == "postgres" for item in driver.connections)
     assert all(item["hostaddr"] == "127.0.0.1" for item in driver.connections)
+    assert all(item["connect_timeout"] == "5" for item in driver.connections)
+    for variable in ("WM_TEST_POSTGRES_DSN", "FND_TEST_POSTGRES_DSN"):
+        assert parse_qs(urlsplit(first[variable]).query) == {
+            "hostaddr": ["127.0.0.1"],
+            "connect_timeout": ["5"],
+        }
     assert all("TEMPLATE template0 ENCODING 'UTF8'" in s for s in driver.statements)
     state.close()
     state.close()
-    assert len(driver.statements) == 4
-    assert all("DROP DATABASE" in s for s in driver.statements[2:])
+    assert len(driver.statements) == 8
+    assert all("DROP DATABASE" in s for s in driver.statements[4:])
     assert not state.created
-    assert driver.closed == 4
+    assert not state.workers
+    assert driver.closed == 8
 
 
 def test_separate_runs_never_reuse_names():
@@ -142,20 +198,48 @@ def test_separate_runs_never_reuse_names():
     assert first != second
 
 
+def test_worker_ids_with_matching_sanitized_names_still_get_unique_databases():
+    state = plugin.WorkerDatabases(environment(), FakeDriver())
+    first = state.allocate("very-long-worker!first")
+    second = state.allocate("very-long-worker!second")
+    for variable in plugin.WORKER_DATABASE_VARIABLES:
+        assert first[variable] != second[variable]
+        assert len(urlsplit(first[variable]).path.removeprefix("/")) <= 63
+    state.close()
+
+
+def test_failed_smarti_creation_rolls_back_fnd_in_same_worker():
+    driver = FakeDriver()
+    driver.fail_on = lambda statement: (
+        "CREATE DATABASE" in statement and "smarti_" in statement
+    )
+    state = plugin.WorkerDatabases(environment(), driver)
+    with pytest.raises(RuntimeError, match="database operation failed"):
+        state.allocate("gw0")
+    assert len(driver.statements) == 3
+    assert "DROP DATABASE" in driver.statements[-1]
+    assert "fallback_" in driver.statements[-1]
+    assert not state.created
+    assert not state.workers
+    assert driver.closed == 3
+
+
 def test_partial_creation_rolls_back_already_created_database():
     driver = FakeDriver()
     driver.fail_on = lambda statement: (
-        "CREATE DATABASE" in statement and "_gw1" in statement
+        "CREATE DATABASE" in statement
+        and "smarti_" in statement
+        and "_gw1" in statement
     )
     state = plugin.WorkerDatabases(environment(), driver)
     state.allocate("gw0")
     with pytest.raises(RuntimeError, match="database operation failed"):
         state.allocate("gw1")
-    assert len(driver.statements) == 3
+    assert len(driver.statements) == 7
     assert "DROP DATABASE" in driver.statements[-1]
     assert not state.created
-    assert "gw1" not in state.workers
-    assert driver.closed == 3
+    assert not state.workers
+    assert driver.closed == 7
 
 
 def test_cleanup_attempts_every_database_and_surfaces_failure_then_can_retry():
@@ -164,15 +248,18 @@ def test_cleanup_attempts_every_database_and_surfaces_failure_then_can_retry():
     state.allocate("gw0")
     state.allocate("gw1")
     driver.fail_on = lambda statement: (
-        "DROP DATABASE" in statement and "_gw0" in statement
+        "DROP DATABASE" in statement
+        and "fallback_" in statement
+        and "_gw0" in statement
     )
     with pytest.raises(RuntimeError, match="Failed to clean up 1"):
         state.close()
-    assert len(driver.statements) == 4
+    assert len(driver.statements) == 8
     assert len(state.created) == 1
     driver.fail_on = None
     state.close()
     assert not state.created
+    assert not state.workers
 
 
 def test_uri_preserves_credentials_ipv6_and_options_without_environment_redirect():
@@ -205,13 +292,42 @@ def test_controller_hooks_assign_worker_environment_and_clean_up(monkeypatch):
     plugin.pytest_configure_node(node)
     for variable in plugin.DSN_VARIABLES:
         monkeypatch.setenv(variable, "original")
+    for variable in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
+        monkeypatch.setenv(variable, "untrusted-libpq-redirect")
     plugin.pytest_configure(SimpleNamespace(workerinput=node.workerinput))
     import os
 
-    assert (
-        os.environ["WM_TEST_POSTGRES_DSN"]
-        == state.workers["gw0"]["WM_TEST_POSTGRES_DSN"]
+    assert all(
+        os.environ[variable] == state.workers["gw0"][variable]
+        for variable in plugin.DSN_VARIABLES
     )
+    assert all(
+        variable not in os.environ
+        for variable in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE")
+    )
+    for variable in ("WM_TEST_POSTGRES_DSN", "FND_TEST_POSTGRES_DSN"):
+        assert parse_qs(urlsplit(os.environ[variable]).query) == {
+            "hostaddr": ["127.0.0.1"],
+            "connect_timeout": ["5"],
+        }
+    assert not urlsplit(os.environ["SMARTI_TEST_POSTGRES_URL"]).query
     plugin.pytest_sessionfinish(SimpleNamespace(config=config), 1)
     plugin.pytest_unconfigure(config)
     assert not state.created
+
+
+def test_controller_does_not_scrub_ambient_libpq_settings(monkeypatch):
+    import os
+
+    state = plugin.WorkerDatabases(environment(), FakeDriver())
+    for variable in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
+        monkeypatch.setenv(variable, "controller-value")
+    monkeypatch.setattr(plugin, "WorkerDatabases", lambda _environment: state)
+    config = SimpleNamespace(getoption=lambda _name, default=0: 2)
+    plugin.pytest_configure(config)
+    assert getattr(config, plugin.STATE_ATTRIBUTE) is state
+    assert all(
+        os.environ[variable] == "controller-value"
+        for variable in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE")
+    )
+    plugin.pytest_unconfigure(config)

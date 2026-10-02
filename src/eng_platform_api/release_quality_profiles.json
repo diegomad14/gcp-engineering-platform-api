@@ -95,7 +95,8 @@
         "typecheck": "npx tsc --noEmit"
       },
       "extra": [
-        {"name": "Proxy script contracts", "category": "proxy_contracts", "command": "python3 -m unittest discover -s scripts -p \"test_*.py\"", "blocking": true}
+        {"name": "Proxy script contracts", "category": "proxy_contracts", "command": "python3 -m unittest discover -s scripts -p \"test_*.py\"", "blocking": true},
+        {"name": "Smarti UX", "category": "smarti_ux", "command": "python3 /opt/eng-platform/smarti_ux.py", "blocking": true}
       ]
     },
     "cgm-sanplat-api": {
@@ -113,7 +114,9 @@
         "format": "ruff format --check .",
         "typecheck": "python -m compileall -q src/cgm_sanplat_param"
       },
-      "extra": []
+      "extra": [
+        {"name": "Smarti PostgreSQL integration", "category": "smarti_postgres", "command": "python /opt/eng-platform/smarti_pg.py", "blocking": true}
+      ]
     }
   }
 }
