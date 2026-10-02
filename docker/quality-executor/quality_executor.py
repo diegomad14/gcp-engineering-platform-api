@@ -573,6 +573,20 @@ def _extra_check(
     tail = completed.stdout.strip().splitlines()
     failed = completed.returncode != 0
     blocking = bool(extra["blocking"])
+    if failed:
+        # Extra commands otherwise disappear inside capture_output, and their
+        # report files live only in the disposable quality container. Preserve
+        # a bounded diagnostic tail in the provider's durable build log.
+        output = completed.stdout[-32768:]
+        output = "".join(
+            character
+            for character in output
+            if character.isprintable() or character in "\n\t"
+        )
+        print(f"Extra check {extra['category']} failed (exit {completed.returncode}):")
+        if len(completed.stdout) > 32768:
+            print("[earlier extra-check output truncated]")
+        print(output, flush=True)
     detail = tail[-1][:500] if tail else ""
     if failed and not blocking:
         detail = f"Advisory check failed: {detail}"[:500]

@@ -328,6 +328,58 @@ class QualityIsolationTest(unittest.TestCase):
         self.assertEqual(result["category"], "smarti_ux")
         self.assertEqual(result["blocking_findings"], 1)
 
+    def test_failed_extra_diagnostics_reach_build_log_with_a_size_limit(self) -> None:
+        extra = {
+            "name": "Smarti UX",
+            "category": "smarti_ux",
+            "command": "test",
+            "blocking": True,
+        }
+        output = (
+            "discarded-prefix" + "x" * 40000 + "\nSmarti UX FAILED: browser unavailable"
+        )
+        with (
+            mock.patch.object(
+                quality_executor.subprocess,
+                "run",
+                return_value=mock.Mock(returncode=1, stdout=output),
+            ),
+            mock.patch("builtins.print") as log,
+        ):
+            result = quality_executor._extra_check(
+                extra, Path("/checkout"), Path("/environment"), Path("/reports"), 100.0
+            )
+        logged = "\n".join(str(call.args[0]) for call in log.call_args_list)
+        self.assertIn("smarti_ux failed (exit 1)", logged)
+        self.assertIn("earlier extra-check output truncated", logged)
+        self.assertNotIn("discarded-prefix", logged)
+        self.assertIn("browser unavailable", logged)
+        self.assertLess(len(logged), 33000)
+        self.assertEqual(result["details"], "Smarti UX FAILED: browser unavailable")
+        self.assertEqual(result["status"], "FAILED")
+        self.assertEqual(result["blocking_findings"], 1)
+
+    def test_successful_extra_does_not_emit_failure_diagnostics(self) -> None:
+        extra = {
+            "name": "Smarti UX",
+            "category": "smarti_ux",
+            "command": "test",
+            "blocking": True,
+        }
+        with (
+            mock.patch.object(
+                quality_executor.subprocess,
+                "run",
+                return_value=mock.Mock(returncode=0, stdout="passed"),
+            ),
+            mock.patch("builtins.print") as log,
+        ):
+            result = quality_executor._extra_check(
+                extra, Path("/checkout"), Path("/environment"), Path("/reports"), 100.0
+            )
+        log.assert_not_called()
+        self.assertEqual(result["status"], "PASSED")
+
     def test_event_token_is_private_and_required_on_callback(self) -> None:
         token = "secret-" + "x" * 58
         with (

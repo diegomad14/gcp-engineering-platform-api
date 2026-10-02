@@ -39,6 +39,73 @@ def report(*, executed: bool = True) -> dict:
 
 
 class SmartiUXTest(unittest.TestCase):
+    def test_failure_diagnostics_report_browser_stderr_without_launch_flags(
+        self,
+    ) -> None:
+        broken = report()
+        result = broken["suites"][0]["specs"][0]["tests"][0]["results"][0]
+        result.update(
+            status="failed",
+            error={
+                "message": (
+                    "browserType.launch: Browser closed\n<launching> "
+                    + "flag " * 1000
+                    + "\n[pid=1][err] error while loading shared libraries: libExample.so"
+                )
+            },
+        )
+        diagnostics = smarti_ux._failure_diagnostics(broken)
+        self.assertEqual(len(diagnostics), 1)
+        self.assertIn(
+            "smarti-prevention.ux.spec.ts | Smarti desktop | failed", diagnostics[0]
+        )
+        self.assertIn("libExample.so", diagnostics[0])
+        self.assertNotIn("<launching>", diagnostics[0])
+
+    def test_failure_diagnostics_are_bounded_and_strip_terminal_controls(self) -> None:
+        broken = report()
+        broken["errors"] = [{"message": "\x1b[31mconfiguration\x1b[0m\n" + "x" * 10000}]
+        for _, _, test in smarti_ux.cases(broken):
+            test["results"] = [
+                {"status": "timedOut", "errors": [{"message": "assertion failed"}]}
+            ]
+        diagnostics = smarti_ux._failure_diagnostics(broken)
+        self.assertEqual(len(diagnostics), 7)
+        self.assertLess(len(diagnostics[0]), 1700)
+        self.assertNotIn("\x1b", diagnostics[0])
+        self.assertNotIn("\n", diagnostics[0])
+        self.assertTrue(all("assertion failed" in line for line in diagnostics[1:]))
+        broken["errors"] *= 10
+        self.assertEqual(len(smarti_ux._failure_diagnostics(broken)), 12)
+
+    def test_malformed_failure_diagnostics_keep_a_bounded_fallback(self) -> None:
+        for field, value in (("errors", None), ("errors", {}), ("suites", None)):
+            broken = report()
+            broken[field] = value
+            self.assertEqual(
+                smarti_ux._failure_diagnostics(broken),
+                ["Playwright returned malformed failure diagnostics"],
+            )
+        broken = report()
+        broken["suites"][0]["specs"][0]["tests"][0]["results"] = None
+        self.assertEqual(
+            smarti_ux._failure_diagnostics(broken),
+            ["Playwright returned malformed failure diagnostics"],
+        )
+
+    def test_no_json_includes_captured_stderr(self) -> None:
+        with mock.patch.object(
+            smarti_ux.subprocess,
+            "run",
+            return_value=mock.Mock(
+                stdout="", stderr="\x1b[31mCannot load config\x1b[0m", returncode=1
+            ),
+        ):
+            with self.assertRaisesRegex(
+                smarti_ux.SmartiUXError, "JSON report: Cannot load config"
+            ):
+                smarti_ux._run_json(Path.cwd(), [])
+
     def test_requires_all_specs_and_both_viewports(self) -> None:
         smarti_ux.validate_report(report(executed=False), executed=False)
         smarti_ux.validate_report(report(), executed=True)
@@ -159,6 +226,31 @@ class SmartiUXTest(unittest.TestCase):
                 ):
                     with self.assertRaisesRegex(smarti_ux.SmartiUXError, "execution"):
                         smarti_ux.run(root)
+                broken = report()
+                broken["suites"][0]["specs"][0]["tests"][0]["results"][0].update(
+                    status="failed", error={"message": "Browser library unavailable"}
+                )
+                with (
+                    mock.patch.object(
+                        smarti_ux,
+                        "_run_json",
+                        side_effect=[(0, report(executed=False)), (1, broken)],
+                    ),
+                    mock.patch.object(smarti_ux.sys, "stderr") as stderr,
+                ):
+                    with self.assertRaisesRegex(
+                        smarti_ux.SmartiUXError, "Browser library unavailable"
+                    ):
+                        smarti_ux.run(root)
+                    self.assertIn(
+                        "Browser library unavailable", str(stderr.write.call_args_list)
+                    )
+                    self.assertEqual(
+                        json.loads(
+                            (root / "quality-reports/smarti-ux.json").read_text()
+                        ),
+                        broken,
+                    )
 
     def test_json_subprocess_and_main_return_actual_outcome(self) -> None:
         for stdout in ("not json", "[]"):
