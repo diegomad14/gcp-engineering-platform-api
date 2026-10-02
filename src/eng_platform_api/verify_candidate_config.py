@@ -1,13 +1,100 @@
-"""Read-only release check for the exact API candidate's secrets writer."""
+"""Read-only check of the exact API candidate's writer and quality bundle."""
 
 import argparse
+import hashlib
+import importlib.util
 import json
+import re
 import subprocess
+from pathlib import Path
 
 WRITER_ENV = "ENG_PLATFORM_SECRETS_WRITER_SERVICE_ACCOUNT"
 EXPECTED_WRITER = (
     "eng-platform-secret-writer@cgm-assistant-prod.iam.gserviceaccount.com"
 )
+BUNDLE_PATH = Path(__file__).with_name("quality_executor_bundle.json")
+MANIFEST_PATH = Path(__file__).with_name("release_quality_profiles.json")
+TOOLING_REGISTRY = "us-central1-docker.pkg.dev/cgm-assistant-prod/cgm-sanplat-repo"
+IMAGE_NAMES = {
+    "ENG_PLATFORM_QUALITY_NODE_IMAGE": "quality-node",
+    "ENG_PLATFORM_QUALITY_PYTHON_IMAGE": "quality-python",
+}
+PROFILE_VALIDATOR_PATH = (
+    Path(__file__).resolve().parents[2] / "docker/quality-executor/quality_profiles.py"
+)
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for name, value in pairs:
+        if name in result:
+            raise ValueError("ambiguous JSON object")
+        result[name] = value
+    return result
+
+
+def _validate_manifest(raw: object) -> None:
+    """Reuse the unchanged executor validator from the same tagged checkout."""
+    if not isinstance(raw, dict) or set(raw) != {"schema_version", "profiles"}:
+        raise ValueError("invalid manifest")
+    profiles = raw["profiles"]
+    if (
+        type(raw["schema_version"]) is not int
+        or raw["schema_version"] != 1
+        or not isinstance(profiles, dict)
+        or not profiles
+    ):
+        raise ValueError("invalid manifest schema")
+    spec = importlib.util.spec_from_file_location(
+        "candidate_quality_profile_validator", PROFILE_VALIDATOR_PATH
+    )
+    if spec is None or spec.loader is None:
+        raise ValueError("source profile validator is unavailable")
+    validator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(validator)
+    for name, profile in profiles.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("invalid manifest service")
+        validator._validate_profile(name, profile)
+
+
+def _tooling_images() -> dict[str, str]:
+    """Load the reviewed source bundle, not settings from the running API."""
+    bundle = json.loads(
+        BUNDLE_PATH.read_text(encoding="utf-8"), object_pairs_hook=_unique_object
+    )
+    if not isinstance(bundle, dict) or set(bundle) != {
+        "schema_version",
+        "tooling_source_sha",
+        "manifest_sha256",
+        "images",
+    }:
+        raise ValueError("invalid bundle")
+    if type(bundle["schema_version"]) is not int or bundle["schema_version"] != 1:
+        raise ValueError("invalid bundle schema")
+    source_sha = bundle["tooling_source_sha"]
+    manifest_sha = bundle["manifest_sha256"]
+    if not isinstance(source_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+        raise ValueError("invalid tooling source")
+    if not isinstance(manifest_sha, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", manifest_sha
+    ):
+        raise ValueError("invalid manifest hash")
+    manifest_bytes = MANIFEST_PATH.read_bytes()
+    if hashlib.sha256(manifest_bytes).hexdigest() != manifest_sha:
+        raise ValueError("manifest does not match bundle")
+    _validate_manifest(json.loads(manifest_bytes, object_pairs_hook=_unique_object))
+    images = bundle["images"]
+    if not isinstance(images, dict) or set(images) != set(IMAGE_NAMES):
+        raise ValueError("invalid tooling images")
+    for name, image in IMAGE_NAMES.items():
+        value = images[name]
+        prefix = re.escape(f"{TOOLING_REGISTRY}/{image}@sha256:")
+        if not isinstance(value, str) or not re.fullmatch(
+            prefix + r"[0-9a-f]{64}", value
+        ):
+            raise ValueError("tooling image must be a reviewed immutable digest")
+    return {name: images[name] for name in IMAGE_NAMES}
 
 
 def verify(project: str, region: str, revision: str) -> bool:
@@ -15,6 +102,7 @@ def verify(project: str, region: str, revision: str) -> bool:
     if not all(value.strip() for value in (project, region, revision)):
         return False
     try:
+        required = {WRITER_ENV: EXPECTED_WRITER, **_tooling_images()}
         result = subprocess.run(
             [
                 "gcloud",
@@ -31,15 +119,17 @@ def verify(project: str, region: str, revision: str) -> bool:
             check=True,
             timeout=60,
         )
-        data = json.loads(result.stdout)
+        data = json.loads(result.stdout, object_pairs_hook=_unique_object)
         if data["metadata"]["name"] != revision:
             return False
         env = data["spec"]["containers"][0].get("env", [])
-        matches = [item for item in env if item.get("name") == WRITER_ENV]
-        return len(matches) == 1 and matches[0] == {
-            "name": WRITER_ENV,
-            "value": EXPECTED_WRITER,
-        }
+        if not isinstance(env, list) or not all(isinstance(item, dict) for item in env):
+            return False
+        for name, value in required.items():
+            matches = [item for item in env if item.get("name") == name]
+            if len(matches) != 1 or matches[0] != {"name": name, "value": value}:
+                return False
+        return True
     except (
         OSError,
         subprocess.SubprocessError,
@@ -48,6 +138,10 @@ def verify(project: str, region: str, revision: str) -> bool:
         IndexError,
         TypeError,
         AttributeError,
+        ImportError,
+        RuntimeError,
+        SyntaxError,
+        OverflowError,
     ):
         return False
 
@@ -59,7 +153,9 @@ def main() -> int:
     parser.add_argument("--revision", required=True)
     args = parser.parse_args()
     passed = verify(args.project, args.region, args.revision)
-    print("Candidate secrets writer check: " + ("PASS" if passed else "FAIL"))
+    print(
+        "Candidate writer and quality tooling check: " + ("PASS" if passed else "FAIL")
+    )
     return 0 if passed else 1
 
 
