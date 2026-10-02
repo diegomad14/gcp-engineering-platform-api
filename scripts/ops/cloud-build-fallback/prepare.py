@@ -20,6 +20,7 @@ HERE = Path(__file__).resolve().parent
 PLATFORM = HERE.parents[2]
 sys.path.insert(0, str(PLATFORM / "src"))
 from eng_platform_api.services.cloud_build_policy import economy_options  # noqa: E402
+
 SHA = re.compile(r"^[0-9a-f]{40}$")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 DIGEST_IMAGE = re.compile(r"^[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{64}$")
@@ -32,6 +33,20 @@ XDIST_VERSION = "3.8.0"
 BUILD_PROFILES = {"economy": ("DEFAULT", 2)}
 CATALOG_PATH = PLATFORM / "src/eng_platform_api/static_examples/mock_catalog.json"
 TIMEOUT_SECONDS = 1256
+SMARTI_SERVICES = {"cgm-sanplat-api", "cgm-artemis-api"}
+
+
+def extra_checks(service: str) -> list[dict]:
+    if service not in SMARTI_SERVICES:
+        return []
+    return [
+        {
+            "name": "Smarti PostgreSQL integration",
+            "category": "smarti_postgres",
+            "command": "python /opt/eng-platform/smarti_pg.py",
+            "blocking": True,
+        }
+    ]
 
 
 def service_config(service: str) -> dict:
@@ -184,6 +199,8 @@ def build_config(args: argparse.Namespace) -> dict:
                 "WM_TEST_POSTGRES_DSN=postgresql://postgres@127.0.0.1:5432/wm_test",
                 "-e",
                 "FND_TEST_POSTGRES_DSN=postgresql://postgres@127.0.0.1:5432/wm_test",
+                "-e",
+                "SMARTI_TEST_POSTGRES_URL=postgresql://postgres@127.0.0.1:5432/smarti_test",
                 tooling,
                 "bash",
                 "/workspace/gate.sh",
@@ -288,6 +305,8 @@ def scripts(args: argparse.Namespace) -> dict[str, str]:
             install,
             "--test-command",
             test,
+            "--extra-checks-json",
+            json.dumps(extra_checks(args.service), separators=(",", ":")),
         ]
     )
     return {
@@ -306,7 +325,10 @@ def scripts(args: argparse.Namespace) -> dict[str, str]:
         "postgres.sh": (
             "set -euo pipefail\n"
             "docker run -d --name cgm-fallback-pg -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=wm_test postgres:16\n"
-            "for i in {1..30}; do docker exec cgm-fallback-pg pg_isready -U postgres && exit 0; sleep 2; done\nexit 1\n"
+            "for i in {1..30}; do docker exec cgm-fallback-pg pg_isready -U postgres -d wm_test -h 127.0.0.1 && break; sleep 2; done\n"
+            "docker exec cgm-fallback-pg pg_isready -U postgres -d wm_test -h 127.0.0.1\n"
+            "docker exec cgm-fallback-pg createdb -U postgres smarti_test\n"
+            "docker exec cgm-fallback-pg psql -U postgres -d smarti_test -c 'SELECT 1'\n"
         ),
         "publish.sh": (
             'set -euo pipefail\ntest "$(cat /workspace/evidence/approved)" = yes\n'
@@ -368,6 +390,10 @@ def prepare(args: argparse.Namespace) -> Path:
             )
         for filename in ("capture.sh", "result.py", "Dockerfile.quality"):
             shutil.copy2(HERE / filename, stage / filename)
+        for filename in ("smarti_pg.py", "test_smarti_pg.py"):
+            shutil.copy2(
+                PLATFORM / "docker/quality-executor" / filename, stage / filename
+            )
         shutil.copy2(HERE / "postgres_workers.py", stage / "postgres_workers.py")
         shutil.copy2(HERE / "pytest_schedule.py", stage / "pytest_schedule.py")
         duration_profile = HERE / "duration_profiles" / f"{args.service}.json"
@@ -417,6 +443,9 @@ def prepare(args: argparse.Namespace) -> Path:
             "region": args.catalog_service["region"],
             "input_hashes": tool_hashes,
             "platform_sha": args.platform_sha,
+            "required_extra_categories": [
+                check["category"] for check in extra_checks(args.service)
+            ],
         }
         args.request_fingerprint = hashlib.sha256(
             json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
@@ -440,9 +469,7 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     for option in ("source", "service", "sha", "base-sha", "evidence-uri", "output"):
         result.add_argument(f"--{option}", required=True)
-    result.add_argument(
-        "--profile", choices=tuple(BUILD_PROFILES), default="economy"
-    )
+    result.add_argument("--profile", choices=tuple(BUILD_PROFILES), default="economy")
     result.add_argument("--install-command", default="")
     result.add_argument("--branch", default="")
     return result

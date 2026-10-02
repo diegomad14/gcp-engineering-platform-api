@@ -6,6 +6,11 @@ RUN groupadd --gid 1000 quality && useradd --uid 1000 --gid 1000 --create-home q
     && python -m venv /opt/quality \
     && /opt/quality/bin/python -m pip install --no-cache-dir setuptools==84.0.0 wheel==0.48.0 semgrep==1.176.1 pytest-cov==6.3.0 ruff==0.15.22 pytest-xdist==3.8.0 pydantic==2.13.5 \
     && chown -R quality:quality /opt/quality
+COPY smarti_pg.py test_smarti_pg.py /opt/eng-platform/
+RUN chmod 0555 /opt/eng-platform/smarti_pg.py \
+    && chmod 0444 /opt/eng-platform/test_smarti_pg.py \
+    && cd /opt/eng-platform \
+    && /opt/quality/bin/python -m unittest -q test_smarti_pg.py
 ENV VIRTUAL_ENV=/opt/quality PATH="/opt/quality/bin:${PATH}" HOME=/home/quality
 USER quality
 RUN git config --global --add safe.directory /workspace/repo

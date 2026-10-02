@@ -468,6 +468,11 @@ def _child_environment(
     if checkout is not None and git_directory is not None:
         environment["GIT_DIR"] = str(git_directory)
         environment["GIT_WORK_TREE"] = str(checkout)
+    if any(extra["category"] == "smarti_ux" for extra in profile.get("extra", [])):
+        environment["PLAYWRIGHT_BROWSERS_PATH"] = (
+            "/opt/eng-platform/playwright-browsers"
+        )
+        environment["PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"] = "1"
     if profile.get("postgres"):
         environment.update(_postgres_environment())
     if any(name in environment for name in _SENSITIVE_ENV_NAMES):
@@ -485,7 +490,11 @@ def _postgres_environment() -> dict[str, str]:
     """
 
     result: dict[str, str] = {}
-    for name in ("FND_TEST_POSTGRES_DSN", "WM_TEST_POSTGRES_DSN"):
+    for name in (
+        "FND_TEST_POSTGRES_DSN",
+        "WM_TEST_POSTGRES_DSN",
+        "SMARTI_TEST_POSTGRES_URL",
+    ):
         dsn = os.environ.get(name, "")
         try:
             parsed = urllib.parse.urlsplit(dsn)
@@ -495,12 +504,19 @@ def _postgres_environment() -> dict[str, str]:
                 f"Isolated PostgreSQL test DSN {name} is invalid"
             ) from exc
         if (
-            parsed.scheme not in {"postgresql", "postgresql+psycopg"}
+            parsed.scheme
+            not in (
+                {"postgresql"}
+                if name == "SMARTI_TEST_POSTGRES_URL"
+                else {"postgresql", "postgresql+psycopg"}
+            )
             or parsed.hostname not in {"localhost", "127.0.0.1"}
             or port not in {None, 5432}
             or not parsed.path.removeprefix("/")
-            or parsed.query
-            or parsed.fragment
+            or (name == "SMARTI_TEST_POSTGRES_URL" and parsed.path != "/smarti_test")
+            or "?" in dsn
+            or "#" in dsn
+            or any(character.isspace() for character in dsn)
         ):
             raise QualityExecutorError(
                 f"Isolated PostgreSQL test DSN {name} must use loopback port 5432"
@@ -661,6 +677,36 @@ def _validate_report(
     }
     if any(str(normalized.get(key, "")) != value for key, value in expected.items()):
         raise QualityExecutorError("Quality report identity does not match execution")
+    mandatory = {
+        extra["category"]: extra
+        for extra in profile.get("extra", [])
+        if extra["category"] in {"smarti_ux", "smarti_postgres"}
+    }
+    for category in {"smarti_ux", "smarti_postgres"}:
+        recorded = [
+            check for check in normalized["checks"] if check.get("category") == category
+        ]
+        if category not in mandatory:
+            if recorded:
+                raise QualityExecutorError("Unexpected mandatory Smarti quality result")
+            continue
+        if len(recorded) != 1:
+            raise QualityExecutorError(
+                "Required Smarti quality result was not recorded once"
+            )
+        check = recorded[0]
+        failed = check.get("status") == "FAILED"
+        if (
+            check.get("name") != mandatory[category]["name"]
+            or check.get("status") not in {"PASSED", "FAILED"}
+            or type(check.get("findings")) is not int
+            or type(check.get("blocking_findings")) is not int
+            or check["findings"] != int(failed)
+            or check["blocking_findings"] != int(failed)
+        ):
+            raise QualityExecutorError(
+                "Mandatory Smarti quality result is inconsistent"
+            )
     smoke_checks = [
         check
         for check in normalized["checks"]

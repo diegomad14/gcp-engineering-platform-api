@@ -202,6 +202,15 @@ def test_prepared_source_rejects_extra_files(control, tmp_path):
         ("wrong_sha", "Report does not match the prepared release"),
         ("wrong_repository", "Report does not match the prepared release"),
         ("failed_policy", "Quality policy rejected report"),
+        ("smarti_valid", None),
+        ("smarti_alias_valid", None),
+        ("smarti_missing", "Smarti PostgreSQL"),
+        ("smarti_skipped", "Smarti PostgreSQL"),
+        ("smarti_failed", "Smarti PostgreSQL"),
+        ("smarti_empty", "Smarti PostgreSQL"),
+        ("smarti_duplicate", "Smarti PostgreSQL"),
+        ("smarti_reduced", "Smarti PostgreSQL"),
+        ("smarti_malformed", "Smarti PostgreSQL"),
     ],
 )
 def test_register_reuses_exact_report_and_rejects_tampering(
@@ -213,7 +222,13 @@ def test_register_reuses_exact_report_and_rejects_tampering(
 
     request_data.update(
         repository="test/api",
-        service_name="test-api",
+        service_name=(
+            "cgm-artemis-api"
+            if scenario == "smarti_alias_valid"
+            else "cgm-sanplat-api"
+            if scenario.startswith("smarti_")
+            else "test-api"
+        ),
         report_uri="gs://test/report",
         summary_uri="gs://test/summary",
     )
@@ -259,6 +274,28 @@ def test_register_reuses_exact_report_and_rejects_tampering(
         report["repository"] = "other/api"
     elif scenario == "failed_policy":
         report["checks"][0]["status"] = "FAILED"
+    elif scenario.startswith("smarti_") and scenario != "smarti_missing":
+        check = {
+            "name": "Smarti PostgreSQL integration",
+            "category": "smarti_postgres",
+            "status": "PASSED",
+            "findings": 0,
+            "blocking_findings": 0,
+            "details": "Smarti PostgreSQL: tests/test_smarti_prevention_postgres.py: 1 executed; tests/test_smarti_publication.py: 40 executed; no skips",
+        }
+        if scenario == "smarti_skipped":
+            check["status"] = "SKIPPED"
+        elif scenario == "smarti_failed":
+            check.update(status="FAILED", findings=1, blocking_findings=1)
+        elif scenario == "smarti_empty":
+            check["details"] = ""
+        elif scenario == "smarti_reduced":
+            check["details"] = check["details"].replace("40 executed", "20 executed")
+        elif scenario == "smarti_malformed":
+            check["details"] = None
+        report["checks"].append(check)
+        if scenario == "smarti_duplicate":
+            report["checks"].append(dict(check))
     # Identity and policy failures retain a correct hash and successful summary:
     # the controller must independently reject their otherwise intact reports.
     report_bytes = json.dumps(report).encode()
@@ -284,7 +321,7 @@ def test_register_reuses_exact_report_and_rejects_tampering(
     control.save(
         tmp_path / "catalog-service.json",
         dict(
-            service_name="test-api",
+            service_name=request_data["service_name"],
             repository="test/api",
             owner="test",
             project_id="test",

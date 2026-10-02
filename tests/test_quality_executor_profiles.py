@@ -53,6 +53,34 @@ def test_image_profile_contract_is_also_checked_by_api_ci():
     )
 
 
+def test_smarti_extras_are_mandatory_and_change_both_alias_contracts():
+    profiles = _executor_profiles()
+    web = profiles.profile_for("cgm-artemis-web")
+    api = profiles.profile_for("cgm-artemis-api")
+    ux = next(extra for extra in web["extra"] if extra["category"] == "smarti_ux")
+    pg = next(extra for extra in api["extra"] if extra["category"] == "smarti_postgres")
+    assert ux["blocking"] is True
+    assert pg["blocking"] is True
+    assert ux["command"] == "python3 /opt/eng-platform/smarti_ux.py"
+    assert pg["command"] == "python /opt/eng-platform/smarti_pg.py"
+    assert web["coverage_threshold"] == api["coverage_threshold"] == 70
+    assert web["timeout_seconds"] == api["timeout_seconds"] == 3600
+    assert any(extra["category"] == "proxy_contracts" for extra in web["extra"])
+    assert (
+        profiles.profile_hash("cgm-artemis-web")
+        != "a61b1e71e8328993031c55ed19067085be6b1dea93c3d2ad5bafda46d3fbdbf5"
+    )
+    assert profiles.profile_hash("cgm-artemis-api") != profiles.profile_hash(
+        "communications-ms"
+    )
+    profiles.verify_profile_hash(
+        "cgm-artemis-web", profiles.profile_hash("cgm-sanplat-web")
+    )
+    profiles.verify_profile_hash(
+        "cgm-artemis-api", profiles.profile_hash("cgm-sanplat-api")
+    )
+
+
 @pytest.mark.parametrize("formatted", [True, False])
 def test_bot_format_command_uses_service_relative_paths(tmp_path, formatted):
     """Exercise the actual profile command from its nested working directory."""

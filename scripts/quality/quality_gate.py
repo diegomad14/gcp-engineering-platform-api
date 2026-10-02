@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -16,6 +17,58 @@ from pathlib import Path
 from typing import Any
 
 from differential_coverage import differential, resolve_base
+
+
+def _extra_checks(value: str) -> list[dict[str, Any]]:
+    try:
+        entries = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        raise ValueError("Extra checks must be a JSON array") from None
+    if not isinstance(entries, list):
+        raise ValueError("Extra checks must be a JSON array")
+    categories = {
+        "setup",
+        "tests",
+        "build",
+        "lint",
+        "format",
+        "typecheck",
+        "sast",
+        "dependencies",
+        "secrets",
+        "misconfiguration",
+        "differential_coverage",
+        "identity",
+        "engine",
+        "container_smoke",
+    }
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {
+            "name",
+            "category",
+            "command",
+            "blocking",
+        }:
+            raise ValueError(
+                "Extra checks require name, category, command and blocking"
+            )
+        if any(
+            not isinstance(entry[field], str)
+            or not entry[field].strip()
+            or "\x00" in entry[field]
+            for field in ("name", "category", "command")
+        ):
+            raise ValueError("Extra check text fields must be nonempty strings")
+        if entry["blocking"] is not True:
+            raise ValueError("Portable extra checks must be blocking")
+        category = entry["category"]
+        if (
+            not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", category)
+            or category in categories
+        ):
+            raise ValueError("Extra check categories must be safe and unique")
+        categories.add(category)
+    return entries
 
 
 def _run(command: str, cwd: Path, output_path: Path | None = None) -> dict[str, Any]:
@@ -249,7 +302,12 @@ def main() -> int:
     parser.add_argument("--format-command")
     parser.add_argument("--typecheck-command")
     parser.add_argument("--trusted-scanner-policy", action="store_true")
+    parser.add_argument("--extra-checks-json", default="[]")
     args = parser.parse_args()
+    try:
+        extra_checks = _extra_checks(args.extra_checks_json)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     cwd = Path(args.working_directory).resolve()
     report_dir = (cwd / args.report_directory).resolve()
@@ -356,6 +414,17 @@ def main() -> int:
                 result=category_result,
                 findings=trivy_categories[category],
                 report_path=trivy_file,
+            )
+        )
+
+    for extra in extra_checks:
+        checks.append(
+            _check(
+                name=extra["name"],
+                category=extra["category"],
+                result=_run(
+                    extra["command"], cwd, report_dir / f"extra-{extra['category']}.log"
+                ),
             )
         )
 
