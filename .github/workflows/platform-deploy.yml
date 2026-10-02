@@ -96,6 +96,15 @@ jobs:
           CGM_IMAGE: ${{ inputs.region }}-docker.pkg.dev/${{ inputs.project_id }}/${{ inputs.artifact_repository }}/${{ inputs.image_name }}:${{ inputs.tag }}
         run: |
           set -euo pipefail
+          # Fixed, source-tagged controller maintenance under the verified
+          # deployment ticket and existing WIF. Never accepts caller config.
+          if [ "$CGM_SERVICE" = eng-platform-api ]; then
+            test "$CGM_REPOSITORY" = diegomad14/gcp-engineering-platform-api
+            test "$CGM_PROJECT_ID" = cgm-assistant-prod
+            test "$CGM_REGION" = us-central1
+            test "$CGM_PROFILE_SHA256" = b29b8c450169374047dcddbb019eb27264ceeabf41272306199eb0d70632dbf0
+            PYTHONPATH=src python3 -m eng_platform_api.prepare_quality_tooling
+          fi
           gcloud auth configure-docker "$CGM_REGION-docker.pkg.dev" --quiet
           credential_file="$(basename "$GOOGLE_APPLICATION_CREDENTIALS")"
           docker run --rm --network host \

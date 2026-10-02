@@ -1,12 +1,15 @@
 """Release lifecycle contracts are exercised without submitting Cloud Builds."""
 
 import importlib.util
+import json
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
 from eng_platform_api.services.catalog import get_service
 from eng_platform_api.services.release_profiles import profile_for
+from eng_platform_api import verify_candidate_config as candidate_check
 
 
 @pytest.fixture
@@ -186,3 +189,121 @@ def test_platform_profile_hashes_stay_compatible_with_the_live_executor(engine):
         assert service is not None
         assert profile_for(service).fingerprint() == digest
         assert engine.profile_fingerprint(name) == digest
+
+
+@pytest.mark.parametrize("correct_pins", [False, True])
+def test_platform_exact_candidate_guard_precedes_promotion(
+    engine, monkeypatch, correct_pins
+):
+    actual_hooks = engine.run_hooks
+    events, traffic = _setup_deploy(engine, monkeypatch, profile="eng-platform-api")
+    monkeypatch.setattr(engine, "run_hooks", actual_hooks)
+    rows = [
+        {"name": candidate_check.WRITER_ENV, "value": candidate_check.EXPECTED_WRITER},
+        *[
+            {"name": name, "value": value}
+            for name, value in candidate_check._tooling_images().items()
+        ],
+    ]
+    if not correct_pins:
+        rows[1]["value"] = "PRIVATE-stale-pin"
+    provider_data = {
+        "metadata": {"name": "new-revision"},
+        "spec": {"containers": [{"env": rows}]},
+    }
+
+    def invoke_guard(*args):
+        assert args == (
+            "python3",
+            "src/eng_platform_api/verify_candidate_config.py",
+            "--project",
+            "test-project",
+            "--region",
+            "us-central1",
+            "--revision",
+            "new-revision",
+        )
+        events.append(("guard", "new-revision"))
+        with mock.patch.object(candidate_check.subprocess, "run") as cloud:
+            cloud.return_value.stdout = json.dumps(provider_data)
+            passed = candidate_check.verify(
+                "test-project", "us-central1", "new-revision"
+            )
+        if not passed:
+            raise RuntimeError("candidate configuration guard failed")
+        return ""
+
+    monkeypatch.setattr(engine, "run", invoke_guard)
+    image = "repo/image@sha256:" + "a" * 64
+    if correct_pins:
+        result = engine.deploy(image)
+        assert result["production_revision"] == "new-revision"
+        assert traffic == {"new-revision": 100}
+        assert events.index(("guard", "new-revision")) < events.index(
+            ("traffic", {"new-revision": 100})
+        )
+    else:
+        with pytest.raises(RuntimeError, match="candidate configuration guard failed"):
+            engine.deploy(image)
+        assert traffic == {"old-revision": 100}
+        assert not any(
+            isinstance(event, tuple) and event[0] == "traffic" for event in events
+        )
+
+
+def test_platform_postpromotion_smoke_failure_restores_exact_previous_traffic(
+    engine, monkeypatch
+):
+    events, traffic = _setup_deploy(engine, monkeypatch, profile="eng-platform-api")
+    previous = {"old-primary": 70, "old-secondary": 30}
+    traffic.clear()
+    traffic.update(previous)
+
+    def smoke(url):
+        events.append(("smoke", url))
+        if url == "https://production.example":
+            raise RuntimeError("production smoke failed")
+
+    monkeypatch.setattr(engine, "_smoke", smoke)
+    with pytest.raises(engine.AutomaticRollback, match="prior resources were restored"):
+        engine.deploy("repo/image@sha256:" + "a" * 64)
+    assert ("traffic", {"new-revision": 100}) in events
+    assert events[-1] == ("traffic", previous)
+    assert traffic == previous
+
+
+def test_platform_historical_rollback_never_requires_new_candidate_bundle(
+    engine, monkeypatch
+):
+    _environment(monkeypatch, "eng-platform-api")
+    monkeypatch.setenv("CGM_TARGET_REVISION", "historical-revision")
+    monkeypatch.setattr(engine, "verify_hooks", lambda: None)
+    monkeypatch.setattr(
+        engine,
+        "run_hooks",
+        lambda *_: pytest.fail(
+            "historical traffic rollback must not run candidate guard"
+        ),
+    )
+    monkeypatch.setattr(engine, "emit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(engine, "_service_url", lambda *_: "https://production.example")
+    calls = []
+    monkeypatch.setattr(engine, "run", lambda *args: calls.append(args))
+    result = engine.rollback()
+    assert result["production_revision"] == "historical-revision"
+    assert calls == [
+        (
+            "gcloud",
+            "run",
+            "services",
+            "update-traffic",
+            "eng-platform-api",
+            "--to-revisions",
+            "historical-revision=100",
+            "--region",
+            "us-central1",
+            "--project",
+            "test-project",
+            "--quiet",
+        )
+    ]

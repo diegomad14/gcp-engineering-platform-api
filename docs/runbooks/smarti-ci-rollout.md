@@ -1,8 +1,10 @@
-# Smarti mandatory CI: local candidate and coordinated rollout
+# Smarti mandatory CI: coordinated rollout
 
-This candidate is prepared against main `a3fb47a0c9c6855990557060ba0b0598698bcba6`.
-It has not been published, activated, or built as an executor image. It does not
-change FinOps, alert delivery, IAM, release permissions, or coverage thresholds.
+The mandatory-CI implementation was merged in PR #117 and released as v0.32.0,
+commit `8c3bed960a179b1c8a8e7513e046385a4640d7cc`. Its quality images were built
+and published by the official tooling workflow. Production activation and fresh
+Smarti browser/PostgreSQL evidence are still separate steps. This rollout does
+not change FinOps, alert delivery, IAM, release permissions, or coverage thresholds.
 
 ## Required evidence
 
@@ -72,9 +74,9 @@ images contain the trusted helpers.
    SAST metadata egress if needed, and activation. Local preparation alone does
    not authorize those actions.
 3. In an authorized isolated build, build both quality images. Run image unit
-   tests and adversarial supervisor tests, then launch the six real browser/axe
-   cases as UID 65532 with the normal mounts/capabilities and no tokens. Also
-   verify PG integration through the actual canonical and fallback containers.
+   tests and adversarial supervisor tests. The real Smarti browser/axe and PG
+   cases remain mandatory application evidence: run them with the new coherent
+   contract in step 5, not with an old image or an overridden/advisory profile.
 4. Record the resulting immutable OCI digests and OS package inventory. The
    versioned Playwright installer selects dependencies; the reviewed OCI digest
    freezes resolved Debian packages. Do not reuse the old cached digest or an
@@ -82,8 +84,99 @@ images contain the trusted helpers.
    and renewed real-image evidence.
 5. Coordinate the control-plane manifest and executor digests so both authorize
    exactly the same hash. A mismatch must fail closed. Trigger fresh quality
-   execution on each reviewed compatible Smarti head and verify mandatory
-   categories plus all existing gates before release review.
+   execution on each reviewed compatible Smarti head. Launch the six real
+   browser/axe cases as UID 65532 with the normal mounts/capabilities and no
+   tokens, and verify PG through the actual canonical/fallback execution path.
+   Verify mandatory categories plus all existing gates before releasing or
+   deploying the Smarti applications.
+
+## Versioned bundle and candidate guard
+
+`src/eng_platform_api/quality_executor_bundle.json` records the reviewed node
+and python OCI digests, tooling source SHA and SHA256 of the exact profile
+manifest. The recorded tooling source identifies the published images; it is
+not the commit SHA of a later central release adding or updating this guard.
+The manifest bytes must remain identical to the reviewed bundle, or the
+bundle and images must be reviewed and rebuilt together.
+
+The existing `verify_candidate_config.py` hook runs from the exact tagged
+source after candidate smoke and before production promotion. It remains
+read-only. It checks the exact revision name, existing secrets writer, manifest
+hash, and both literal unique quality-image environment values against the
+bundle. Missing, duplicated, partial, stale or secret-reference pins fail
+closed. JSON duplicate keys are rejected, including nested image/profile
+objects and provider data. Manifest semantics are checked by the unchanged
+executor validator from the same tagged checkout; a missing validator also
+fails closed. This release hook is source-checkout tooling, not a standalone
+API-image command. It prints only a fixed PASS/FAIL result; it never repairs configuration,
+pulls an image, exposes provider diagnostics or reads secret contents.
+
+The hook name and signed deployment profile do not change. No new caller
+inputs, credentials, IAM grants or executor-image changes are introduced by
+this guard. Its source, tests, workflow and bundle require their own PR, exact-commit OSS
+evidence and semantic-release tag before use; v0.32.0 only checked the writer.
+
+### Coordinated preparation inside the official MCP deployment
+
+1. Start the new guarded, eligible central tag through Engineering Platform's
+   documented `start_deployment(service_name, tag, reason, idempotency_key)`.
+   The backend selects the executor and verifies the deployment permission.
+   Read-only metadata does not prove the `eng-platform.deploy` scope. A fresh
+   permission denial blocks the operation; no direct CLI or simplified-MCP
+   deployment is a substitute. A separate operator CLI login is not needed
+   when the existing authorized workflow/WIF can perform this maintenance.
+2. The exact source-tagged `platform-deploy.yml` preserves its existing release
+   identity, authorization ticket, exact OSS evidence and WIF checks. Only for
+   the fixed central service/repository/project/region and unchanged signed
+   release profile, it invokes `prepare_quality_tooling.py` before the pinned
+   engine. No new caller inputs or grants are introduced.
+3. The helper reads the complete service template, operational annotations,
+   labels, service account, resources, VPC/SQL settings, volumes, probes,
+   environment/secret references and reconciled traffic. It never requests
+   secret contents or prints provider responses. Duplicate JSON/env names,
+   multiple containers, wrong writer, unreconciled/unready service or missing
+   traffic fail before mutation. An already coordinated pair is a read-only
+   success and does not create a second revision.
+4. Update only both reviewed bundle pins in one `--update-env-vars` command
+   with `--no-traffic`, without image, tag, IAM, ingress or resource flags.
+   Never use `--set-env-vars` or `--env-vars-file`. The staging revision may
+   retain the old controller image; it is never tagged, invoked or promoted.
+   Re-read and compare every workload field, operational annotation/label,
+   unrelated environment and secret reference, resolved revision percentages
+   and tags. Only the two pins and generated revision/client metadata may
+   change. LATEST is resolved to its previous concrete serving revision.
+   Drift, partial update, timeout or provider failure stops the workflow before
+   the engine. Provider errors are redacted and there is no automatic retry.
+5. The existing no-traffic engine image update inherits both coordinated pins.
+   Candidate smoke and the read-only source-tagged guard validate the exact
+   resulting revision before promotion. Verify the serving controller image,
+   both pins and manifest after promotion.
+   Obtain fresh Smarti evidence under the new profile hashes and image digests.
+   Previously eligible tags or green reports are not substitutes for mandatory
+   UX6/PG41 results from those current identities.
+
+No IAM policy is read or changed by the helper; its sole mutation cannot set
+IAM/ingress flags. The full workload comparison covers security settings
+exposed by the Cloud Run service, and existing ticket/WIF boundaries remain.
+
+If preparation fails or the engine stops before promotion, the previous
+serving revision retains its coherent image, manifest and pins. Reconcile the
+template before another attempt; do not repeat an uncertain write blindly.
+An update timeout can mean the mutation completed despite the failed command;
+a timeout in the subsequent read means preservation was not established.
+Both print only FAIL and abort before the engine, without retry or reversal.
+Re-read the complete current template and traffic through the authorized
+workflow/maintenance path and inspect the original deployment ID. Establish
+whether both pins changed, whether configuration/traffic stayed intact, and
+whether any execution is still active before deciding on another operation.
+If preparation is abandoned, an authorized maintainer can restore both
+template pins together with `--no-traffic` and verify unchanged traffic.
+Historical rollback restores traffic to
+the previous revision, whose image and pins remain coherent; it must not run
+the new candidate-bundle gate on that historical revision. The service template
+is not reverted by traffic rollback and must be reconciled before another
+release. The engine still restores the exact previous traffic map on a failed
+postpromotion smoke.
 
 ## Reversal
 
@@ -93,13 +186,21 @@ digests together, and fresh evidence for that reverted contract. Restoring the
 old contract does not establish a pass for the new browser/PG requirements.
 Never manufacture green evidence, reuse a mismatched hash, or bypass the gate.
 
-## Evidence still required outside this local preparation
+## Recorded evidence and remaining application gates
 
-The six browser/axe cases, the new image build, image-root adversarial tests and
-remote canonical/fallback execution have not been demonstrated here. Docker is
-not installed in this cloud workspace. The earlier cloud Chromium restriction
-is unchanged. Central Semgrep `--config auto` was not run because its metadata
-egress was not approved for this repository; no suitable cached local Semgrep
-rule set was found. Local unit tests, coverage, lint, types and the genuine
-41-case checker against an independently created PG17 cluster are reported
-separately and must not be described as a complete CI pass.
+For v0.32.0, API CI run
+[37014645696](https://github.com/diegomad14/gcp-engineering-platform-api/actions/runs/37014645696)
+published exact-commit oss-v2 PASSED: 1,219 tests, 85.89% coverage, Semgrep and
+Trivy with no findings. Changed-line coverage was N/A (no modified executable
+lines within existing roots), not a 100% result.
+
+Official tooling run
+[37018353170](https://github.com/diegomad14/gcp-engineering-platform-api/actions/runs/37018353170)
+built and pushed both immutable quality images: python 45 image tests and node
+52 image tests passed without skips; Playwright 1.62.1 installed Chromium and
+headless shell revision 1234. The planner's nine tests also passed.
+
+The six real Artemis browser/axe cases and mandatory remote Smarti PostgreSQL
+execution still need fresh evidence. The earlier isolated 41-case PG17 result
+and the image helper/unit tests do not establish that application CI pass.
+Any subsequent guard/bundle commit likewise needs its own exact CI evidence.
