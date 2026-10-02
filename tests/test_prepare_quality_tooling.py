@@ -137,6 +137,60 @@ def test_already_coordinated_pins_do_not_create_another_revision():
     cloud.assert_called_once_with(["describe"])
 
 
+@pytest.mark.parametrize("transition", ["added", "changed", "removed"])
+def test_gcloud_generated_template_nonce_does_not_count_as_operational_drift(
+    transition,
+):
+    before = service()
+    after = staged()
+    before_labels = before["spec"]["template"]["metadata"]["labels"]
+    after_labels = after["spec"]["template"]["metadata"]["labels"]
+    if transition != "added":
+        before_labels["client.knative.dev/nonce"] = "synthetic-old"
+    if transition != "removed":
+        after_labels["client.knative.dev/nonce"] = "synthetic-new"
+    with mock.patch.object(subject, "_cloud", side_effect=[before, {}, after]) as cloud:
+        assert subject.prepare()
+    assert cloud.call_count == 3
+    assert ("client.knative.dev/nonce" in before_labels) == (transition != "added")
+    assert ("client.knative.dev/nonce" in after_labels) == (transition != "removed")
+
+
+@pytest.mark.parametrize(
+    "location", ["service_nonce", "template_owner", "nonce_lookalike"]
+)
+def test_nonce_exception_never_ignores_other_labels(location):
+    after = staged()
+    if location == "service_nonce":
+        after["metadata"]["labels"]["client.knative.dev/nonce"] = "changed"
+    else:
+        label = (
+            "owner"
+            if location == "template_owner"
+            else "client.knative.dev/nonce-extra"
+        )
+        after["spec"]["template"]["metadata"]["labels"][label] = "changed"
+    assert not run_preparation(after)[0]
+
+
+@pytest.mark.parametrize("before_empty_labels", [None, {}])
+def test_nonce_only_added_label_preserves_absent_or_empty_business_labels(
+    before_empty_labels,
+):
+    before = service()
+    after = staged()
+    metadata = before["spec"]["template"]["metadata"]
+    if before_empty_labels is None:
+        metadata.pop("labels")
+    else:
+        metadata["labels"] = before_empty_labels
+    after["spec"]["template"]["metadata"]["labels"] = {
+        "client.knative.dev/nonce": "synthetic-new"
+    }
+    with mock.patch.object(subject, "_cloud", side_effect=[before, {}, after]):
+        assert subject.prepare()
+
+
 @pytest.mark.parametrize(
     "field",
     [

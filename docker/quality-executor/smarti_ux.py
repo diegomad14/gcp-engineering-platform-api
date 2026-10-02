@@ -12,6 +12,7 @@ from typing import Any
 
 PLAYWRIGHT_VERSION = "1.62.1"
 BROWSERS_PATH = "/opt/eng-platform/playwright-browsers"
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SPECS = (
     "e2e/smarti-prevention.ux.spec.ts",
     "e2e/smarti-source-warnings.ux.spec.ts",
@@ -21,6 +22,56 @@ SPECS = (
 
 class SmartiUXError(RuntimeError):
     """Missing, skipped or unsuccessful browser evidence must block quality."""
+
+
+def _diagnostic_text(value: Any, limit: int = 1600) -> str:
+    """Keep diagnostics single-line and bounded without terminal controls."""
+    value = _ANSI_ESCAPE.sub("", str(value))
+    return "".join(
+        character for character in " ".join(value.split()) if character.isprintable()
+    )[:limit]
+
+
+def _failure_diagnostics(report: dict[str, Any]) -> list[str]:
+    # Diagnostics are best-effort after a failed execution. Malformed output
+    # must not replace the original gate failure with an unrelated traceback.
+    try:
+        return _collect_failure_diagnostics(report)
+    except (SmartiUXError, TypeError, ValueError, AttributeError, KeyError):
+        return ["Playwright returned malformed failure diagnostics"]
+
+
+def _collect_failure_diagnostics(report: dict[str, Any]) -> list[str]:
+    diagnostics: list[str] = []
+    for error in report.get("errors", [])[:6]:
+        message = error.get("message", error) if isinstance(error, dict) else error
+        diagnostics.append("configuration: " + _diagnostic_text(message))
+    for file, title, test in cases(report):
+        for result in test.get("results", []):
+            if not isinstance(result, dict) or result.get("status") == "passed":
+                continue
+            error = result.get("error", {})
+            errors = result.get("errors", [])
+            if not error and errors:
+                error = errors[0]
+            message = error.get("message", error) if isinstance(error, dict) else error
+            # Browser launch command lines can hide the useful stderr behind
+            # thousands of flag characters. Retain the actual browser errors.
+            browser_errors = [
+                line for line in str(message).splitlines() if "[err]" in line
+            ]
+            if browser_errors:
+                message = (
+                    str(message).splitlines()[0] + "; " + "; ".join(browser_errors)
+                )
+            diagnostics.append(
+                f"{file} | {_diagnostic_text(title, 180)} | "
+                f"{_diagnostic_text(result.get('status'), 30)}: "
+                f"{_diagnostic_text(message)}"
+            )
+            if len(diagnostics) == 12:
+                return diagnostics
+    return diagnostics
 
 
 def cases(report: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
@@ -102,7 +153,10 @@ def _run_json(repository: Path, arguments: list[str]) -> tuple[int, dict[str, An
     try:
         report = json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
-        raise SmartiUXError("Playwright did not produce a JSON report") from exc
+        detail = _diagnostic_text(completed.stderr or completed.stdout, 350)
+        raise SmartiUXError(
+            "Playwright did not produce a JSON report: " + detail
+        ) from exc
     if not isinstance(report, dict):
         raise SmartiUXError("Playwright did not produce an object report")
     return completed.returncode, report
@@ -140,8 +194,14 @@ def run(repository: Path) -> None:
     temporary.write_text(json.dumps(report, ensure_ascii=False))
     temporary.replace(directory / "smarti-ux.json")
     if code:
+        diagnostics = _failure_diagnostics(report)
+        for diagnostic in diagnostics:
+            print("Smarti UX diagnostic: " + diagnostic, file=sys.stderr)
+        detail = diagnostics[0] if diagnostics else "no error detail in JSON report"
         raise SmartiUXError(
-            "Playwright execution failed; see quality-reports/smarti-ux.json"
+            "Playwright execution failed: "
+            + _diagnostic_text(detail, 380)
+            + "; see quality-reports/smarti-ux.json"
         )
     validate_report(report, executed=True)
 

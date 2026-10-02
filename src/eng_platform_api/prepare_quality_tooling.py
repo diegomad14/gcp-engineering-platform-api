@@ -78,6 +78,13 @@ def _configuration(data: dict) -> dict:
     template_meta.pop("name", None)
     for key in CLIENT_ANNOTATIONS:
         template_meta.get("annotations", {}).pop(key, None)
+    # Gcloud regenerates only this client revision nonce on an update.
+    labels = template_meta.get("labels", {})
+    if not isinstance(labels, dict):
+        raise ValueError("invalid template labels")
+    labels.pop("client.knative.dev/nonce", None)
+    if not labels:
+        template_meta.pop("labels", None)
     spec["template"]["spec"]["containers"][0]["env"] = {
         name: row for name, row in env.items() if name not in candidate.IMAGE_NAMES
     }
