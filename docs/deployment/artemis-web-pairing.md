@@ -13,20 +13,19 @@ Preserve all other environment values, secret references, identity and traffic.
 
 ## Verified maintenance target on 2026-10-03
 
-- Serving web revision: `cgm-artemis-web-ep-39f5fed3a6` (100% traffic).
+- Serving web revision: `cgm-artemis-web-ep-fca79057fc` (100% traffic).
 - Web repository: `diegomad14/cgm-artemis-web`.
-- Expected web commit: `d6bd3d3bc4f2a9bf937b80fbaba9019582a1ef21` (`v1.39.1`).
-- Superseded configuration: `823f67594ec7198f822ebfcbed23b6c9fe4cd5ba`.
+- Expected web commit: `16a6b9aed69c03b09ca27b2991008fc8b2e5db36` (`v1.40.0`).
+- Superseded configuration: `d6bd3d3bc4f2a9bf937b80fbaba9019582a1ef21`.
 - Maintenance source starts from the serving Engineering Platform release
-  `v0.32.3` / `b6da80de53967b6114e3da649ac9e03840b465d8`; no functional source
+  `v0.32.4` / `66fb598c0e2adcccdc748e8c6f4fb320db6880ad`; no functional source
   change is needed for this configuration correction.
 
-The blocked Artemis attempt `6822385097` remains in deployment history. Retrying
-Artemis uses its original eligible tag and a new idempotency key after
-configuration is published. This procedure does not redeploy Artemis Web or any
-Artemis worker.
+The blocked Artemis attempt `6822385097` remains in deployment history. Its API
+retry `6823043470` succeeded as `v1.48.0` before Web `v1.40.0` was published.
+Publish this second Engineering Platform maintenance release before the Jobs
+phase. This procedure does not redeploy Artemis Web or any Artemis worker.
 
-After publishing Artemis Web `v1.40.0`, repeat this maintenance procedure using
-only the full commit actually serving traffic, confirmed by its release evidence.
-Complete the second Engineering Platform maintenance release before the Jobs
-phase. Never advance the pin to a candidate or merely eligible web release.
+For later Web releases, repeat this procedure using only the full commit actually
+serving traffic, confirmed by its release evidence. Never advance the pin to a
+candidate or merely eligible web release.
