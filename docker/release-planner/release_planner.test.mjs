@@ -1,11 +1,52 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import { calculatePlan, gitArguments } from "./release_planner.mjs";
+
+test("the scoped analyzer matcher only needs the pinned isMatch contract", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("./package.json", import.meta.url)));
+  assert.deepEqual(packageJson.overrides, {
+    "@semantic-release/commit-analyzer@13.0.1": {
+      micromatch: "npm:picomatch@2.3.2",
+    },
+  });
+  const require = createRequire(import.meta.url);
+  const analyzerEntry = require.resolve("@semantic-release/commit-analyzer");
+  const analyzerDir = dirname(analyzerEntry);
+  const analyzerRequire = createRequire(analyzerEntry);
+  const matcherEntry = analyzerRequire.resolve("micromatch");
+  const matcherPackage = JSON.parse(readFileSync(join(dirname(matcherEntry), "package.json")));
+  assert.equal(matcherPackage.name, "picomatch");
+  assert.equal(matcherPackage.version, "2.3.2");
+  assert.throws(() => analyzerRequire.resolve("braces"), { code: "MODULE_NOT_FOUND" });
+  const consumers = readdirSync(analyzerDir, { recursive: true })
+    .filter((path) => path.endsWith(".js") && !path.startsWith("node_modules/"))
+    .filter((path) => /\bmicromatch\b/.test(readFileSync(join(analyzerDir, path), "utf8")));
+  assert.deepEqual(consumers, ["lib/analyze-commit.js"]);
+  const source = readFileSync(join(analyzerDir, consumers[0]), "utf8");
+  assert.equal(source.match(/\bmicromatch\b/g).length, 3);
+  assert.deepEqual(source.match(/\bmicromatch\.\w+/g), ["micromatch.isMatch"]);
+  const matcher = analyzerRequire("micromatch");
+  for (const [input, pattern, options, expected] of [
+    ["main", "main", {}, true],
+    ["release/v1", ["main", "release/*"], {}, true],
+    ["docs", "!docs", {}, false],
+    ["feat", "@(feat|fix)", {}, true],
+    ["src/api/file.js", "src/{api,web}/**", {}, true],
+    ["FIX", "fix", { nocase: true }, true],
+    [".hidden", "*", { dot: true }, true],
+    ["fix", "@(feat|fix)", { noext: true }, false],
+  ]) {
+    assert.equal(matcher.isMatch(input, pattern, options), expected);
+  }
+  assert.throws(() => matcher.isMatch(null, "main"), TypeError);
+  assert.throws(() => matcher.isMatch("main", null), TypeError);
+});
 
 test("Git commands explicitly trust only the checked-out source directory", () => {
   assert.deepEqual(gitArguments("/workspace", ["rev-parse", "HEAD"]), [
