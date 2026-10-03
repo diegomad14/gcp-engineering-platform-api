@@ -8,5 +8,10 @@
   "dependencies": {
     "@semantic-release/commit-analyzer": "13.0.1",
     "@semantic-release/release-notes-generator": "14.1.1"
+  },
+  "overrides": {
+    "@semantic-release/commit-analyzer@13.0.1": {
+      "micromatch": "npm:picomatch@2.3.2"
+    }
   }
 }
