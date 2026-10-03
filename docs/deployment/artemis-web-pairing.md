@@ -13,18 +13,18 @@ Preserve all other environment values, secret references, identity and traffic.
 
 ## Verified maintenance target on 2026-10-03
 
-- Serving web revision: `cgm-artemis-web-ep-fca79057fc` (100% traffic).
+- Serving web revision: `cgm-artemis-web-ep-efa8364cb4` (100% traffic).
 - Web repository: `diegomad14/cgm-artemis-web`.
-- Expected web commit: `16a6b9aed69c03b09ca27b2991008fc8b2e5db36` (`v1.40.0`).
-- Superseded configuration: `d6bd3d3bc4f2a9bf937b80fbaba9019582a1ef21`.
+- Expected web commit: `2f37ce20be43133e888b6dac4ee18f902652a38a` (`v1.40.1`).
+- Superseded configuration: `16a6b9aed69c03b09ca27b2991008fc8b2e5db36`.
 - Maintenance source starts from the serving Engineering Platform release
-  `v0.32.4` / `66fb598c0e2adcccdc748e8c6f4fb320db6880ad`; no functional source
+  `v0.32.5` / `f4c79c69355710a26de477add8a272860254a3fb`; no functional source
   change is needed for this configuration correction.
 
-The blocked Artemis attempt `6822385097` remains in deployment history. Its API
-retry `6823043470` succeeded as `v1.48.0` before Web `v1.40.0` was published.
-Publish this second Engineering Platform maintenance release before the Jobs
-phase. This procedure does not redeploy Artemis Web or any Artemis worker.
+The Jobs release is published, including Web `v1.40.1`. This maintenance aligns
+the central pin with the verified serving web commit after that release.
+Jobs recovery remains disabled. This procedure does not redeploy Artemis API,
+Web or any Artemis worker, or enable recovery.
 
 For later Web releases, repeat this procedure using only the full commit actually
 serving traffic, confirmed by its release evidence. Never advance the pin to a
