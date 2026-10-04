@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Header, HTTPException
 
+from ..services.resource_access import require_managed_service_name
 from ..config import config
 from ..models import DeploymentExecutionEvent, DeploymentStatus
 from ..services import (
@@ -54,6 +55,7 @@ def accept_event(
     item = deployment_store.get(deployment_id)
     if execution is None or item is None:
         raise HTTPException(status_code=404, detail="Unknown deployment execution")
+    require_managed_service_name(item.service_name)
     if execution.get("provider") != "cloud_build":
         raise HTTPException(
             status_code=409, detail="Deployment is not Cloud Build managed"

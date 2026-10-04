@@ -12,7 +12,7 @@ from time import monotonic
 
 from google.cloud import monitoring_v3
 
-from ..config import config
+from ..config import catalog_source_identity, config
 from ..models import CloudRunServiceMetrics, MetricsSummary
 
 _METRIC_REQUEST_COUNT = "run.googleapis.com/request_count"
@@ -21,7 +21,7 @@ _METRIC_CPU = "run.googleapis.com/container/cpu/utilizations"
 _METRIC_MEMORY = "run.googleapis.com/container/memory/utilizations"
 _METRIC_INSTANCE_COUNT = "run.googleapis.com/container/instance_count"
 _METRICS_CACHE_TTL_SECONDS = 60
-_metrics_cache: dict[int, tuple[float, MetricsSummary]] = {}
+_metrics_cache: dict[object, tuple[float, MetricsSummary]] = {}
 _metrics_cache_lock = Lock()
 
 
@@ -228,16 +228,20 @@ def get_metrics_summary(minutes: int = 1440) -> MetricsSummary:
     from .catalog import get_services
 
     global _metrics_cache
+    source = catalog_source_identity()
+    cache_key = minutes if source is None else (minutes, source)
     with _metrics_cache_lock:
         now = monotonic()
-        cached = _metrics_cache.get(minutes)
+        cached = _metrics_cache.get(cache_key)
         if cached and now - cached[0] < _METRICS_CACHE_TTL_SECONDS:
             return cached[1]
         services = get_services().services
-        service_names = [s.service_name for s in services]
+        service_names = [
+            s.service_name for s in services if s.management_mode == "managed"
+        ]
         summary = MetricsSummary(
             period="1h" if minutes == 60 else "24h",
             services=get_metrics_for_services(service_names, minutes=minutes),
         )
-        _metrics_cache[minutes] = (monotonic(), summary)
+        _metrics_cache[cache_key] = (monotonic(), summary)
         return summary

@@ -21,6 +21,7 @@ dependencies = [
     "httpx>=0.27.0",
     "itsdangerous>=2.2.0",
     "mcp>=1.30.0,<2.0.0",
+    "google-cloud-logging==3.16.3",
 ]
 
 [project.optional-dependencies]
@@ -48,3 +49,5 @@ eng_platform_api = ["*.json", "static_examples/*.json"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Keep the catalog CLI instrumented by the existing immutable CI profiles.
+addopts = "--cov=scripts.catalog_registry"

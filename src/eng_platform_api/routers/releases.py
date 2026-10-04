@@ -6,7 +6,7 @@ from time import monotonic
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from ..config import config
+from ..config import catalog_source_identity, config
 from ..models import ReleaseCreateRequest, ReleaseItem, ReleaseSummary
 from ..services import (
     github_actions,
@@ -15,7 +15,7 @@ from ..services import (
 
 router = APIRouter(prefix="/api/releases", tags=["releases"])
 _SUMMARY_CACHE_TTL_SECONDS = 60
-_summary_cache: tuple[float, ReleaseSummary] | None = None
+_summary_cache: tuple[float, ReleaseSummary, object] | None = None
 _summary_cache_lock = Lock()
 
 
@@ -60,18 +60,20 @@ def list_releases(
 def get_release_summary():
     """Merge persisted service rows with GitHub semantic releases."""
     global _summary_cache
+    source = catalog_source_identity()
     with _summary_cache_lock:
         now = monotonic()
         if (
             not config.mock_mode
             and _summary_cache
+            and _summary_cache[2] == source
             and now - _summary_cache[0] < _SUMMARY_CACHE_TTL_SECONDS
         ):
             return _summary_cache[1]
 
         summary = _build_release_summary()
         if not config.mock_mode:
-            _summary_cache = (monotonic(), summary)
+            _summary_cache = (monotonic(), summary, source)
         return summary
 
 

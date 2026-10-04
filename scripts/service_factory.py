@@ -27,6 +27,7 @@ def generate(args: argparse.Namespace) -> dict[str, str]:
             service_name=args.service_name,
             service_type=args.service_type,
             runtime=args.runtime,
+            runtime_kind=args.runtime_kind,
             gcp_project=args.gcp_project,
             region=args.region,
             owner=args.owner,
@@ -42,21 +43,30 @@ def generate(args: argparse.Namespace) -> dict[str, str]:
             ],
         )
     )
-    return {
-        "gcp-service-release.yaml": plan.yaml_contract,
+    is_job = args.runtime_kind == "cloud_run_job"
+    files = {
+        "gcp-job-release.yaml"
+        if is_job
+        else "gcp-service-release.yaml": plan.yaml_contract,
         ".github/workflows/ci.yml": plan.caller_pr_check,
-        ".github/workflows/platform-deploy.yml": plan.platform_deploy_workflow,
-        ".github/workflows/platform-rollback.yml": plan.platform_rollback_workflow,
         ".github/workflows/semantic-release.yml": plan.semantic_release_workflow,
         f"catalog/services/{args.service_name}.yaml": plan.catalog_entry,
         ".quality-gate.yml": plan.quality_config,
         f"{args.working_directory.rstrip('/')}/.quality-sources.json": plan.quality_sources,
-        "cloud-run-service-labels.yaml": plan.labels_manifest,
+        "cloud-run-job-labels.yaml"
+        if is_job
+        else "cloud-run-service-labels.yaml": plan.labels_manifest,
         "onboarding-checklist.md": "# Onboarding checklist\n\n"
         + "\n".join(f"- [ ] {step}" for step in plan.checklist)
         + "\n",
         "agent-handoff-prompt.md": plan.agent_prompt,
     }
+    if not is_job:
+        files[".github/workflows/platform-deploy.yml"] = plan.platform_deploy_workflow
+        files[".github/workflows/platform-rollback.yml"] = (
+            plan.platform_rollback_workflow
+        )
+    return files
 
 
 def main():
@@ -64,12 +74,21 @@ def main():
     parser.add_argument(
         "--app-name", required=True, help="Application name (kebab-case)"
     )
-    parser.add_argument("--service-name", required=True, help="Cloud Run service name")
+    parser.add_argument(
+        "--service-name",
+        required=True,
+        help="Globally unique Cloud Run Service or Job runtime ID",
+    )
     parser.add_argument(
         "--service-type", required=True, choices=["api", "web", "worker", "integration"]
     )
     parser.add_argument(
         "--runtime", required=True, choices=["python", "node", "static"]
+    )
+    parser.add_argument(
+        "--runtime-kind",
+        choices=["cloud_run_service", "cloud_run_job"],
+        default="cloud_run_service",
     )
     parser.add_argument("--gcp-project", required=True, help="GCP project ID")
     parser.add_argument("--region", default="us-central1")
@@ -78,7 +97,11 @@ def main():
     parser.add_argument(
         "--environment", default="prod", choices=["prod", "staging", "dev"]
     )
-    parser.add_argument("--cloud-run-service-name", default="")
+    parser.add_argument(
+        "--cloud-run-service-name",
+        default="",
+        help="Deprecated image-name override only; service-name is always the runtime ID",
+    )
     parser.add_argument("--health-path", default="/health")
     parser.add_argument("--openapi-path", default="/openapi.json")
     parser.add_argument("--sonar-project-key", default="", help="Deprecated; ignored")
@@ -86,7 +109,11 @@ def main():
     parser.add_argument(
         "--validation-targets", default="", help="Comma-separated external system names"
     )
-    parser.add_argument("--output-dir", default=".")
+    parser.add_argument(
+        "--output-dir",
+        default="service-factory-proposal",
+        help="Local proposal directory; review before adoption",
+    )
     parser.add_argument("--repository", default="", help="GitHub owner/repository")
     parser.add_argument("--working-directory", default=".")
     parser.add_argument("--coverage-threshold", type=float, default=70)
@@ -94,9 +121,8 @@ def main():
     args = parser.parse_args()
 
     output_dir = Path(os.environ.get(OUTPUT_DIR_KEY, args.output_dir))
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     files = generate(args)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     for filename, content in files.items():
         filepath = output_dir / filename

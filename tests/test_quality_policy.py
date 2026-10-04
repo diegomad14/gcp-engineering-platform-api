@@ -335,7 +335,7 @@ def test_factory_emits_complete_oss_gate_and_sources():
             service_name="test-api",
             service_type="api",
             runtime="python",
-            gcp_project="test",
+            gcp_project="test-project",
             owner="test",
         )
     )

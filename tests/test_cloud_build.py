@@ -25,8 +25,10 @@ def test_deploy_submission_rejects_machine_override_before_reserve(monkeypatch):
     )
     reserve = mock.Mock()
     monkeypatch.setattr(deployment_executions, "reserve", reserve)
+    service = catalog.get_service("eng-platform-api")
+    assert service is not None and service.management_mode == "managed"
     with pytest.raises(ValueError):
-        cloud_build.submit(mock.Mock(), mock.Mock(), reason="test")
+        cloud_build.submit(_item(), service, reason="test")
     reserve.assert_not_called()
 
 

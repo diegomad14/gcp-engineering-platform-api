@@ -1,176 +1,686 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/diegomad14/gcp-engineering-platform-api/schemas/platform-catalog.schema.json",
-  "title": "Platform Service Catalog",
-  "type": "object",
-  "required": [
-    "services"
-  ],
+  "$defs": {
+    "CatalogDeployment": {
+      "additionalProperties": false,
+      "properties": {
+        "executor": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "cloud_build"
+          ],
+          "title": "Executor",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "workflow_file": {
+          "default": "platform-deploy.yml",
+          "title": "Workflow File",
+          "type": "string"
+        },
+        "image_name": {
+          "default": "",
+          "title": "Image Name",
+          "type": "string"
+        },
+        "artifact_repository": {
+          "default": "cgm-sanplat-repo",
+          "title": "Artifact Repository",
+          "type": "string"
+        },
+        "build_context": {
+          "default": ".",
+          "title": "Build Context",
+          "type": "string"
+        },
+        "dockerfile_path": {
+          "default": "Dockerfile",
+          "title": "Dockerfile Path",
+          "type": "string"
+        },
+        "runtime_kind": {
+          "enum": [
+            "cloud_run_service",
+            "cloud_run_job"
+          ],
+          "title": "Runtime Kind",
+          "type": "string"
+        },
+        "private_runtime": {
+          "default": false,
+          "title": "Private Runtime",
+          "type": "boolean"
+        },
+        "health_path": {
+          "default": "/",
+          "title": "Health Path",
+          "type": "string"
+        },
+        "api_base_url": {
+          "default": "",
+          "title": "Api Base Url",
+          "type": "string"
+        },
+        "api_candidate_base_url": {
+          "default": "",
+          "title": "Api Candidate Base Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runtime_kind"
+      ],
+      "title": "CatalogDeployment",
+      "type": "object"
+    },
+    "CatalogFinOps": {
+      "additionalProperties": false,
+      "properties": {
+        "service": {
+          "default": "",
+          "title": "Service",
+          "type": "string"
+        },
+        "env": {
+          "default": "",
+          "title": "Env",
+          "type": "string"
+        },
+        "owner": {
+          "default": "",
+          "title": "Owner",
+          "type": "string"
+        },
+        "cost_center": {
+          "default": "",
+          "title": "Cost Center",
+          "type": "string"
+        }
+      },
+      "title": "CatalogFinOps",
+      "type": "object"
+    },
+    "CatalogInventorySource": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "const": "cloud_run_inventory",
+          "title": "Source",
+          "type": "string"
+        },
+        "observed_at": {
+          "maxLength": 64,
+          "title": "Observed At",
+          "type": "string"
+        },
+        "project": {
+          "maxLength": 30,
+          "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+          "title": "Project",
+          "type": "string"
+        },
+        "region": {
+          "maxLength": 63,
+          "pattern": "^[a-z]+(?:-[a-z]+)+[0-9]+$",
+          "title": "Region",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "observed_at",
+        "project",
+        "region"
+      ],
+      "title": "CatalogInventorySource",
+      "type": "object"
+    },
+    "CatalogOperationalSecret": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "pattern": "^[A-Z][A-Z0-9_]{0,127}$",
+          "title": "Key",
+          "type": "string"
+        },
+        "secret_id": {
+          "pattern": "^[a-zA-Z0-9_-]{1,255}$",
+          "title": "Secret Id",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "editable": {
+          "default": false,
+          "title": "Editable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "key",
+        "secret_id"
+      ],
+      "title": "CatalogOperationalSecret",
+      "type": "object"
+    },
+    "CatalogQuality": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "enum": [
+                "python",
+                "node",
+                "static"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profile"
+        },
+        "coverage_threshold": {
+          "default": 70,
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Coverage Threshold",
+          "type": "number"
+        },
+        "policy_version": {
+          "default": "oss-v2",
+          "enum": [
+            "oss-v1",
+            "oss-v2"
+          ],
+          "title": "Policy Version",
+          "type": "string"
+        },
+        "differential_threshold": {
+          "default": 80,
+          "maximum": 100,
+          "minimum": 80,
+          "title": "Differential Threshold",
+          "type": "number"
+        },
+        "evidence_services": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Services",
+          "type": "array"
+        }
+      },
+      "title": "CatalogQuality",
+      "type": "object"
+    },
+    "CatalogRecord": {
+      "additionalProperties": false,
+      "description": "Private on-disk contract. Never serialize this as a public API model.",
+      "properties": {
+        "management_mode": {
+          "const": "managed",
+          "default": "managed",
+          "title": "Management Mode",
+          "type": "string"
+        },
+        "service_name": {
+          "maxLength": 63,
+          "pattern": "^[a-z][a-z0-9-]{0,61}[a-z0-9]$|^[a-z]$",
+          "title": "Service Name",
+          "type": "string"
+        },
+        "repository": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Repository",
+          "type": "string"
+        },
+        "owner": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Owner",
+          "type": "string"
+        },
+        "cost_center": {
+          "default": "",
+          "title": "Cost Center",
+          "type": "string"
+        },
+        "project_id": {
+          "maxLength": 30,
+          "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "region": {
+          "maxLength": 63,
+          "pattern": "^[a-z]+(?:-[a-z]+)+[0-9]+$",
+          "title": "Region",
+          "type": "string"
+        },
+        "environment": {
+          "default": "prod",
+          "title": "Environment",
+          "type": "string"
+        },
+        "release_model": {
+          "default": "managed-release",
+          "title": "Release Model",
+          "type": "string"
+        },
+        "release_policy": {
+          "default": "oss-v2",
+          "title": "Release Policy",
+          "type": "string"
+        },
+        "validation_targets": {
+          "items": {
+            "$ref": "#/$defs/CatalogValidationTarget"
+          },
+          "title": "Validation Targets",
+          "type": "array"
+        },
+        "quality": {
+          "$ref": "#/$defs/CatalogQuality"
+        },
+        "deployment": {
+          "$ref": "#/$defs/CatalogDeployment"
+        },
+        "finops": {
+          "$ref": "#/$defs/CatalogFinOps"
+        },
+        "operational_secrets": {
+          "items": {
+            "$ref": "#/$defs/CatalogOperationalSecret"
+          },
+          "title": "Operational Secrets",
+          "type": "array"
+        },
+        "logs": {
+          "$ref": "#/$defs/LogPolicy"
+        }
+      },
+      "required": [
+        "service_name",
+        "repository",
+        "owner",
+        "project_id",
+        "region",
+        "deployment"
+      ],
+      "title": "CatalogRecord",
+      "type": "object"
+    },
+    "CatalogValidationTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "type": {
+          "default": "external_source",
+          "title": "Type",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "CatalogValidationTarget",
+      "type": "object"
+    },
+    "LogPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "allowed_logins": {
+          "items": {
+            "maxLength": 39,
+            "pattern": "^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$",
+            "type": "string"
+          },
+          "maxItems": 512,
+          "title": "Allowed Logins",
+          "type": "array"
+        }
+      },
+      "required": [
+        "enabled",
+        "allowed_logins"
+      ],
+      "title": "LogPolicy",
+      "type": "object"
+    },
+    "ObservabilityRecord": {
+      "additionalProperties": false,
+      "description": "Inventory identity only; no repository/owner or mutation authority inferred.",
+      "properties": {
+        "management_mode": {
+          "const": "observability_only",
+          "title": "Management Mode",
+          "type": "string"
+        },
+        "service_name": {
+          "maxLength": 63,
+          "pattern": "^[a-z][a-z0-9-]{0,61}[a-z0-9]$|^[a-z]$",
+          "title": "Service Name",
+          "type": "string"
+        },
+        "repository": {
+          "title": "Repository",
+          "type": "null"
+        },
+        "owner": {
+          "title": "Owner",
+          "type": "null"
+        },
+        "cost_center": {
+          "const": "",
+          "default": "",
+          "title": "Cost Center",
+          "type": "string"
+        },
+        "project_id": {
+          "maxLength": 30,
+          "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "region": {
+          "maxLength": 63,
+          "pattern": "^[a-z]+(?:-[a-z]+)+[0-9]+$",
+          "title": "Region",
+          "type": "string"
+        },
+        "environment": {
+          "const": "",
+          "default": "",
+          "title": "Environment",
+          "type": "string"
+        },
+        "release_model": {
+          "const": "observability-only",
+          "default": "observability-only",
+          "title": "Release Model",
+          "type": "string"
+        },
+        "release_policy": {
+          "const": "",
+          "default": "",
+          "title": "Release Policy",
+          "type": "string"
+        },
+        "validation_targets": {
+          "items": {
+            "$ref": "#/$defs/CatalogValidationTarget"
+          },
+          "maxItems": 0,
+          "title": "Validation Targets",
+          "type": "array"
+        },
+        "quality": {
+          "$ref": "#/$defs/ObservationQuality"
+        },
+        "deployment": {
+          "$ref": "#/$defs/ObservationDeployment"
+        },
+        "finops": {
+          "$ref": "#/$defs/ObservationFinOps"
+        },
+        "operational_secrets": {
+          "items": {
+            "$ref": "#/$defs/CatalogOperationalSecret"
+          },
+          "maxItems": 0,
+          "title": "Operational Secrets",
+          "type": "array"
+        },
+        "inventory_source": {
+          "$ref": "#/$defs/CatalogInventorySource"
+        },
+        "logs": {
+          "$ref": "#/$defs/LogPolicy"
+        }
+      },
+      "required": [
+        "management_mode",
+        "service_name",
+        "repository",
+        "owner",
+        "project_id",
+        "region",
+        "deployment",
+        "inventory_source"
+      ],
+      "title": "ObservabilityRecord",
+      "type": "object"
+    },
+    "ObservationDeployment": {
+      "additionalProperties": false,
+      "properties": {
+        "executor": {
+          "const": "auto",
+          "default": "auto",
+          "title": "Executor",
+          "type": "string"
+        },
+        "enabled": {
+          "const": false,
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "workflow_file": {
+          "const": "",
+          "default": "",
+          "title": "Workflow File",
+          "type": "string"
+        },
+        "image_name": {
+          "const": "",
+          "default": "",
+          "title": "Image Name",
+          "type": "string"
+        },
+        "artifact_repository": {
+          "const": "",
+          "default": "",
+          "title": "Artifact Repository",
+          "type": "string"
+        },
+        "build_context": {
+          "const": "",
+          "default": "",
+          "title": "Build Context",
+          "type": "string"
+        },
+        "dockerfile_path": {
+          "const": "",
+          "default": "",
+          "title": "Dockerfile Path",
+          "type": "string"
+        },
+        "runtime_kind": {
+          "enum": [
+            "cloud_run_service",
+            "cloud_run_job"
+          ],
+          "title": "Runtime Kind",
+          "type": "string"
+        },
+        "private_runtime": {
+          "default": false,
+          "title": "Private Runtime",
+          "type": "boolean"
+        },
+        "health_path": {
+          "const": "",
+          "default": "",
+          "title": "Health Path",
+          "type": "string"
+        },
+        "api_base_url": {
+          "const": "",
+          "default": "",
+          "title": "Api Base Url",
+          "type": "string"
+        },
+        "api_candidate_base_url": {
+          "const": "",
+          "default": "",
+          "title": "Api Candidate Base Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runtime_kind"
+      ],
+      "title": "ObservationDeployment",
+      "type": "object"
+    },
+    "ObservationFinOps": {
+      "additionalProperties": false,
+      "properties": {
+        "service": {
+          "const": "",
+          "default": "",
+          "title": "Service",
+          "type": "string"
+        },
+        "env": {
+          "const": "",
+          "default": "",
+          "title": "Env",
+          "type": "string"
+        },
+        "owner": {
+          "const": "",
+          "default": "",
+          "title": "Owner",
+          "type": "string"
+        },
+        "cost_center": {
+          "const": "",
+          "default": "",
+          "title": "Cost Center",
+          "type": "string"
+        }
+      },
+      "title": "ObservationFinOps",
+      "type": "object"
+    },
+    "ObservationQuality": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "const": false,
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "profile": {
+          "default": null,
+          "title": "Profile",
+          "type": "null"
+        },
+        "coverage_threshold": {
+          "default": 70,
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Coverage Threshold",
+          "type": "number"
+        },
+        "policy_version": {
+          "default": "oss-v2",
+          "enum": [
+            "oss-v1",
+            "oss-v2"
+          ],
+          "title": "Policy Version",
+          "type": "string"
+        },
+        "differential_threshold": {
+          "default": 80,
+          "maximum": 100,
+          "minimum": 80,
+          "title": "Differential Threshold",
+          "type": "number"
+        },
+        "evidence_services": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0,
+          "title": "Evidence Services",
+          "type": "array"
+        }
+      },
+      "title": "ObservationQuality",
+      "type": "object"
+    }
+  },
   "additionalProperties": false,
   "properties": {
     "services": {
-      "type": "array",
-      "minItems": 1,
       "items": {
-        "type": "object",
-        "required": [
-          "service_name",
-          "repository",
-          "owner",
-          "project_id",
-          "region"
-        ],
-        "additionalProperties": false,
-        "properties": {
-          "service_name": {
-            "type": "string",
-            "pattern": "^[a-z0-9][a-z0-9-]*[a-z0-9]$"
+        "discriminator": {
+          "mapping": {
+            "managed": "#/$defs/CatalogRecord",
+            "observability_only": "#/$defs/ObservabilityRecord"
           },
-          "repository": {
-            "type": "string",
-            "minLength": 1
+          "propertyName": "management_mode"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/CatalogRecord"
           },
-          "owner": {
-            "type": "string",
-            "minLength": 1
-          },
-          "cost_center": {
-            "type": "string"
-          },
-          "project_id": {
-            "type": "string",
-            "minLength": 1
-          },
-          "region": {
-            "type": "string",
-            "minLength": 1
-          },
-          "environment": {
-            "type": "string"
-          },
-          "validation_targets": {
-            "type": "array"
-          },
-          "operational_secrets": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "key",
-                "secret_id"
-              ],
-              "properties": {
-                "key": {
-                  "type": "string",
-                  "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
-                },
-                "secret_id": {
-                  "type": "string",
-                  "pattern": "^[a-zA-Z0-9_-]{1,255}$"
-                },
-                "description": {
-                  "type": "string"
-                },
-                "required": {
-                  "type": "boolean",
-                  "default": true
-                },
-                "editable": {
-                  "type": "boolean",
-                  "default": false
-                }
-              }
-            }
-          },
-          "quality": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "enabled": {
-                "type": "boolean"
-              },
-              "profile": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "enum": [
-                  "python",
-                  "node",
-                  "static",
-                  null
-                ]
-              },
-              "coverage_threshold": {
-                "type": "number",
-                "minimum": 0,
-                "maximum": 100
-              },
-              "policy_version": {
-                "type": "string",
-                "enum": [
-                  "oss-v1",
-                  "oss-v2"
-                ],
-                "default": "oss-v2"
-              },
-              "differential_threshold": {
-                "type": "number",
-                "minimum": 80,
-                "maximum": 100,
-                "default": 80
-              }
-            }
-          },
-          "deployment": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "enabled": {
-                "type": "boolean"
-              },
-              "workflow_file": {
-                "type": "string",
-                "minLength": 1
-              },
-              "image_name": {
-                "type": "string"
-              },
-              "artifact_repository": {
-                "type": "string",
-                "minLength": 1
-              },
-              "build_context": {
-                "type": "string",
-                "minLength": 1
-              },
-              "health_path": {
-                "type": "string",
-                "pattern": "^/"
-              }
-            }
-          },
-          "finops": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "service": {
-                "type": "string"
-              },
-              "env": {
-                "type": "string"
-              },
-              "owner": {
-                "type": "string"
-              },
-              "cost_center": {
-                "type": "string"
-              }
-            }
+          {
+            "$ref": "#/$defs/ObservabilityRecord"
           }
-        }
-      }
+        ]
+      },
+      "maxItems": 2048,
+      "minItems": 1,
+      "title": "Services",
+      "type": "array"
     }
-  }
+  },
+  "required": [
+    "services"
+  ],
+  "title": "Platform Service Catalog",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/diegomad14/gcp-engineering-platform-api/schemas/platform-catalog.schema.json",
+  "description": "Generated from log_catalog.CatalogDocument. service_name must also be globally unique; see local validator."
 }

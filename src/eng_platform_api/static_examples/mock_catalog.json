@@ -32,7 +32,12 @@
         "env": "prod",
         "owner": "cgm",
         "cost_center": "cgm"
-      }
+      },
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "management_mode": "managed"
     },
     {
       "service_name": "cgm-artemis-job-dispatcher",
@@ -65,7 +70,12 @@
         "env": "prod",
         "owner": "cgm",
         "cost_center": "cgm"
-      }
+      },
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "management_mode": "managed"
     },
     {
       "service_name": "cgm-artemis-job-worker",
@@ -98,7 +108,12 @@
         "env": "prod",
         "owner": "cgm",
         "cost_center": "cgm"
-      }
+      },
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "management_mode": "managed"
     },
     {
       "service_name": "cgm-artemis-sync-worker",
@@ -131,7 +146,12 @@
         "env": "prod",
         "owner": "cgm",
         "cost_center": "cgm"
-      }
+      },
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "management_mode": "managed"
     },
     {
       "service_name": "cgm-artemis-clock-sync-worker",
@@ -164,7 +184,12 @@
         "env": "prod",
         "owner": "cgm",
         "cost_center": "cgm"
-      }
+      },
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "management_mode": "managed"
     },
     {
       "service_name": "cgm-artemis-data-recovery-worker",
@@ -197,7 +222,12 @@
         "env": "prod",
         "owner": "cgm",
         "cost_center": "cgm"
-      }
+      },
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "management_mode": "managed"
     },
     {
       "service_name": "cgm-artemis-fnd-ip-sync-worker",
@@ -230,7 +260,12 @@
         "env": "prod",
         "owner": "cgm",
         "cost_center": "cgm"
-      }
+      },
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "management_mode": "managed"
     },
     {
       "service_name": "cgm-artemis-fnd-observation-worker",
@@ -263,7 +298,12 @@
         "env": "prod",
         "owner": "cgm",
         "cost_center": "cgm"
-      }
+      },
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "management_mode": "managed"
     },
     {
       "service_name": "cgm-artemis-readings-export-worker",
@@ -296,7 +336,12 @@
         "env": "prod",
         "owner": "cgm",
         "cost_center": "cgm"
-      }
+      },
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "management_mode": "managed"
     },
     {
       "service_name": "cgm-artemis-smarti-prevention-worker",
@@ -329,7 +374,12 @@
         "env": "prod",
         "owner": "cgm",
         "cost_center": "cgm"
-      }
+      },
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "management_mode": "managed"
     },
     {
       "service_name": "cgm-artemis-wm-sweep-worker",
@@ -362,7 +412,12 @@
         "env": "prod",
         "owner": "cgm",
         "cost_center": "cgm"
-      }
+      },
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "management_mode": "managed"
     },
     {
       "service_name": "cgm-artemis-web",
@@ -395,7 +450,12 @@
         "env": "prod",
         "owner": "cgm",
         "cost_center": "cgm"
-      }
+      },
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "management_mode": "managed"
     },
     {
       "service_name": "cgm-sanplat-api",
@@ -464,14 +524,20 @@
         "image_name": "cgm-sanplat-api",
         "artifact_repository": "cgm-sanplat-repo",
         "build_context": ".",
-        "health_path": "/health"
+        "health_path": "/health",
+        "runtime_kind": "cloud_run_service"
       },
       "finops": {
         "service": "cgm-sanplat-api",
         "env": "prod",
         "owner": "cgm",
         "cost_center": "cgm"
-      }
+      },
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "management_mode": "managed"
     },
     {
       "service_name": "cgm-sanplat-web",
@@ -512,14 +578,20 @@
         "build_context": ".",
         "health_path": "/",
         "api_base_url": "https://cgm-sanplat-api-546821492326.us-central1.run.app",
-        "api_candidate_base_url": ""
+        "api_candidate_base_url": "",
+        "runtime_kind": "cloud_run_service"
       },
       "finops": {
         "service": "cgm-sanplat-web",
         "env": "prod",
         "owner": "cgm",
         "cost_center": "cgm"
-      }
+      },
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "management_mode": "managed"
     },
     {
       "service_name": "cgm-bot-api",
@@ -543,14 +615,20 @@
         "artifact_repository": "cgm-sanplat-repo",
         "build_context": "services/cgm-bot-api",
         "dockerfile_path": "services/cgm-bot-api/Dockerfile",
-        "health_path": "/health"
+        "health_path": "/health",
+        "runtime_kind": "cloud_run_service"
       },
       "finops": {
         "service": "cgm-bot-api",
         "env": "prod",
         "owner": "cgm",
         "cost_center": "cgm"
-      }
+      },
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "management_mode": "managed"
     },
     {
       "service_name": "communications-ms",
@@ -573,14 +651,20 @@
         "image_name": "communications-ms",
         "artifact_repository": "cgm-sanplat-repo",
         "build_context": ".",
-        "health_path": "/health"
+        "health_path": "/health",
+        "runtime_kind": "cloud_run_service"
       },
       "finops": {
         "service": "communications-ms",
         "env": "prod",
         "owner": "cgm",
         "cost_center": "cgm"
-      }
+      },
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "management_mode": "managed"
     },
     {
       "service_name": "eng-platform-api",
@@ -603,14 +687,20 @@
         "image_name": "eng-platform-api",
         "artifact_repository": "cgm-sanplat-repo",
         "build_context": ".",
-        "health_path": "/health"
+        "health_path": "/health",
+        "runtime_kind": "cloud_run_service"
       },
       "finops": {
         "service": "eng-platform-api",
         "env": "prod",
         "owner": "platform",
         "cost_center": "platform"
-      }
+      },
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "management_mode": "managed"
     },
     {
       "service_name": "eng-platform-web",
@@ -633,14 +723,20 @@
         "image_name": "eng-platform-web",
         "artifact_repository": "cgm-sanplat-repo",
         "build_context": ".",
-        "health_path": "/"
+        "health_path": "/",
+        "runtime_kind": "cloud_run_service"
       },
       "finops": {
         "service": "eng-platform-web",
         "env": "prod",
         "owner": "platform",
         "cost_center": "platform"
-      }
+      },
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "management_mode": "managed"
     },
     {
       "service_name": "cgm-artemis-mcp-worker",
@@ -673,6 +769,939 @@
         "env": "prod",
         "owner": "cgm",
         "cost_center": "cgm"
+      },
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "management_mode": "managed"
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-service-01",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_service"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-service-02",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_service"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-service-03",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_service"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-service-04",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_service"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-service-05",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_service"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-service-06",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_service"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-service-07",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_service"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-01",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-02",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-03",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-04",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-05",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-06",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-07",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-08",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-09",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-10",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-11",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-12",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-13",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-14",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-15",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-16",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-17",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-18",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-19",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-20",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-21",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-22",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-23",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-24",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
+      }
+    },
+    {
+      "management_mode": "observability_only",
+      "service_name": "demo-observed-job-25",
+      "repository": null,
+      "owner": null,
+      "project_id": "demo-platform-prod",
+      "region": "us-central1",
+      "environment": "",
+      "release_model": "observability-only",
+      "release_policy": "",
+      "deployment": {
+        "enabled": false,
+        "runtime_kind": "cloud_run_job"
+      },
+      "quality": {
+        "enabled": false
+      },
+      "operational_secrets": [],
+      "logs": {
+        "enabled": false,
+        "allowed_logins": []
+      },
+      "inventory_source": {
+        "source": "cloud_run_inventory",
+        "observed_at": "2020-01-01T00:00:00+00:00",
+        "project": "demo-platform-prod",
+        "region": "us-central1"
       }
     }
   ]

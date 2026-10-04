@@ -1,7 +1,8 @@
 {
   "roots": [
     "src",
-    "scripts/release"
+    "scripts/release",
+    "scripts/catalog_registry.py"
   ],
   "exclude": []
 }

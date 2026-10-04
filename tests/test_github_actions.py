@@ -18,7 +18,17 @@ def _service() -> CatalogService:
     )
 
 
-def test_release_summary_uses_semver_releases_and_deployment_state():
+def test_release_summary_uses_semver_releases_and_deployment_state(
+    monkeypatch, tmp_path
+):
+    from tests.test_log_catalog import install_catalog, pin_private_catalog, record
+
+    path = install_catalog(
+        monkeypatch,
+        tmp_path,
+        [record("test-api", repository="test-org/test-api", project_id="test-project")],
+    )
+    pin_private_catalog(monkeypatch, path)
     service = _service()
     release = SimpleNamespace(
         tag_name="v1.2.3",

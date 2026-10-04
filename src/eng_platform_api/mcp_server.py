@@ -19,7 +19,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, Tool
 from pydantic import AnyHttpUrl
 
-from .config import config
+from .config import catalog_source_identity, config
 from .routers import costs, metrics, releases
 from .routers.quality import get_quality_report
 from .services import (
@@ -30,6 +30,7 @@ from .services import (
     mcp_store,
 )
 from .services.mcp_auth import _SCOPES, provider
+from .security import require_private_catalog_reader
 
 _BASE_URL = config.mcp.public_base_url or "http://localhost:8000"
 _RESOURCE_URL = f"{_BASE_URL}/mcp"
@@ -130,10 +131,19 @@ def _audit(
     )
 
 
-def _read(tool: str, payload: dict[str, Any], action):
+def _read(tool: str, payload: dict[str, Any], action, *, filtered_catalog=False):
     subject, client_id = _identity("eng-platform.read")
+    source = catalog_source_identity()
+    visible = require_private_catalog_reader(
+        subject, payload.get("service_name"), filtered_catalog=filtered_catalog
+    )
     try:
-        value = action()
+        value = action(visible) if filtered_catalog else action()
+        require_private_catalog_reader(
+            subject, payload.get("service_name"), filtered_catalog=filtered_catalog
+        )
+        if source != catalog_source_identity():
+            raise HTTPException(503, "Runtime catalog changed; retry the request")
     except Exception:
         _audit(
             subject=subject,
@@ -193,7 +203,7 @@ def _mutate(tool: str, payload: dict[str, Any], scope: str, action):
 @mcp.tool()
 def list_services() -> dict[str, Any]:
     """List services registered in the platform catalog."""
-    return _read("list_services", {}, catalog.get_services)
+    return _read("list_services", {}, catalog.get_services, filtered_catalog=True)
 
 
 @mcp.tool()
@@ -464,9 +474,14 @@ def _send_cost_alert_tool() -> CallToolResult:
 async def get_metrics_summary(window: Literal["1h", "24h"] = "24h") -> dict[str, Any]:
     """Get public Cloud Run operational metrics from the existing monitoring source."""
     subject, client_id = _identity("eng-platform.read")
+    source = catalog_source_identity()
+    require_private_catalog_reader(subject)
     payload = {"window": window}
     try:
         value = await metrics.get_cloud_run_metrics(window)
+        require_private_catalog_reader(subject)
+        if source != catalog_source_identity():
+            raise HTTPException(503, "Runtime catalog changed; retry the request")
     except Exception:
         _audit(
             subject=subject,

@@ -110,7 +110,11 @@ def test_refresh_records_deployment_build_minutes(monkeypatch):
         "startTime": (started + timedelta(seconds=10)).isoformat(),
         "finishTime": (started + timedelta(seconds=190)).isoformat(),
     }
-    with mock.patch.object(cloud_build, "get_build", return_value=build):
+    # Timing accounting must not reconcile a live runtime or discover ADC.
+    with (
+        mock.patch.object(cloud_build, "get_build", return_value=build),
+        mock.patch.object(cloud_build, "_reconcile"),
+    ):
         cloud_build.refresh(item)
 
     record = deployment_executions.get(item.id)

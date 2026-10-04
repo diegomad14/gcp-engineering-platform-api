@@ -6,8 +6,6 @@ Sources:
 - Falls back to mock data when APIs are unavailable.
 """
 
-import json
-import pathlib
 import re
 from functools import lru_cache
 from threading import Lock
@@ -18,24 +16,20 @@ from google.cloud import run_v2
 
 from ..config import config
 from .repository_identity import repository_id, same_repository
+from . import log_catalog
 from ..models import (
     CatalogResponse,
     CatalogService,
     FinOpsLabels,
+    InventorySource,
     ServiceDetail,
     ServiceDeploymentConfig,
     ServiceQualityConfig,
+    ServiceLogsCapability,
     ServiceTraffic,
     ValidationTarget,
 )
 
-_CATALOG_PATH = (
-    pathlib.Path(__file__).resolve().parent.parent
-    / "static_examples"
-    / "mock_catalog.json"
-)
-_PROJECT_ID = "cgm-assistant-prod"
-_REGION = "us-central1"
 _DETAIL_CACHE_TTL_SECONDS = 30
 _detail_cache: dict[str, tuple[float, ServiceDetail]] = {}
 _detail_cache_lock = Lock()
@@ -53,6 +47,10 @@ def _job_client() -> run_v2.JobsClient:
 
 def deployment_blockers(service: CatalogService) -> list[str]:
     """Return actionable reasons why a service cannot be deployed by the platform."""
+    if service.management_mode != "managed":
+        return [
+            "Observation-only resource: deployment, rollback, release and secret changes are disabled"
+        ]
     blockers: list[str] = []
     deployment = service.deployment
     required_fields = [
@@ -100,7 +98,7 @@ def deployment_blockers(service: CatalogService) -> list[str]:
             from .executor_readiness import availability
 
             blockers.extend(
-                availability(service.repository, repository, build.executor_image)
+                availability(service.repository or "", repository, build.executor_image)
             )
     if deployment.runtime_kind == "cloud_run_service":
         required_fields.append(("deployment.health_path", deployment.health_path))
@@ -113,14 +111,12 @@ def deployment_blockers(service: CatalogService) -> list[str]:
 
 
 def _get_service_config() -> list[dict]:
-    """Load the flat service catalog."""
-    if _CATALOG_PATH.exists():
-        data = json.loads(_CATALOG_PATH.read_text())
-        return data.get("services", [])
-    return []
+    """Read the single validated local authority; never fall back to empty."""
+    return log_catalog.load_catalog()
 
 
 def _catalog_service(cfg: dict) -> CatalogService:
+    observation_only = cfg.get("management_mode") == "observability_only"
     quality_cfg = dict(cfg.get("quality", {}))
     deployment_cfg = dict(cfg.get("deployment", {}))
     # A renamed repository publishes one quality execution for the same SHA, so
@@ -131,24 +127,37 @@ def _catalog_service(cfg: dict) -> CatalogService:
         1306114845: ["cgm-artemis-api", "cgm-sanplat-api"],
         1306114872: ["cgm-artemis-web", "cgm-sanplat-web"],
     }
-    identity = repository_id(cfg["repository"])
+    identity = repository_id(cfg["repository"]) if cfg["repository"] else None
     if identity in owners:
         quality_cfg["evidence_services"] = owners[identity]
-    if cfg["service_name"].startswith("cgm-artemis-"):
+    if cfg.get("management_mode", "managed") == "managed" and cfg[
+        "service_name"
+    ].startswith("cgm-artemis-"):
         if cfg["service_name"] not in {"cgm-artemis-api", "cgm-artemis-web"}:
             deployment_cfg["private_runtime"] = (
                 deployment_cfg.get("runtime_kind") == "cloud_run_service"
             )
+    if cfg.get("management_mode") == "observability_only":
+        deployment_cfg = log_catalog.ObservationDeployment.model_validate(
+            deployment_cfg
+        ).model_dump()
     service = CatalogService(
         service_name=cfg["service_name"],
+        management_mode=cfg.get("management_mode", "managed"),
+        inventory_source=InventorySource(**cfg["inventory_source"])
+        if cfg.get("inventory_source")
+        else None,
         repository=cfg["repository"],
         owner=cfg["owner"],
         cost_center=cfg.get("cost_center", ""),
-        project_id=cfg.get("project_id", _PROJECT_ID),
-        region=cfg.get("region", _REGION),
-        environment=cfg.get("environment", "prod"),
-        release_model=cfg.get("release_model", "managed-release"),
-        release_policy=cfg.get("release_policy", "oss-v2"),
+        project_id=cfg["project_id"],
+        region=cfg["region"],
+        environment=cfg.get("environment", "" if observation_only else "prod"),
+        release_model=cfg.get(
+            "release_model",
+            "observability-only" if observation_only else "managed-release",
+        ),
+        release_policy=cfg.get("release_policy", "" if observation_only else "oss-v2"),
         validation_targets=[
             ValidationTarget(**vt) for vt in cfg.get("validation_targets", [])
         ],
@@ -156,6 +165,10 @@ def _catalog_service(cfg: dict) -> CatalogService:
         deployment=ServiceDeploymentConfig(**deployment_cfg),
         finops=FinOpsLabels(**cfg.get("finops", {})),
         operational_secrets=cfg.get("operational_secrets", []),
+        logs=ServiceLogsCapability(
+            enabled=cfg.get("logs", {}).get("enabled", False),
+            configured="logs" in cfg,
+        ),
     )
     blockers = deployment_blockers(service)
     return service.model_copy(
@@ -163,23 +176,31 @@ def _catalog_service(cfg: dict) -> CatalogService:
     )
 
 
-def get_services() -> CatalogResponse:
-    services = [_catalog_service(cfg) for cfg in _get_service_config()]
+def get_services(visible_services: set[str] | None = None) -> CatalogResponse:
+    services = [
+        _catalog_service(cfg)
+        for cfg in _get_service_config()
+        if visible_services is None or cfg["service_name"] in visible_services
+    ]
     return CatalogResponse(services=services, total=len(services))
 
 
 def get_service(service_name: str) -> Optional[CatalogService]:
-    for service in get_services().services:
-        if service.service_name == service_name:
-            return service
+    # Resolve locally before computing readiness. Looking up a denied inventory
+    # identity must not evaluate managed entries or invoke their providers.
+    for item in _get_service_config():
+        if item["service_name"] == service_name:
+            return _catalog_service(item)
     return None
 
 
 def get_services_by_repository(repository: str) -> list[CatalogService]:
     return [
-        service
-        for service in get_services().services
-        if same_repository(service.repository, repository)
+        _catalog_service(item)
+        for item in _get_service_config()
+        if item.get("management_mode", "managed") == "managed"
+        and item["repository"]
+        and same_repository(item["repository"], repository)
     ]
 
 
@@ -203,6 +224,10 @@ def get_service_detail(service_name: str) -> Optional[ServiceDetail]:
         return None
 
     detail = ServiceDetail(**service.model_dump())
+    if service.management_mode != "managed":
+        # Inventory existence is timestamped evidence, not readiness. Do not
+        # discover metadata, execute readiness checks or invent mock health.
+        return detail
     if config.mock_mode:
         detail.status = "healthy"
         return detail
@@ -210,7 +235,12 @@ def get_service_detail(service_name: str) -> Optional[ServiceDetail]:
     with _detail_cache_lock:
         cached = _detail_cache.get(service_name)
         now = monotonic()
-        if cached and now - cached[0] < _DETAIL_CACHE_TTL_SECONDS:
+        if (
+            cached
+            and now - cached[0] < _DETAIL_CACHE_TTL_SECONDS
+            and cached[1].model_dump(include=set(CatalogService.model_fields))
+            == service.model_dump()
+        ):
             return cached[1]
 
     try:

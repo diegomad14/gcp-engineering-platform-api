@@ -7,15 +7,19 @@ from time import monotonic
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from ..config import config
+from ..config import catalog_source_identity, config
 from ..models import QualityProject, QualityReport, QualityReportCreate, QualitySummary
-from ..security import require_quality_ingest_token
-from ..services import catalog, github_actions, quality_store
+from ..security import private_catalog_required, require_quality_ingest_token
+from ..services import catalog, github_actions, log_catalog, quality_store
 from ..services.quality_policy import policy_errors
+
+from ..services.resource_access import require_managed, require_managed_service_name
 
 router = APIRouter(prefix="/api/quality", tags=["quality"])
 _SUMMARY_CACHE_TTL_SECONDS = 60
-_summary_cache: tuple[float, tuple[tuple[str, str], ...], QualitySummary] | None = None
+_summary_cache: (
+    tuple[float, tuple[tuple[str, str], ...], QualitySummary, object] | None
+) = None
 _summary_cache_lock = Lock()
 
 
@@ -23,6 +27,22 @@ def _invalidate_summary_cache() -> None:
     global _summary_cache
     with _summary_cache_lock:
         _summary_cache = None
+
+
+def _private_evidence_identity(service_name: str) -> None:
+    """Keep inventory presence indistinguishable from absent machine evidence."""
+    if not private_catalog_required():
+        return
+    try:
+        records = log_catalog.load_catalog()
+    except log_catalog.CatalogUnavailable:
+        raise HTTPException(503, "Runtime catalog is unavailable") from None
+    if not any(
+        row["service_name"] == service_name
+        and row.get("management_mode", "managed") == "managed"
+        for row in records
+    ):
+        raise HTTPException(404, "Quality report not found")
 
 
 def _is_stale(report: QualityReport) -> bool:
@@ -96,6 +116,8 @@ def register_quality_report(payload: QualityReportCreate):
 )
 def get_quality_report(service_name: str, commit_sha: str, for_release: bool = False):
     """Return the exact evidence used to authorize a deployment."""
+    _private_evidence_identity(service_name)
+    require_managed_service_name(service_name)
     report = quality_store.get_report(service_name, commit_sha)
     service = catalog.get_service(service_name)
     if report is None and service is not None:
@@ -131,6 +153,7 @@ def get_quality_history(
 
 
 def _quality_project(service) -> QualityProject:
+    service = require_managed(service)
     report = quality_store.get_latest_report(service.service_name)
     if report and report.repository == service.repository:
         return _project(report)
@@ -148,15 +171,21 @@ def _quality_project(service) -> QualityProject:
 def get_quality_summary():
     """Get the latest normalized quality result for every service."""
     global _summary_cache
+    source = catalog_source_identity()
     with _summary_cache_lock:
         now = monotonic()
-        services = catalog.get_services().services
+        services = [
+            require_managed(service)
+            for service in catalog.get_services().services
+            if service.management_mode == "managed" and service.repository is not None
+        ]
         catalog_key = tuple(
             sorted((service.service_name, service.repository) for service in services)
         )
         if (
             not config.mock_mode
             and _summary_cache
+            and _summary_cache[3] == source
             and _summary_cache[1] == catalog_key
             and now - _summary_cache[0] < _SUMMARY_CACHE_TTL_SECONDS
         ):
@@ -168,13 +197,15 @@ def get_quality_summary():
             projects=sorted(projects, key=lambda project: project.service_name)
         )
         if not config.mock_mode:
-            _summary_cache = (monotonic(), catalog_key, summary)
+            _summary_cache = (monotonic(), catalog_key, summary, source)
         return summary
 
 
 @router.get("/services/{service_name}/rollback-targets/{revision}")
 def get_rollback_evidence(service_name: str, revision: str):
     """Authorize only a recorded successful production revision, under its original policy."""
+    _private_evidence_identity(service_name)
+    require_managed_service_name(service_name)
     from ..services import deployment_store
 
     service = catalog.get_service(service_name)

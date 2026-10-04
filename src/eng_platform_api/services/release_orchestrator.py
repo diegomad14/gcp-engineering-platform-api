@@ -26,6 +26,8 @@ from . import (
 from .quality_profiles import executor_image, planner_hash, profile_for
 from .repository_identity import repository_id
 
+from .resource_access import require_managed, require_managed_service_name
+
 logger = logging.getLogger(__name__)
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _TERMINAL = {"quality_failed", "no_release", "released", "failed"}
@@ -47,6 +49,8 @@ def _owner(repository: str) -> str:
 
 
 def _service_enabled(service: CatalogService) -> bool:
+    if service.management_mode != "managed" or not service.repository:
+        return False
     settings = config.release_orchestrator
     # One quality/release execution per source repository. Derived Artemis
     # runtimes consume the API repo's exact evidence instead of triggering
@@ -70,6 +74,7 @@ def _services(repository: str) -> list[CatalogService]:
     ]
     by_repository: dict[str, CatalogService] = {}
     for service in eligible:
+        service = require_managed(service)
         key = str(repository_id(service.repository) or service.repository.casefold())
         previous = by_repository.get(key)
         if previous is None or (
@@ -124,6 +129,7 @@ def _open_circuit(*, repository: str, run_id: str, reason: str, evidence: str) -
 
 
 def _provider(service: CatalogService) -> str:
+    service = require_managed(service)
     try:
         private = github_release_control.repository_is_private(service.repository)
     except Exception:
@@ -161,6 +167,7 @@ def _reserve(
     delivery_id: str,
     provider: str,
 ) -> tuple[dict[str, Any], bool]:
+    service = require_managed(service)
     profile = profile_for(service)
     image = executor_image(profile)
     plan_hash = planner_hash() if operation == "main_release" else ""
@@ -219,6 +226,7 @@ def _reserve(
 
 
 def _start_checks(execution: dict[str, Any], *, pr_title: str = "") -> None:
+    require_managed_service_name(str(execution.get("service_name", "")))
     check_ids = dict(execution.get("check_ids") or {})
     if "quality" not in check_ids:
         check_ids["quality"] = github_release_control.upsert_check(
@@ -271,6 +279,7 @@ def _start_checks(execution: dict[str, Any], *, pr_title: str = "") -> None:
 
 
 def _submit_if_managed(execution: dict[str, Any], service: CatalogService) -> dict:
+    service = require_managed(service)
     if execution.get("provider") != "cloud_build":
         return execution
     try:
@@ -669,6 +678,7 @@ def approve_canary(execution_id: str, *, approved_by: str) -> dict[str, Any]:
     execution = release_executions.get(execution_id)
     if execution is None:
         raise KeyError(execution_id)
+    require_managed_service_name(str(execution.get("service_name", "")))
     if execution.get("service_name") not in config.release_orchestrator.canary_services:
         raise ValueError("Execution is not a canary")
     if execution.get("status") != "release_planned":
@@ -693,6 +703,7 @@ def supersede(execution_id: str, *, superseded_by: str, reason: str) -> dict[str
     execution = release_executions.get(execution_id)
     if execution is None:
         raise KeyError(execution_id)
+    require_managed_service_name(str(execution.get("service_name", "")))
     if execution.get("canary_approved"):
         raise ValueError("Execution already has an approved canary publication")
     if str(execution.get("status", "")) not in _SUPERSEDABLE_STATUSES:
@@ -716,9 +727,11 @@ def reconcile_verified_github_run(
     paired_run_id: int | None = None,
 ) -> dict[str, Any]:
     """Seed a missed webhook only after re-reading all identity from GitHub."""
+    require_managed_service_name(service_name)
     service = catalog.get_service(service_name)
     if service is None or not _service_enabled(service):
         raise ReleaseOrchestratorError("Service is not enabled for release recovery")
+    service = require_managed(service)
     if operation not in {"pr_quality", "main_release"}:
         raise ReleaseOrchestratorError("Invalid release recovery operation")
     head_sha, base_sha = head_sha.lower(), base_sha.lower()

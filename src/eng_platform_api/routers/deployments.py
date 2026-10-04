@@ -10,6 +10,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 
+from ..config import catalog_source_identity
 from ..models import (
     DeploymentCreateRequest,
     DeploymentItem,
@@ -32,10 +33,12 @@ from ..services import (
 from ..services import deployment_commands
 from .quality import get_quality_report
 
+from ..services.resource_access import require_managed_service_name
+
 router = APIRouter(prefix="/api", tags=["deployments"])
 _GITHUB_UNAVAILABLE = "GitHub unavailable"
 _OVERVIEW_CACHE_TTL_SECONDS = 30
-_overview_cache: tuple[float, DeploymentOverview] | None = None
+_overview_cache: tuple[float, DeploymentOverview, object] | None = None
 _overview_cache_lock = Lock()
 
 
@@ -46,6 +49,7 @@ def _invalidate_overview_cache() -> None:
 
 
 def _service_or_404(service_name: str):
+    require_managed_service_name(service_name)
     service = catalog.get_service(service_name)
     if service is None:
         raise HTTPException(status_code=404, detail=f"Unknown service '{service_name}'")
@@ -277,9 +281,14 @@ def _overview_item(
 def get_deployments_overview():
     """Return the deployment list page data with bounded external concurrency."""
     global _overview_cache
+    source = catalog_source_identity()
     with _overview_cache_lock:
         now = monotonic()
-        if _overview_cache and now - _overview_cache[0] < _OVERVIEW_CACHE_TTL_SECONDS:
+        if (
+            _overview_cache
+            and _overview_cache[2] == source
+            and now - _overview_cache[0] < _OVERVIEW_CACHE_TTL_SECONDS
+        ):
             return _overview_cache[1]
 
         services = catalog.get_services().services
@@ -300,7 +309,7 @@ def get_deployments_overview():
             items=items,
             generated_at=datetime.now(timezone.utc).isoformat(),
         )
-        _overview_cache = (monotonic(), result)
+        _overview_cache = (monotonic(), result, source)
         return result
 
 
@@ -322,6 +331,7 @@ def get_deployment(deployment_id: str):
 
 
 def _refresh(item: DeploymentItem) -> DeploymentItem:
+    require_managed_service_name(item.service_name)
     if item.origin == "external_verified":
         return item
     execution = deployment_executions.get(item.id)

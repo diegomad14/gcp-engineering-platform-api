@@ -25,6 +25,8 @@ def policy_errors(
 ) -> list[str]:
     if service is None:
         return ["Unknown catalog service"]
+    if service.management_mode != "managed" or service.repository is None:
+        return ["Observation-only resource is not eligible for release quality"]
     errors = []
     if (
         not same_repository(report.repository, service.repository)

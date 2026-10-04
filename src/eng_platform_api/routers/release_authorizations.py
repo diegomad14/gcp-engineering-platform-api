@@ -14,6 +14,8 @@ from ..services import (
     workflow_identity,
 )
 
+from ..services.resource_access import require_managed_service_name
+
 router = APIRouter(prefix="/api/internal/release-authorizations", tags=["internal"])
 
 
@@ -60,6 +62,7 @@ def consume_authorization(
                 claims["execution_repository"],
                 payload.kind,
             )
+        require_managed_service_name(payload.service_name)
         consumed = release_authorization_store.consume(
             str(claims["jti"]),
             {
@@ -77,6 +80,8 @@ def consume_authorization(
             },
             require_durable=bool(claims.get("execution_repository")),
         )
+    except HTTPException:
+        raise
     except (release_authorization.ReleaseAuthorizationError, RuntimeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

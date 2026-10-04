@@ -16,6 +16,7 @@ from ..models import (
     ReleaseSummary,
 )
 from . import catalog, deployment_store, github_deployments
+from .resource_access import require_managed
 
 
 def _fetch_recent_releases(repository: str, limit: int = 5) -> list[object]:
@@ -29,6 +30,7 @@ def _release_item(
     release: object,
     deployments: list[DeploymentItem],
 ) -> ReleaseItem:
+    service = require_managed(service)
     tag = getattr(release, "tag_name", "") or ""
     deployment = next((item for item in deployments if item.tag == tag), None)
     status = "released"
@@ -63,6 +65,8 @@ def _release_item(
 
 def _release_items_for_repository(repository: str) -> list[ReleaseItem]:
     services = catalog.get_services_by_repository(repository)
+    if not services:
+        return []
     try:
         releases = _fetch_recent_releases(repository)
     except Exception:
@@ -98,7 +102,7 @@ def get_release_summary() -> ReleaseSummary:
         {
             service.repository
             for service in catalog.get_services().services
-            if service.repository
+            if service.management_mode == "managed" and service.repository
         }
     )
     workers = min(6, max(1, len(repositories)))
@@ -132,7 +136,11 @@ def _ci_status(
 
 def get_ci_quality_project(service: CatalogService) -> QualityProject | None:
     """Return latest default-branch CI evidence when no normalized report exists."""
-    if config.mock_mode or not service.repository:
+    if (
+        service.management_mode != "managed"
+        or config.mock_mode
+        or not service.repository
+    ):
         return None
     try:
         repo = github_deployments.github_client().get_repo(service.repository)

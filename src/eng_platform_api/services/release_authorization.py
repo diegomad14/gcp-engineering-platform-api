@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from ..config import config
+from .resource_access import require_managed_service_name
 
 ISSUER = "engineering-platform"
 AUDIENCE = "github-release-workflow"
@@ -80,6 +81,7 @@ def issue(
     configuration_hash: str = "",
     capability_issued: bool = False,
 ) -> tuple[str, dict[str, Any]]:
+    require_managed_service_name(service_name)
     now = int(time.time())
     claims: dict[str, Any] = {
         "iss": ISSUER,

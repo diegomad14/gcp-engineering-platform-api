@@ -1,10 +1,14 @@
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+import json
 import os
+import shlex
 import subprocess
 import sys
+import tomllib
 
 import pytest
+import yaml
 
 
 def _executor_profiles():
@@ -51,6 +55,41 @@ def test_image_profile_contract_is_also_checked_by_api_ci():
         capture_output=True,
         text=True,
     )
+
+
+def test_api_quality_commands_instrument_the_catalog_registry():
+    """The pinned profile and both native CI commands retain every source."""
+    root = Path(__file__).resolve().parents[1]
+    project = tomllib.loads((root / "pyproject.toml").read_text())
+    addopts = shlex.split(project["tool"]["pytest"]["ini_options"]["addopts"])
+    assert "--cov=scripts.catalog_registry" in addopts
+    assert any(
+        dependency.startswith("pytest-cov")
+        for dependency in project["project"]["optional-dependencies"]["dev"]
+    )
+    sources = json.loads((root / ".quality-sources.json").read_text())
+    assert "scripts/catalog_registry.py" in sources["roots"]
+    workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
+    native = next(
+        line.strip()
+        for step in workflow["jobs"]["quality"]["steps"]
+        for line in step.get("run", "").splitlines()
+        if line.strip().startswith("pytest ")
+    )
+    commands = (
+        native,
+        workflow["jobs"]["normalized"]["with"]["test-command"],
+        _executor_profiles().profile_for("eng-platform-api")["commands"]["tests"],
+    )
+    for command in commands:
+        options = [*addopts, *shlex.split(command)]
+        assert "--cov-reset" not in options
+        assert "--no-cov" not in options
+        assert {
+            "--cov=eng_platform_api",
+            "--cov=scripts.release",
+            "--cov=scripts.catalog_registry",
+        }.issubset(options)
 
 
 def test_smarti_extras_are_mandatory_and_change_both_alias_contracts():

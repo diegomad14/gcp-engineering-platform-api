@@ -14,6 +14,8 @@ from . import release_executions
 from .cloud_build_policy import economy_options, validate_submission
 from .quality_profiles import executor_image, planner_hash, profile_for
 
+from .resource_access import require_managed, require_managed_service_name
+
 _API = "https://cloudbuild.googleapis.com/v1"
 _UNCERTAIN_GRACE_SECONDS = 120
 
@@ -44,6 +46,7 @@ def _repository(service: CatalogService) -> str:
 
 
 def _require_config(service: CatalogService) -> None:
+    service = require_managed(service)
     settings = config.release_orchestrator
     if not settings.enabled:
         raise ReleaseCloudBuildError("Release orchestrator is disabled")
@@ -208,6 +211,7 @@ def _planner_retry_request(
 
 def build_request(execution: dict[str, Any], service: CatalogService) -> dict[str, Any]:
     """Generate the only allowed build shape; no request-supplied commands exist."""
+    service = require_managed(service)
     _require_config(service)
     profile = profile_for(service)
     execution_id = str(execution["execution_id"])
@@ -621,6 +625,7 @@ def _bind(execution_id: str, build: dict[str, Any]) -> dict[str, Any]:
 
 def submit(execution_id: str, service: CatalogService) -> dict[str, Any]:
     """Submit at most once; uncertain results remain reconcilable."""
+    service = require_managed(service)
     execution = release_executions.get(execution_id)
     if execution is None:
         raise ReleaseCloudBuildError("Unknown release execution")
@@ -684,6 +689,7 @@ def reconcile_uncertain_submission(
     execution_id: str, service: CatalogService
 ) -> dict[str, Any]:
     """Bind a lost response or permit one retry after a bounded absence check."""
+    service = require_managed(service)
     execution = release_executions.get(execution_id)
     if execution is None:
         raise ReleaseCloudBuildError("Unknown release execution")
@@ -721,6 +727,7 @@ def cancel(execution_id: str) -> bool:
     execution = release_executions.get(execution_id)
     if not execution:
         return False
+    require_managed_service_name(str(execution.get("service_name", "")))
     if execution.get("operation") != "pr_quality":
         return False
     if not execution.get("build_id"):

@@ -22,6 +22,8 @@ from ..services import (
     release_workflow_identity,
 )
 
+from ..services.resource_access import require_managed_service_name
+
 router = APIRouter(prefix="/api/internal/release-executions", tags=["internal"])
 _SEMVER_TAG = re.compile(
     r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
@@ -155,12 +157,14 @@ def _verify_provider(
     token = _bearer(authorization)
     if execution.get("provider") == "cloud_build":
         _verify_google(token)
+        require_managed_service_name(str(execution.get("service_name", "")))
         _verify_cloud_build(execution, provider_run_id)
         return
     try:
         claims = release_workflow_identity.verify(token, execution)
     except release_workflow_identity.ReleaseWorkflowIdentityError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
+    require_managed_service_name(str(execution.get("service_name", "")))
     if claims.get("run_id") != provider_run_id:
         raise HTTPException(status_code=403, detail="GitHub workflow run mismatch")
     if execution.get("operation") == "pr_quality":
@@ -359,6 +363,7 @@ def resolve_execution(
         )
     try:
         claims = release_workflow_identity.verify(_bearer(authorization), execution)
+        require_managed_service_name(str(execution.get("service_name", "")))
     except release_workflow_identity.ReleaseWorkflowIdentityError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     if execution.get("operation") == "pr_quality":

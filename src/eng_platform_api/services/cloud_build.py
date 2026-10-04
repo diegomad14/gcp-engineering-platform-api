@@ -18,6 +18,8 @@ from .cloud_build_policy import economy_options, validate_submission
 from .release_profiles import profile_for
 from .repository_identity import aliases
 
+from .resource_access import require_managed, require_managed_service_name
+
 _API = "https://cloudbuild.googleapis.com/v1"
 
 
@@ -71,6 +73,7 @@ def fingerprint(item: DeploymentItem, service: CatalogService) -> str:
 
 def build_request(item: DeploymentItem, service: CatalogService) -> dict[str, Any]:
     """Return an inline build with no quality suite or mutable build policy."""
+    service = require_managed(service)
     _require_config()
     profile = profile_for(service)
     request_fingerprint = fingerprint(item, service)
@@ -220,6 +223,8 @@ def submit(
     item: DeploymentItem, service: CatalogService, *, reason: str
 ) -> DeploymentItem:
     """Submit once.  Any uncertain response is recoverable by fingerprint."""
+    service = require_managed(service)
+    require_managed_service_name(item.service_name)
     request = build_request(item, service)
     validate_submission(request)
     request_fingerprint = request["substitutions"]["_REQUEST_FINGERPRINT"]
@@ -275,6 +280,7 @@ def submit(
 
 
 def refresh(item: DeploymentItem) -> DeploymentItem:
+    require_managed_service_name(item.service_name)
     execution = deployment_executions.get(item.id)
     if not execution or not execution.get("build_id"):
         return item

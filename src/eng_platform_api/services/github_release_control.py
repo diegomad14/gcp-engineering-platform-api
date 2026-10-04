@@ -11,6 +11,8 @@ from github.GithubException import GithubException
 from ..config import config
 from .github_deployments import github_client
 
+from .resource_access import require_managed_service_name
+
 CHECK_NAMES = {
     "quality": "Engineering Platform / quality",
     "workflows": "Engineering Platform / workflows",
@@ -152,6 +154,7 @@ def dispatch_health_probe(repository: str, *, nonce: str) -> None:
 
 def publish_release(execution: dict[str, Any]) -> dict[str, Any]:
     """Create a tag and GitHub Release idempotently using the GitHub App."""
+    require_managed_service_name(str(execution.get("service_name", "")))
     repository = str(execution["repository"])
     expected_sha = str(execution["head_sha"])
     plan = execution.get("release_plan") or {}

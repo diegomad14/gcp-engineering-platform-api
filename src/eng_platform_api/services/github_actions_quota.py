@@ -42,12 +42,19 @@ class Usage:
 
 def _private_repositories() -> set[str]:
     """Read visibility once per lookup; public repositories never consume quota."""
+    repositories = {
+        service.repository
+        for service in catalog.get_services().services
+        if service.management_mode == "managed" and service.repository
+    }
+    if not repositories:
+        return set()
     client = github_client()
     private: set[str] = set()
-    for service in catalog.get_services().services:
-        repo = client.get_repo(service.repository)
+    for repository in repositories:
+        repo = client.get_repo(repository)
         if bool(getattr(repo, "private", False)):
-            private.add(service.repository.rsplit("/", 1)[-1])
+            private.add(repository.rsplit("/", 1)[-1])
     return private
 
 

@@ -17,6 +17,8 @@ from ..models import (
     ServiceRevision,
 )
 
+from .resource_access import require_managed_service_name
+
 _DEFAULT_STORE_PATH = Path(os.getenv("RELEASES_STORE_PATH", "data/releases.json"))
 _COLLECTION = os.getenv("ENG_PLATFORM_RELEASES_FIRESTORE_COLLECTION", "")
 _store_lock = threading.RLock()
@@ -189,7 +191,7 @@ def _repository_for_service(service_name: str, record: dict) -> str:
     from . import catalog
 
     service = catalog.get_service(service_name)
-    return service.repository if service else ""
+    return (service.repository or "") if service else ""
 
 
 def _item(
@@ -261,7 +263,7 @@ def _legacy_fixed_revision_items(record: dict) -> list[ReleaseItem]:
             ),
             None,
         )
-        if service:
+        if service and service.repository is not None:
             item = _item(
                 service_name=service.service_name,
                 repository=service.repository,
@@ -334,6 +336,8 @@ def release_items_from_record(record: dict) -> list[ReleaseItem]:
 
 def save_release(payload: ReleaseCreateRequest) -> list[ReleaseItem]:
     """Persist one record per service and return the created rows."""
+    for service in payload.services:
+        require_managed_service_name(service.service_name)
     now = datetime.now(timezone.utc).isoformat()
     items = [
         ReleaseItem(

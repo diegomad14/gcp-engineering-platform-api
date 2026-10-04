@@ -9,10 +9,13 @@ from ..config import config
 from ..security import require_deployer
 from ..services import catalog, operational_secrets
 
+from ..services.resource_access import require_managed_service_name
+
 router = APIRouter(prefix="/api/services", tags=["secrets"])
 
 
 def selected_service(service_name: str):
+    require_managed_service_name(service_name)
     service = catalog.get_service(service_name)
     if service is None:
         raise HTTPException(404, "Unknown service")
