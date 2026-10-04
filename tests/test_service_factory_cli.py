@@ -1,6 +1,7 @@
 """The public CLI must produce the same mandatory gate as the API."""
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -9,8 +10,22 @@ import pytest
 import yaml
 
 
+@pytest.fixture
+def offline_cli_env():
+    # Subprocesses do not inherit pytest's in-memory config patches. Explicitly
+    # select public demo fixtures and exclude ambient runtime/source settings.
+    return {
+        **{
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("ENG_PLATFORM_")
+        },
+        "ENG_PLATFORM_MOCK_MODE": "true",
+    }
+
+
 @pytest.mark.parametrize("runtime", ["python", "node", "static"])
-def test_cli_generates_oss_onboarding(tmp_path, runtime):
+def test_cli_generates_oss_onboarding(tmp_path, runtime, offline_cli_env):
     result = subprocess.run(
         [
             sys.executable,
@@ -46,6 +61,7 @@ def test_cli_generates_oss_onboarding(tmp_path, runtime):
         capture_output=True,
         text=True,
         cwd=Path(__file__).resolve().parents[1],
+        env=offline_cli_env,
     )
     assert "Generated 11 files" in result.stdout
     files = [path for path in tmp_path.rglob("*") if path.is_file()]
@@ -73,7 +89,7 @@ def test_cli_generates_oss_onboarding(tmp_path, runtime):
         assert (tmp_path / ".github/workflows" / workflow).is_file()
 
 
-def test_cli_job_proposal_has_no_service_deploy_workflow(tmp_path):
+def test_cli_job_proposal_has_no_service_deploy_workflow(tmp_path, offline_cli_env):
     result = subprocess.run(
         [
             sys.executable,
@@ -101,6 +117,7 @@ def test_cli_job_proposal_has_no_service_deploy_workflow(tmp_path):
         capture_output=True,
         text=True,
         cwd=Path(__file__).resolve().parents[1],
+        env=offline_cli_env,
     )
     assert "Generated 9 files" in result.stdout
     assert "No GCP resources were created" in result.stdout

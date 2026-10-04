@@ -551,6 +551,22 @@ def test_expired_sdk_initialization_never_dispatches_a_late_rpc(monkeypatch):
 
 
 def test_500_resources_and_projects_get_individual_bounded_filters(monkeypatch):
+    # Model a slow runner deterministically: each independent request has a new
+    # wall-clock observation and a matching budget timestamp. A fixed timestamp
+    # across all 500 requests incorrectly makes later successful samples stale.
+    observed = [NOW]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return observed[0]
+
+    monkeypatch.setattr(logs, "datetime", Clock)
+    monkeypatch.setattr(
+        logs.log_budget,
+        "reserve",
+        Mock(side_effect=lambda *args, **kwargs: Reservation(True, observed[0])),
+    )
     resources = [
         logs.Resource(
             f"service-{index:04d}",
@@ -565,10 +581,12 @@ def test_500_resources_and_projects_get_individual_bounded_filters(monkeypatch):
     monkeypatch.setattr(logs, "resources", lambda: resources)
     provider = Mock(return_value=([], False))
     monkeypatch.setattr(logs, "fetch_page", provider)
-    for resource in resources:
+    for index, resource in enumerate(resources):
+        observed[0] = NOW + timedelta(seconds=index * 2)
         result = logs.read_logs(resource, resources)
         assert result.status == "fresh" and result.entries == []
-        assert result.last_success_at == logs.iso(NOW)
+        assert result.last_success_at == logs.iso(observed[0])
+        assert result.cache_age_seconds == 0
         query = provider.call_args.args[1]
         assert len(query) <= 20_000 and " OR " not in query
         assert f'"{resource.service_id}"' in query
