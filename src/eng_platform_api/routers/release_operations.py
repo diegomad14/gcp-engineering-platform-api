@@ -50,6 +50,14 @@ def reconcile_due(authorization: str | None = Header(default=None)):
         try:
             updated = release_reconciler.reconcile(execution_id)
             results.append({"execution_id": execution_id, "status": updated["status"]})
+        except HTTPException as exc:
+            results.append(
+                {
+                    "execution_id": execution_id,
+                    "status": "management_blocked",
+                    "code": exc.status_code,
+                }
+            )
         except Exception as exc:
             try:
                 updated = release_executions.save(

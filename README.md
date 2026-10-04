@@ -26,7 +26,8 @@ python3 -m pytest -q
 | GET | `/api/health/services` | Cloud Run readiness per service |
 | GET | `/api/catalog/services` | Flat service catalog |
 | GET | `/api/catalog/services/{service_name}` | Service metadata and live state |
-| GET | `/api/auth/me` | Current GitHub operator session and deploy permission |
+| POST | `/api/catalog/services/{service_id}/logs` | Authenticated, bounded runtime logs (disabled by default; JSON filters) |
+| GET | `/api/auth/me` | Current GitHub session, deploy and independent log-read permissions |
 | GET | `/api/auth/login` | Start GitHub OAuth with a protected return URL |
 | GET | `/api/auth/callback` | Complete GitHub OAuth and create the signed session |
 | POST | `/api/auth/logout` | Clear the operator session |
@@ -165,3 +166,21 @@ legacy Sonar flags remain accepted but have no effect.
 
 `v0.4.0` removes application endpoints and the public `app_id`, `app_name`,
 `api_revision`, `web_revision`, and cost `app` fields.
+
+
+## Read-only runtime logs
+
+The optional runtime viewer is globally disabled by default, with an empty global
+reader allowlist, and requires real GitHub OAuth plus
+`ENG_PLATFORM_LOGS_ALLOWED_GITHUB_LOGINS`, independently of deployers. The
+51 public catalog examples have logs disabled and no readers, including synthetic
+observation-only fixtures. Production inventory and reader policies require a
+separate private, SHA-256-pinned catalog. Missing or invalid private authority
+fails closed; it never falls back to the public examples. New resources remain
+disabled with no readers until separately approved.
+It uses the pinned official Cloud Logging SDK, bounded sanitized replica-local
+caches, and a mandatory Firestore-coordinated global budget of at most 12 upstream
+calls/minute. No mock or uncoordinated fallback exists. Filters are sent in a
+read-only POST body to keep them out of URLs/access logs. See the [runtime logs
+runbook](docs/runbooks/runtime-logs.md) for the contract, activation prerequisites,
+minimum IAM, Firestore write costs, crash recovery, and completeness limitations.

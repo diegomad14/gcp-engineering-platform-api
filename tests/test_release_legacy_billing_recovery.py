@@ -7,6 +7,8 @@ from unittest import mock
 
 import pytest
 
+from eng_platform_api.models import CatalogService
+from eng_platform_api.services import log_catalog
 from eng_platform_api.services import release_orchestrator as orchestrator
 
 
@@ -43,7 +45,14 @@ def _configure(
     paired_branch: str = "main",
     mode: str = "cloud_build",
 ):
-    service = SimpleNamespace(service_name="eng-platform-web", repository=REPOSITORY)
+    service = CatalogService.model_validate(
+        next(
+            row
+            for row in log_catalog.load_catalog()
+            if row["service_name"] == "eng-platform-web"
+        )
+    )
+    assert service.management_mode == "managed" and service.repository == REPOSITORY
     billing_run, platform_run = _paired_runs(
         paired_sha=paired_sha, paired_branch=paired_branch
     )

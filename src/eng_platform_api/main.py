@@ -9,13 +9,13 @@ import secrets
 from contextlib import asynccontextmanager
 from time import monotonic
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.routing import BaseRoute, Match, NoMatchFound
 
-from .config import config
+from .config import catalog_source_identity, config
 from .routers import (
     auth,
     catalog,
@@ -25,6 +25,7 @@ from .routers import (
     github_events,
     health,
     metrics,
+    logs,
     mcp_consent,
     quality,
     release_authorizations,
@@ -36,6 +37,7 @@ from .routers import (
 )
 from .mcp_server import mcp as mcp_server
 from .services.mcp_auth import _SCOPES
+from .security import is_private_metadata_request, require_private_metadata_request
 
 
 class _FeatureFlagMCPApp:
@@ -147,6 +149,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=_lifespan,
+    dependencies=[Depends(require_private_metadata_request)],
 )
 
 app.add_middleware(
@@ -168,6 +171,7 @@ app.include_router(auth.router)
 app.include_router(mcp_consent.router)
 app.include_router(health.router)
 app.include_router(catalog.router)
+app.include_router(logs.router)
 app.include_router(releases.router)
 app.include_router(deployments.router)
 app.include_router(deployment_events.router)
@@ -188,7 +192,23 @@ logger = logging.getLogger("eng_platform_api.requests")
 async def record_request_duration(request: Request, call_next):
     started = monotonic()
     response = await call_next(request)
-    if request.url.path.startswith("/api/services/") and "/secrets" in request.url.path:
+    source = getattr(request.state, "private_catalog_source", None)
+    if source is not None:
+        try:
+            require_private_metadata_request(request)
+            if source != catalog_source_identity():
+                raise HTTPException(503, "Runtime catalog changed; retry the request")
+        except HTTPException as exc:
+            response = JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+    if is_private_metadata_request(request) or request.url.path == "/api/auth/me":
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Vary"] = "Cookie"
+    if (
+        request.url.path.startswith("/api/services/") and "/secrets" in request.url.path
+    ) or (
+        request.url.path.startswith("/api/catalog/services/")
+        and request.url.path.endswith("/logs")
+    ):
         # Include validation/provider failures, not only successful responses.
         response.headers["Cache-Control"] = "no-store"
     duration_ms = round((monotonic() - started) * 1000, 2)

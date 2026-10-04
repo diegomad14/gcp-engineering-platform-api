@@ -18,6 +18,8 @@ from . import (
 from .quality_policy import policy_errors
 from .quality_profiles import planner_hash
 
+from .resource_access import require_managed_service_name
+
 _FAILED_BUILD_STATES = {
     "FAILURE",
     "TIMEOUT",
@@ -298,6 +300,7 @@ def _commit_quality(execution: dict[str, Any]) -> dict[str, Any]:
 
 
 def _publish_if_allowed(execution: dict[str, Any]) -> dict[str, Any]:
+    require_managed_service_name(str(execution.get("service_name", "")))
     service_name = str(execution["service_name"])
     auto = service_name in config.release_orchestrator.enabled_services
     if not auto and not execution.get("canary_approved"):
@@ -508,6 +511,7 @@ def reconcile(execution_id: str) -> dict[str, Any]:
     execution = release_executions.get(execution_id)
     if execution is None:
         raise KeyError(execution_id)
+    require_managed_service_name(str(execution.get("service_name", "")))
     if execution.get("status") in {"received", "waiting_github"} and (
         execution.get("provider") == "github_actions"
     ):

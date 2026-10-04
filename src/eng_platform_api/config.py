@@ -8,6 +8,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 _RELEASE_PLANNER_BROKEN_DIGEST = (
     "us-central1-docker.pkg.dev/cgm-assistant-prod/cgm-sanplat-repo/"
@@ -136,6 +137,25 @@ class AuthConfig:
 
 
 @dataclass
+class LogsConfig:
+    """Read-only live logs: explicit activation, no mock or local budget fallback."""
+
+    enabled: bool = False
+    allowed_logins: tuple[str, ...] = ()
+    budget_project_id: str = ""
+    quota_project_id: str = ""
+    budget_collection: str = ""
+    lookback_minutes: int = 15
+    page_size: int = 1000
+    buffer_entries: int = 2000
+    buffer_bytes: int = 2_097_152
+    request_timeout_seconds: float = 20
+    reserve_timeout_seconds: float = 4
+    rpc_timeout_seconds: float = 10
+    finish_timeout_seconds: float = 4
+
+
+@dataclass
 class MCPConfig:
     """Configuration for the remote Model Context Protocol surface."""
 
@@ -183,6 +203,8 @@ class QualityConfig:
 @dataclass
 class PlatformConfig:
     mock_mode: bool = True
+    catalog_path: str | None = field(default=None, repr=False)
+    catalog_sha256: str | None = None
     billing: BillingConfig = field(default_factory=BillingConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
@@ -191,10 +213,32 @@ class PlatformConfig:
         default_factory=ReleaseOrchestratorConfig
     )
     auth: AuthConfig = field(default_factory=AuthConfig)
+    logs: LogsConfig = field(default_factory=LogsConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
     cost_alerts: CostAlertsConfig = field(default_factory=CostAlertsConfig)
     sonarqube: SonarQubeConfig = field(default_factory=SonarQubeConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
+
+
+def validate_catalog_source(
+    path: str | None, sha256: str | None, *, required: bool = False
+) -> None:
+    """Validate trusted server configuration without opening files or clients.
+
+    Presence matters: even an explicitly empty setting must never select the
+    packaged fixture. File integrity and document validation happen on every read.
+    """
+    if path is None and sha256 is None and not required:
+        return
+    if not (
+        isinstance(path, str)
+        and path
+        and "\x00" not in path
+        and Path(path).is_absolute()
+        and isinstance(sha256, str)
+        and re.fullmatch(r"[0-9a-f]{64}", sha256)
+    ):
+        raise ValueError("A private catalog path and SHA256 pin are required")
 
 
 def load_config() -> PlatformConfig:
@@ -517,6 +561,77 @@ def load_config() -> PlatformConfig:
         == "true",
     )
 
+    logs = LogsConfig(
+        enabled=os.getenv("ENG_PLATFORM_LOGS_ENABLED", "false").lower() == "true",
+        allowed_logins=tuple(
+            login.strip().lower()
+            for login in os.getenv("ENG_PLATFORM_LOGS_ALLOWED_GITHUB_LOGINS", "").split(
+                ","
+            )
+            if login.strip()
+        ),
+        budget_project_id=os.getenv("ENG_PLATFORM_LOGS_BUDGET_PROJECT_ID", "").strip(),
+        quota_project_id=os.getenv("ENG_PLATFORM_LOGS_QUOTA_PROJECT_ID", "").strip(),
+        budget_collection=os.getenv("ENG_PLATFORM_LOGS_BUDGET_COLLECTION", "").strip(),
+        lookback_minutes=int(os.getenv("ENG_PLATFORM_LOGS_LOOKBACK_MINUTES", "15")),
+        page_size=int(os.getenv("ENG_PLATFORM_LOGS_PAGE_SIZE", "1000")),
+        buffer_entries=int(os.getenv("ENG_PLATFORM_LOGS_BUFFER_ENTRIES", "2000")),
+        buffer_bytes=int(os.getenv("ENG_PLATFORM_LOGS_BUFFER_BYTES", "2097152")),
+        request_timeout_seconds=float(
+            os.getenv("ENG_PLATFORM_LOGS_REQUEST_TIMEOUT_SECONDS", "20")
+        ),
+        reserve_timeout_seconds=float(
+            os.getenv("ENG_PLATFORM_LOGS_RESERVE_TIMEOUT_SECONDS", "4")
+        ),
+        rpc_timeout_seconds=float(
+            os.getenv("ENG_PLATFORM_LOGS_RPC_TIMEOUT_SECONDS", "10")
+        ),
+        finish_timeout_seconds=float(
+            os.getenv("ENG_PLATFORM_LOGS_FINISH_TIMEOUT_SECONDS", "4")
+        ),
+    )
+    if not (
+        1 <= logs.lookback_minutes <= 15
+        and 1 <= logs.page_size <= 1000
+        and 1 <= logs.buffer_entries <= 2000
+        and 16_384 <= logs.buffer_bytes <= 2_097_152
+    ):
+        raise ValueError("Log limits exceed the safe operating bounds")
+    # Keep at least one second for local processing, and a five-second margin
+    # below the browser's fixed 25-second timeout, even with custom settings.
+    # These comparisons also reject NaN and infinity.
+    if not (
+        4 <= logs.request_timeout_seconds <= 20
+        and 1 <= logs.reserve_timeout_seconds <= 6
+        and 1 <= logs.rpc_timeout_seconds <= 12
+        and 1 <= logs.finish_timeout_seconds <= 6
+        and logs.reserve_timeout_seconds
+        + logs.rpc_timeout_seconds
+        + logs.finish_timeout_seconds
+        <= logs.request_timeout_seconds - 1
+    ):
+        raise ValueError("Log deadlines exceed the safe operating bounds")
+    if logs.budget_project_id and not re.fullmatch(
+        r"[a-z][a-z0-9-]{4,28}[a-z0-9]", logs.budget_project_id
+    ):
+        raise ValueError("Invalid log budget project")
+    if logs.quota_project_id and not re.fullmatch(
+        r"[a-z][a-z0-9-]{4,28}[a-z0-9]", logs.quota_project_id
+    ):
+        raise ValueError("Invalid log quota project")
+    if logs.enabled and not logs.quota_project_id:
+        raise ValueError("An explicit shared log quota project is required")
+    if logs.budget_collection and not re.fullmatch(
+        r"eng_platform_log_budget(?:_[a-z0-9_]{1,32})?", logs.budget_collection
+    ):
+        raise ValueError("Log budget collection must use its dedicated namespace")
+
+    catalog_path = os.getenv("ENG_PLATFORM_CATALOG_PATH")
+    catalog_sha256 = os.getenv("ENG_PLATFORM_CATALOG_SHA256")
+    validate_catalog_source(
+        catalog_path, catalog_sha256, required=logs.enabled and not mock_mode
+    )
+
     public_base_url = os.getenv("ENG_PLATFORM_MCP_PUBLIC_BASE_URL", "").rstrip("/")
     mcp = MCPConfig(
         enabled=os.getenv("ENG_PLATFORM_MCP_ENABLED", "false").lower() == "true",
@@ -586,12 +701,15 @@ def load_config() -> PlatformConfig:
 
     return PlatformConfig(
         mock_mode=mock_mode,
+        catalog_path=catalog_path,
+        catalog_sha256=catalog_sha256,
         billing=billing,
         monitoring=monitoring,
         github=github,
         cloud_build=cloud_build,
         release_orchestrator=release_orchestrator,
         auth=auth,
+        logs=logs,
         mcp=mcp,
         cost_alerts=cost_alerts,
         sonarqube=sonarqube,
@@ -601,3 +719,14 @@ def load_config() -> PlatformConfig:
 
 # Global config instance
 config = load_config()
+
+
+def catalog_source_identity() -> tuple[str | None, str | None] | None:
+    """Partition existing metadata caches by the immutable configured source."""
+    if (
+        config.mock_mode
+        and config.catalog_path is None
+        and config.catalog_sha256 is None
+    ):
+        return None
+    return config.catalog_path, config.catalog_sha256

@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 
 from ..models import ServiceFactoryPlan, ServiceFactoryRequest, ServiceFactoryTemplate
 from ..services import service_factory as sf
+from ..services.log_catalog import CatalogUnavailable
 
 router = APIRouter(prefix="/api/service-factory", tags=["service-factory"])
 
@@ -27,6 +28,10 @@ async def generate_plan(request: ServiceFactoryRequest):
     """
     try:
         return sf.generate_plan(request)
+    except CatalogUnavailable:
+        raise HTTPException(
+            status_code=503, detail="Runtime catalog is unavailable"
+        ) from None
     except OSError as exc:
         raise HTTPException(
             status_code=503,

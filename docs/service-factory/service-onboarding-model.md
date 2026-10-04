@@ -1,102 +1,98 @@
-# Service Factory — Service Onboarding Model
+# Service Factory onboarding
 
-## Purpose
+The Factory creates reviewable local proposals for Cloud Run Services and Jobs.
+It does not register entries automatically, create resources, change IAM, push
+commits or deploy. Its API and CLI share the same generator.
 
-The Service Factory reduces friction for creating and onboarding new GCP Cloud Run services into the platform. It generates YAML contracts, caller workflow files, and an onboarding checklist — without creating any real GCP resources.
+## Inputs and identity
 
-## Flow
+Required inputs are `repository`, `service_name`, `service_type` (`api`, `web`,
+`worker`, `integration`), `runtime` (`python`, `node`, `static`), `gcp_project` and
+`owner`. `runtime_kind` selects `cloud_run_service` (compatible default) or
+`cloud_run_job`; generated entries always include the kind explicitly.
 
-```
-Developer fills in service metadata
-  |
-  v
-Service Factory generates:
-  ├── gcp-service-release.yaml      (service contract)
-  ├── platform-deploy.yml           (GitHub-native deploy entrypoint)
-  ├── platform-rollback.yml         (GitHub-native rollback entrypoint)
-  ├── semantic-release.yml          (immutable tag generation)
-  ├── ci.yml                        (quality gate)
-  ├── catalog/services/<svc>.yaml   (platform catalog entry)
-  ├── .quality-gate.yml             (open source quality policy)
-  ├── cloud-run-service-labels.yaml (label manifest)
-  ├── onboarding-checklist.md       (generated checklist)
-  └── agent-handoff-prompt.md       (copyable prompt for PR-ready adoption)
-  |
-  v
-Developer copies artifacts into the service repository
-  |
-  v
-Developer opens PR in the service repository with generated workflow files
-  |
-  v
-Platform team reviews and approves
-```
+`service_name` is the actual Cloud Run runtime ID and must be globally unique,
+even across projects, regions and kinds. `cloud_run_service_name` is a deprecated
+image-name override only; it never changes the runtime identity. `region`
+defaults to `us-central1`, environment to `prod`, and coverage to 70%. The
+blocking quality policy is `oss-v2`, with changed-line threshold 80%.
 
-## Inputs
+The API contract is `schemas/service-factory-request.schema.json`. The CLI also
+accepts `--app-name` for a fallback repository name. Use explicit `--repository`
+when the repository already exists.
 
-| Field | Required | Example |
-|-------|----------|---------|
-| `repository` | Yes | `my-org/my-repository` |
-| `service_name` | Yes | `my-new-api` |
-| `service_type` | Yes | `api` / `web` / `worker` / `integration` |
-| `runtime` | Yes | `python` / `node` / `static` |
-| `gcp_project` | Yes | `cgm-assistant-prod` |
-| `region` | Yes | `us-central1` |
-| `owner` | Yes | `team-name` |
-| `cost_center` | Yes | `cc-code` |
-| `environment` | Yes | `prod` / `staging` / `dev` |
-| `cloud_run_service_name` | Yes | `my-new-api` |
-| `health_path` | No | `/health` |
-| `openapi_path` | No | `/openapi.json` |
-| `quality_profile` | No | `python`, `node`, or `static`; defaults to runtime |
-| `coverage_threshold` | No | Blocking coverage percentage, default `70` |
-| `validation_targets` | No | List of external endpoints to smoke-test |
+## Generate and register
 
-## Generated Artifacts
+From the API repository with its Python dependencies installed:
 
-### gcp-service-release.yaml
-The service's release contract, consumed by the platform API for catalog registration.
+```bash
+python scripts/service_factory.py \
+  --app-name example --repository my-org/example \
+  --service-name example-batch-job --service-type worker --runtime python \
+  --runtime-kind cloud_run_job --gcp-project my-project \
+  --owner platform --cost-center engineering --output-dir /tmp/example-proposal
 
-### Platform Workflows
-`platform-deploy.yml` and `platform-rollback.yml` expose the
-`workflow_dispatch` interface called by Engineering Platform `/deployments`.
-Developers should not call these workflows directly with `gh workflow run`.
+python scripts/catalog_registry.py --check \
+  /tmp/example-proposal/catalog/services/example-batch-job.yaml
 
-### Agent Handoff Prompt
-The prompt tells Codex/Claude how to create PR-ready adoption changes while
-forbidding secrets, service account JSON, GCP Console deploys, direct
-`gh workflow run`, and manual `gcloud run deploy`.
-
-### Service Labels Manifest
-Documents the required GCP labels for cost attribution:
-```yaml
-labels:
-  service: my-new-api
-  env: prod
-  owner: team-name
-  cost_center: cc-code
+# Run only after reviewing the proposal and intended local JSON diff:
+python scripts/catalog_registry.py --write \
+  /tmp/example-proposal/catalog/services/example-batch-job.yaml
 ```
 
-## Workflow
+Factory output defaults to `service-factory-proposal/`, avoiding installation of
+workflows in the current repository. Review existing files before choosing an
+output directory. Register the generated `catalog/services/<name>.yaml`, not the
+release contract. `catalog_registry.py` defaults to a dry run; `--write` atomically
+appends to the actual source,
+`src/eng_platform_api/static_examples/mock_catalog.json`. A separate existing
+JSON file can be selected with `--catalog` for local tests. Duplicate names are
+rejected; this command does not update or replace existing entries.
 
-The platform provides `service-onboarding-plan.yml` — a manual `workflow_dispatch` that:
-1. Accepts service metadata inputs.
-2. Generates all artifacts.
-3. Shows them in the UI for copy/paste or agent-assisted PR creation.
-4. Does NOT create GCP resources, IAM bindings, or Secret Manager entries.
-5. Does NOT open PRs or deploy production in the current iteration.
+Proposed YAML under `catalog/services/` is not loaded at runtime. Review the JSON
+diff and deliver it through the normal platform release process. Then verify the
+entry in `/api/catalog/services`; no per-resource code or manual allowlist is
+needed. A successful local registration is not a deployment or proof of a live
+Cloud Run resource.
 
-## What the Service Factory Does NOT Do
+## Generated artifacts
 
-- Create GCP projects.
-- Create Cloud Run services.
-- Configure IAM.
-- Set up Secret Manager.
-- Create Artifact Registry repositories.
-- Deploy anything.
+Both `gcp-service-release.yaml` and `gcp-job-release.yaml` validate against
+`schemas/gcp-service-release.schema.json`. This shared proposal schema requires
+an explicit `release_target.runtime_kind`; `release_target.platform` remains
+`gcp-cloud-run` for both kinds. It rejects Job HTTP validation and requires a
+Job-only deployment guard with `enabled: false`, `executor: cloud_build` and a
+nonempty review requirement. Schema validity is not deployment authorization.
+Older release proposals without `runtime_kind` need the actual kind filled in
+before validation against the current schema.
 
-These remain manual setup steps by the platform team or service owner.
+Both kinds include CI/quality and semantic-release workflow proposals, catalog
+entry, `.quality-gate.yml`, quality-source inventory, labels, checklist and handoff
+prompt. All new entries have logs disabled and an empty reader list. The importer
+rejects any input that attempts to grant log access; readers require a separate
+reviewed catalog-policy change.
 
-## Database Decision
+Services additionally generate `gcp-service-release.yaml` with HTTP validation
+and proposed `platform-deploy.yml`/`platform-rollback.yml`. Candidate/promote/
+rollback API output remains available only for Services. These artifacts require
+review of existing authorization, protected checks and release ownership before
+adoption.
 
-**No database for MVP.** The Service Factory generates YAML files and workflow artifacts. No state is persisted between invocations. Phase 2 may add Firestore for an audit trail of generated services.
+Jobs generate `gcp-job-release.yaml` and `cloud-run-job-labels.yaml`, with
+`deployment.enabled: false` and `executor: cloud_build`. No Service deployment,
+promotion or rollback workflow, HTTP endpoint, OpenAPI path or traffic contract
+is generated. Review the Job executor and job-specific release policy before
+separately enabling deployment. Artifact Registry, credentials, runtime accounts,
+Job existence and execution policy remain explicit review prerequisites.
+
+See [the catalog contract and registration safeguards](../architecture/service-catalog.md).
+
+## Inventory-only identities
+
+An existing `management_mode: observability_only` identity cannot be targeted by
+Factory generation: the API/CLI rejects its `service_name` before producing
+deployment artifacts. Runtime names are globally unique. `cloud_run_service_name`
+is only an image override and cannot be used to retarget an inventory identity.
+Adoption requires a separately reviewed catalog change using verified ownership
+and repository metadata. Registering inventory metadata or enabling logs does
+not grant deployment, rollback, release or secret capabilities.

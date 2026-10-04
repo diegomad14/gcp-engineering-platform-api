@@ -30,6 +30,8 @@ from . import (
 )
 from .release_profiles import profile_for
 
+from .resource_access import require_managed, require_managed_service_name
+
 _SEMVER = re.compile(
     r"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
     r"(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$"
@@ -146,6 +148,7 @@ def set_managed_status(
     environment_url: str = "",
 ) -> None:
     """Project a provider-neutral execution onto its canonical Deployment."""
+    require_managed_service_name(item.service_name)
     if config.mock_mode or not item.github_deployment_id:
         return
     deployment = (
@@ -309,6 +312,7 @@ def start_deployment(
     tag: ReleaseTag,
     requested_by: str,
 ) -> DeploymentItem:
+    service = require_managed(service)
     repository = service.repository
     service_name = service.service_name
     now = datetime.now(timezone.utc).isoformat()
@@ -412,6 +416,8 @@ def start_rollback(
     *, service: CatalogService, target: DeploymentItem, requested_by: str
 ) -> DeploymentItem:
     """Dispatch a traffic-only rollback to a previously succeeded revision."""
+    service = require_managed(service)
+    require_managed_service_name(target.service_name)
     repository = service.repository
     service_name = service.service_name
     now = datetime.now(timezone.utc).isoformat()
@@ -585,6 +591,7 @@ def start_managed_deployment(
     Cloud Build is still represented by the same GitHub Deployment, so history,
     authorization and rollback correlation remain provider-neutral.
     """
+    service = require_managed(service)
     now = datetime.now(timezone.utc).isoformat()
     stages = default_stages(kind)
     if config.mock_mode:
@@ -645,6 +652,8 @@ def retry_dispatch(
     The existing GitHub Deployment is reused so the retry preserves the
     platform id, release SHA/tag and idempotency correlation.
     """
+    service = require_managed(service)
+    require_managed_service_name(item.service_name)
     if item.status != "FAILED" or item.current_stage != "dispatch":
         raise ValueError("Only failed dispatches can be retried")
     if not item.github_deployment_id:
@@ -819,6 +828,7 @@ def _discover_dispatch_run(repo: Any, item: DeploymentItem) -> Any | None:
 
 def refresh(item: DeploymentItem) -> DeploymentItem:
     """Project GitHub workflow jobs into the platform's friendly stage model."""
+    require_managed_service_name(item.service_name)
     if config.mock_mode:
         return item
     repo = github_client().get_repo(item.repository)

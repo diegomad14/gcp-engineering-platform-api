@@ -16,6 +16,8 @@ from google.cloud import firestore, secretmanager
 
 from ..models import CatalogService, OperationalSecret
 
+from .resource_access import require_managed, require_managed_service_name
+
 
 class ConfigurationConflict(ValueError):
     """Stale configuration or unresolved operation."""
@@ -47,6 +49,7 @@ def document(db, service_name: str):
 
 
 def state(service_name: str) -> dict:
+    require_managed_service_name(service_name)
     return document(database(), service_name).get().to_dict() or {
         "generation": 0,
         "versions": {},
@@ -59,6 +62,7 @@ def resource(service: CatalogService, secret: OperationalSecret) -> str:
 
 
 def metadata(service: CatalogService) -> dict:
+    service = require_managed(service)
     current = state(service.service_name)
     client = writer() if service.operational_secrets else None
     items = []
@@ -98,6 +102,7 @@ def reserve(
     generation: int,
     requested_by: str,
 ) -> dict | None:
+    service = require_managed(service)
     ref = document(db, service.service_name)
     operation = ref.collection("operations").document(operation_id)
 
@@ -136,6 +141,7 @@ def reserve(
 def finalize(
     db, service_name: str, secret_key: str, operation_id: str, version: str
 ) -> dict:
+    require_managed_service_name(service_name)
     ref = document(db, service_name)
     operation = ref.collection("operations").document(operation_id)
 
@@ -172,6 +178,7 @@ def publish(
     generation: int,
     requested_by: str,
 ) -> dict:
+    service = require_managed(service)
     client = writer()
     db = database()
     previous = reserve(db, service, secret, operation_id, generation, requested_by)
@@ -201,6 +208,7 @@ def publish(
 
 def snapshot(service: CatalogService) -> dict:
     """Capture numeric references, never secret payloads, for one deployment."""
+    service = require_managed(service)
     current = state(service.service_name)
     if current.get("active_operation"):
         raise ConfigurationConflict("A secret operation requires reconciliation")

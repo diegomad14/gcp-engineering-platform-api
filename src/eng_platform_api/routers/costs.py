@@ -7,7 +7,7 @@ from typing import Callable, TypeVar
 
 from fastapi import APIRouter, Query
 
-from ..config import config
+from ..config import catalog_source_identity, config
 from ..models import CloudBuildUsage, CostComparison, CostSummary, DailyCostSeries
 from ..services import cloud_build_usage
 from ..services import gcp_billing_bigquery as billing
@@ -23,7 +23,11 @@ def _cached(key: tuple[object, ...], loader: Callable[[], _T]) -> _T:
     if config.mock_mode:
         return loader()
     # A five-minute cache must not carry yesterday across local midnight.
-    key = (*key, billing.utc_now().astimezone(billing._TIMEZONE).date().isoformat())
+    key = (
+        *key,
+        catalog_source_identity(),
+        billing.utc_now().astimezone(billing._TIMEZONE).date().isoformat(),
+    )
     with _cache_lock:
         cached = _cache.get(key)
         now = monotonic()

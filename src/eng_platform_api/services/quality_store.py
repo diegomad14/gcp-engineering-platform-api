@@ -20,6 +20,8 @@ from typing import Any
 
 from ..models import QualityGateStatus, QualityReport, QualityReportCreate
 
+from .resource_access import require_managed_service_name
+
 _lock = threading.RLock()
 
 
@@ -244,6 +246,7 @@ def save_pending_report(
     expected_hash: str = "",
 ) -> str:
     """Stage a callback report without making it deployment-authorizing."""
+    require_managed_service_name(payload.service_name)
     calculated_hash = _report_hash(payload)
     if expected_hash and not hmac_compare(calculated_hash, expected_hash):
         raise QualityEvidenceConflict("Quality report hash does not match callback")
@@ -271,6 +274,7 @@ def get_pending_report(
 
 def save_report(payload: QualityReportCreate) -> QualityReport:
     """Create or replace the report for one service and commit."""
+    require_managed_service_name(payload.service_name)
     values = payload.model_dump()
     values["commit_sha"] = payload.commit_sha.lower()
     report = QualityReport(
@@ -309,6 +313,7 @@ def save_immutable_report(
     expected_hash: str = "",
 ) -> tuple[QualityReport, str]:
     """Store orchestrated evidence once without allowing a conflicting rewrite."""
+    require_managed_service_name(payload.service_name)
     calculated_hash = _report_hash(payload)
     if expected_hash and not hmac_compare(calculated_hash, expected_hash):
         raise QualityEvidenceConflict("Quality report hash does not match callback")
@@ -404,6 +409,8 @@ def save_execution_summary(
     execution: dict[str, Any], report: QualityReport, report_hash: str
 ) -> None:
     """Persist one compact, immutable private summary for lifecycle-managed GCS."""
+    require_managed_service_name(str(execution.get("service_name", "")))
+    require_managed_service_name(report.service_name)
     value = {
         "schema_version": 1,
         "execution_id": str(execution["execution_id"]),

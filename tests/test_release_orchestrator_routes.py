@@ -5,6 +5,7 @@ from unittest import mock
 
 import pytest
 
+from eng_platform_api.models import CatalogService
 from eng_platform_api.services import release_orchestrator as orchestrator
 
 
@@ -14,7 +15,14 @@ REPOSITORY = "owner/private-repo"
 
 
 def _service():
-    return SimpleNamespace(repository=REPOSITORY, service_name="example-service")
+    return CatalogService(
+        service_name="example-service",
+        management_mode="managed",
+        repository=REPOSITORY,
+        owner="platform",
+        project_id="test-project",
+        region="us-central1",
+    )
 
 
 def _execution(**changes):

@@ -30,6 +30,8 @@ from . import (
     release_executions,
 )
 
+from .resource_access import require_managed, require_managed_service_name
+
 _GITHUB_UNAVAILABLE = "GitHub unavailable"
 
 
@@ -76,6 +78,7 @@ def _open_billing_circuit(service, *, reason: str, evidence: str = "") -> None:
 
 
 def _service_or_404(service_name: str):
+    require_managed_service_name(service_name)
     service = catalog.get_service(service_name)
     if service is None:
         raise HTTPException(status_code=404, detail=f"Unknown service '{service_name}'")
@@ -147,6 +150,8 @@ def _require_matching_idempotency(
 
 
 def start_cloud_build(service, item: DeploymentItem, *, reason: str) -> DeploymentItem:
+    service = require_managed(service)
+    require_managed_service_name(item.service_name)
     try:
         execution = deployment_executions.get(item.id)
         if execution and execution.get("provider") == "github_actions":
@@ -248,6 +253,8 @@ def _retry_failed_dispatch(
     target_revision: str = "",
     quality_validator: Callable[[object, str], None] | None = None,
 ) -> DeploymentItem:
+    service = require_managed(service)
+    require_managed_service_name(existing.service_name)
     if existing.kind == "deploy":
         (quality_validator or _require_release_quality)(service, existing.sha)
         _require_orchestrated_release(
@@ -298,6 +305,10 @@ def reconcile_stalled_dispatches(*, limit: int = 50) -> dict[str, Any]:
     timeout = config.cloud_build.deploy_dispatch_timeout_seconds
     results: list[dict[str, Any]] = []
     for item in deployment_store.list_unfinished(limit=limit):
+        try:
+            require_managed_service_name(item.service_name)
+        except HTTPException:
+            continue
         execution = deployment_executions.get(item.id)
         if execution and execution.get("provider") == "cloud_build":
             continue
@@ -317,6 +328,7 @@ def reconcile_stalled_dispatches(*, limit: int = 50) -> dict[str, Any]:
         service = catalog.get_service(refreshed.service_name)
         if service is None:
             continue
+        service = require_managed(service)
         _open_billing_circuit(
             service,
             reason="github_dispatch_without_run",

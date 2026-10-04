@@ -14,8 +14,8 @@ def test_list_services():
     response = client.get("/api/catalog/services")
     assert response.status_code == 200
     data = response.json()
-    assert data["total"] == 19
-    assert len(data["services"]) == 19
+    assert data["total"] == 51
+    assert len(data["services"]) == 51
     assert all("display_name" not in service for service in data["services"])
     names = {service["service_name"] for service in data["services"]}
     assert {"cgm-sanplat-api", "cgm-sanplat-web", "eng-platform-api"} <= names
@@ -23,6 +23,7 @@ def test_list_services():
         service
         for service in data["services"]
         if service["service_name"].startswith("cgm-artemis-")
+        and service["management_mode"] == "managed"
     ]
     assert len(artemis) == 13
     ready = {
@@ -103,7 +104,15 @@ def test_application_endpoints_are_removed():
     assert client.get("/api/catalog/apps").status_code == 404
 
 
-def test_job_health_reads_job_runtime_not_service_runtime(monkeypatch):
+def test_job_health_reads_job_runtime_not_service_runtime(monkeypatch, tmp_path):
+    from tests.test_log_catalog import install_catalog, pin_private_catalog, record
+
+    path = install_catalog(
+        monkeypatch,
+        tmp_path,
+        [record("demo-job", deployment={"runtime_kind": "cloud_run_job"})],
+    )
+    pin_private_catalog(monkeypatch, path)
     monkeypatch.setattr(config, "mock_mode", False)
     monkeypatch.setattr(catalog, "_detail_cache", {})
     job = SimpleNamespace(
@@ -124,6 +133,6 @@ def test_job_health_reads_job_runtime_not_service_runtime(monkeypatch):
         "_run_client",
         lambda: (_ for _ in ()).throw(AssertionError("Service client used")),
     )
-    detail = catalog.get_service_detail("cgm-artemis-wm-sweep-worker")
+    detail = catalog.get_service_detail("demo-job")
     assert detail.status == "healthy"
     assert detail.latest_ready_revision == "job-generation-7"

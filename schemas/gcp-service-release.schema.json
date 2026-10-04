@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/diegomad14/gcp-engineering-platform-api/schemas/gcp-service-release.schema.json",
-  "title": "GCP Service Release Contract",
-  "description": "Schema for one independently managed Cloud Run service.",
+  "title": "Cloud Run Service and Job Release Proposals",
+  "description": "Reviewable Factory contracts for independently managed Cloud Run Services or Jobs. Validation does not authorize deployment or create resources. Job proposals must remain disabled pending executor and job-specific policy review.",
   "type": "object",
   "required": [
     "service",
@@ -45,7 +45,8 @@
         "platform",
         "service_name",
         "project_id",
-        "region"
+        "region",
+        "runtime_kind"
       ],
       "additionalProperties": false,
       "properties": {
@@ -77,6 +78,14 @@
         "expected_openapi_paths": {
           "type": "integer",
           "minimum": 0
+        },
+        "runtime_kind": {
+          "type": "string",
+          "enum": [
+            "cloud_run_service",
+            "cloud_run_job"
+          ],
+          "description": "Explicit resource kind; platform remains gcp-cloud-run for both kinds."
         }
       }
     },
@@ -235,6 +244,67 @@
           }
         }
       }
+    },
+    "deployment": {
+      "type": "object",
+      "description": "Job-only proposal guard. This schema cannot enable Job deployment.",
+      "required": [
+        "enabled",
+        "executor",
+        "review_required"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "const": false
+        },
+        "executor": {
+          "type": "string",
+          "const": "cloud_build"
+        },
+        "review_required": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "release_target": {
+            "properties": {
+              "runtime_kind": {
+                "const": "cloud_run_job"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "deployment"
+        ],
+        "properties": {
+          "validation_targets": false,
+          "release_target": {
+            "properties": {
+              "url": false,
+              "health_path": false,
+              "openapi_path": false,
+              "expected_openapi_paths": false
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "deployment": false
+        }
+      }
+    }
+  ]
 }

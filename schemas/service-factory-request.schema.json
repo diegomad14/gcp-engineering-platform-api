@@ -16,11 +16,15 @@
   "properties": {
     "repository": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+      "maxLength": 256
     },
     "service_name": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^[a-z](?:[a-z0-9-]*[a-z0-9])?$",
+      "maxLength": 63
     },
     "service_type": {
       "type": "string",
@@ -41,19 +45,26 @@
     },
     "gcp_project": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
     },
     "region": {
       "type": "string",
-      "default": "us-central1"
+      "default": "us-central1",
+      "pattern": "^[a-z]+(?:-[a-z]+)+[0-9]+$",
+      "maxLength": 63
     },
     "owner": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^[a-z0-9_-]+$",
+      "maxLength": 63
     },
     "cost_center": {
       "type": "string",
-      "default": ""
+      "default": "",
+      "pattern": "^[a-z0-9_-]*$",
+      "maxLength": 63
     },
     "environment": {
       "type": "string",
@@ -66,15 +77,23 @@
     },
     "cloud_run_service_name": {
       "type": "string",
-      "default": ""
+      "default": "",
+      "deprecated": true,
+      "description": "Deprecated image-name override only. Does not rename the Cloud Run resource; use service_name for its identity.",
+      "pattern": "^(?:[a-z0-9][a-z0-9._-]*)?$",
+      "maxLength": 128
     },
     "health_path": {
       "type": "string",
-      "default": "/health"
+      "default": "/health",
+      "pattern": "^/[^\\s]*$",
+      "maxLength": 512
     },
     "openapi_path": {
       "type": "string",
-      "default": "/openapi.json"
+      "default": "/openapi.json",
+      "pattern": "^/[^\\s]*$",
+      "maxLength": 512
     },
     "quality_profile": {
       "type": [
@@ -90,7 +109,9 @@
     },
     "quality_working_directory": {
       "type": "string",
-      "default": "."
+      "default": ".",
+      "pattern": "^(?:\\.|[A-Za-z0-9_-]+(?:[./][A-Za-z0-9_-]+)*)$",
+      "maxLength": 256
     },
     "coverage_threshold": {
       "type": "number",
@@ -115,19 +136,14 @@
       },
       "default": []
     },
-    "policy_version": {
+    "runtime_kind": {
       "type": "string",
       "enum": [
-        "oss-v1",
-        "oss-v2"
+        "cloud_run_service",
+        "cloud_run_job"
       ],
-      "default": "oss-v2"
-    },
-    "differential_threshold": {
-      "type": "number",
-      "minimum": 80,
-      "maximum": 100,
-      "default": 80
+      "default": "cloud_run_service",
+      "description": "Explicit Cloud Run resource kind; service_name remains the globally unique runtime ID."
     }
   }
 }

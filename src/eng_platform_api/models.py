@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ── Catalog ──────────────────────────────────────────────────────────
@@ -57,10 +57,27 @@ class OperationalSecret(BaseModel):
     editable: bool = False
 
 
+class ServiceLogsCapability(BaseModel):
+    """Public capability only; reader identities never leave the authority."""
+
+    enabled: bool = False
+    configured: bool = False
+
+
+class InventorySource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source: Literal["cloud_run_inventory"]
+    observed_at: str
+    project: str
+    region: str
+
+
 class CatalogService(BaseModel):
     service_name: str
-    repository: str
-    owner: str
+    management_mode: Literal["managed", "observability_only"] = "managed"
+    repository: str | None
+    owner: str | None
+    inventory_source: InventorySource | None = None
     cost_center: str = ""
     project_id: str
     region: str
@@ -71,9 +88,28 @@ class CatalogService(BaseModel):
     quality: ServiceQualityConfig = Field(default_factory=ServiceQualityConfig)
     deployment: ServiceDeploymentConfig = Field(default_factory=ServiceDeploymentConfig)
     finops: FinOpsLabels = Field(default_factory=FinOpsLabels)
+    logs: ServiceLogsCapability = Field(default_factory=ServiceLogsCapability)
     deployment_ready: bool = False
     deployment_blockers: list[str] = Field(default_factory=list)
     operational_secrets: list[OperationalSecret] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_management_mode(self):
+        if self.management_mode == "observability_only":
+            if (
+                self.repository is not None
+                or self.owner is not None
+                or self.inventory_source is None
+                or self.deployment.enabled
+                or self.operational_secrets
+                or self.quality.enabled
+            ):
+                raise ValueError(
+                    "Observation-only resources cannot carry managed configuration"
+                )
+        elif self.repository is None or self.owner is None:
+            raise ValueError("Managed resources require repository and owner")
+        return self
 
 
 class ServiceTraffic(BaseModel):
@@ -296,6 +332,8 @@ class DeploymentOverview(BaseModel):
 class AuthSession(BaseModel):
     authenticated: bool = False
     can_deploy: bool = False
+    can_view_logs: bool = False
+    can_view_catalog: bool = False
     login: str = ""
     avatar_url: str = ""
 
@@ -589,20 +627,36 @@ class CostComparison(BaseModel):
 class ServiceFactoryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    repository: str
-    service_name: str
-    service_type: str  # api, web, worker, integration
-    runtime: str  # python, node, static
-    gcp_project: str
-    region: str = "us-central1"
-    owner: str
-    cost_center: str = ""
-    environment: str = "prod"
-    cloud_run_service_name: str = ""
-    health_path: str = "/health"
-    openapi_path: str = "/openapi.json"
+    repository: str = Field(
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=256
+    )
+    service_name: str = Field(pattern=r"^[a-z](?:[a-z0-9-]*[a-z0-9])?$", max_length=63)
+    service_type: Literal["api", "web", "worker", "integration"]
+    runtime: Literal["python", "node", "static"]
+    runtime_kind: Literal["cloud_run_service", "cloud_run_job"] = "cloud_run_service"
+    gcp_project: str = Field(pattern=r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
+    region: str = Field(
+        default="us-central1", pattern=r"^[a-z]+(?:-[a-z]+)+[0-9]+$", max_length=63
+    )
+    owner: str = Field(pattern=r"^[a-z0-9_-]+$", max_length=63)
+    cost_center: str = Field(default="", pattern=r"^[a-z0-9_-]*$", max_length=63)
+    environment: Literal["prod", "staging", "dev"] = "prod"
+    cloud_run_service_name: str = Field(
+        default="",
+        pattern=r"^(?:[a-z0-9][a-z0-9._-]*)?$",
+        max_length=128,
+        description="Deprecated image-name override only; service_name is the runtime resource ID.",
+    )
+    health_path: str = Field(default="/health", pattern=r"^/[^\s]*$", max_length=512)
+    openapi_path: str = Field(
+        default="/openapi.json", pattern=r"^/[^\s]*$", max_length=512
+    )
     quality_profile: Literal["python", "node", "static"] | None = None
-    quality_working_directory: str = "."
+    quality_working_directory: str = Field(
+        default=".",
+        pattern=r"^(?:\.|[A-Za-z0-9_-]+(?:[./][A-Za-z0-9_-]+)*)$",
+        max_length=256,
+    )
     coverage_threshold: float = Field(default=70.0, ge=0, le=100)
     sonar_project_key: str = ""  # Deprecated compatibility input.
     sonar_organization: str = ""  # Deprecated compatibility input.
@@ -657,3 +711,65 @@ class ServiceHealthItem(BaseModel):
 class ServicesHealthResponse(BaseModel):
     status: str = "ok"
     services: list[ServiceHealthItem] = Field(default_factory=list)
+
+
+# ── Read-only, sanitized runtime logs ──────────────────────────────────
+
+LogSeverity = Literal[
+    "DEFAULT",
+    "DEBUG",
+    "INFO",
+    "NOTICE",
+    "WARNING",
+    "ERROR",
+    "CRITICAL",
+    "ALERT",
+    "EMERGENCY",
+]
+
+
+class LogEntry(BaseModel):
+    id: str
+    timestamp: str
+    severity: LogSeverity = "DEFAULT"
+    message: str
+    payload: object = None
+    revision: str | None = None
+    execution: str | None = None
+    task_index: int | None = None
+    trace: str | None = None
+    span_id: str | None = None
+
+
+class ServiceLogsResponse(BaseModel):
+    resource_generation: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    entries: list[LogEntry] = Field(default_factory=list)
+    status: Literal["fresh", "stale", "throttled", "unavailable", "disabled"]
+    truncated: bool = False
+    cache_evicted: bool = False
+    queue_position: int | None = Field(default=None, ge=1, le=4096)
+    queue_wait_seconds: int | None = Field(default=None, ge=0)
+    overloaded: bool = False
+    next_poll_seconds: int = 5
+    explorer_url: str
+    observed_at: str | None = None
+    last_success_at: str | None = None
+    window_start: str
+    cache_age_seconds: float | None = None
+    limitations: list[str] = Field(default_factory=list)
+
+
+class ServiceLogsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(default=200, ge=1, le=200)
+    lookback_minutes: int = Field(default=15, ge=1, le=15)
+    severity: LogSeverity = "DEFAULT"
+    text: str = Field(default="", max_length=200)
+    revision: str | None = Field(
+        default=None, max_length=128, pattern=r"^[a-z][a-z0-9-]{0,127}$"
+    )
+    execution: str | None = Field(
+        default=None, max_length=128, pattern=r"^[a-z][a-z0-9-]{0,127}$"
+    )
+    task_index: int | None = Field(default=None, ge=0, le=999999)

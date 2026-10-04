@@ -12,7 +12,7 @@ import os
 
 from fastapi import Header, HTTPException, Request, status
 
-from .config import config
+from .config import catalog_source_identity, config
 
 
 def get_identity(request: Request) -> str:
@@ -100,3 +100,143 @@ def require_quality_ingest_token(
             detail="Invalid quality report token",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+def log_reader_identity(request: Request) -> str:
+    """Only a real, signed GitHub OAuth session may read production logs.
+
+    In particular, the development login and trusted IAP header never qualify.
+    Sessions predating the provenance marker must sign in again.
+    """
+    if (
+        config.mock_mode
+        or request.session.get("github_auth_provider") != "github_oauth"
+    ):
+        return ""
+    identity = request.session.get("github_login")
+    return identity if isinstance(identity, str) else ""
+
+
+def log_auth_configured() -> bool:
+    return bool(
+        len(config.auth.session_secret) >= 32
+        and config.auth.github_client_id
+        and config.auth.github_client_secret
+    )
+
+
+def can_view_logs(request: Request) -> bool:
+    identity = log_reader_identity(request)
+    return bool(
+        config.logs.enabled
+        and log_auth_configured()
+        and identity
+        and identity.lower() in config.logs.allowed_logins
+    )
+
+
+def require_log_reader(request: Request) -> str:
+    """Logs authorization is separate from deployment permission."""
+    identity = log_reader_identity(request)
+    if not identity:
+        raise HTTPException(status_code=401, detail="Sign in with GitHub to view logs")
+    if not log_auth_configured() or identity.lower() not in config.logs.allowed_logins:
+        raise HTTPException(status_code=403, detail="You are not allowed to view logs")
+    return identity
+
+
+def private_catalog_required() -> bool:
+    """Only explicit mock mode without a configured source is public."""
+    return bool(
+        not config.mock_mode
+        or config.catalog_path is not None
+        or config.catalog_sha256 is not None
+    )
+
+
+def require_private_catalog_reader(
+    identity: str, service_name: str | None = None, *, filtered_catalog: bool = False
+) -> set[str] | None:
+    """Revalidate source and ACL before any private metadata provider/cache hit.
+
+    A catalog list can be filtered before computing readiness. Other existing
+    aggregate DTOs are not partitioned by reader, so deny those aggregates if
+    any resource is hidden rather than returning a broader cached result.
+    """
+    if not private_catalog_required():
+        return None
+    if not identity:
+        raise HTTPException(401, "Sign in with GitHub to view the catalog")
+    if identity.lower() not in config.logs.allowed_logins:
+        raise HTTPException(403, "You are not allowed to view this metadata")
+    from .services import log_catalog
+
+    try:
+        resources = log_catalog.resources()
+    except log_catalog.CatalogUnavailable:
+        raise HTTPException(503, "Runtime catalog is unavailable") from None
+    visible = {item.service_id for item in resources if item.can_read(identity)}
+    if service_name:
+        if service_name not in {item.service_id for item in resources}:
+            raise HTTPException(404, "Service not found")
+        if service_name not in visible:
+            raise HTTPException(403, "You are not allowed to view this metadata")
+    elif not visible or (not filtered_catalog and len(visible) != len(resources)):
+        raise HTTPException(403, "You are not allowed to view this metadata")
+    return visible
+
+
+def can_view_catalog(request: Request) -> bool:
+    if not private_catalog_required():
+        return True
+    if not log_auth_configured():
+        return False
+    try:
+        return bool(
+            require_private_catalog_reader(
+                log_reader_identity(request), filtered_catalog=True
+            )
+        )
+    except HTTPException:
+        return False
+
+
+def is_private_metadata_request(request: Request) -> bool:
+    """Keep machine evidence, ingestion, internal callbacks and auth unchanged."""
+    if not private_catalog_required():
+        return False
+    path = request.url.path
+    if request.method == "POST":
+        # Planning checks the authority for existing identities, so it must not
+        # become an anonymous resource-existence oracle.
+        return path == "/api/service-factory/plan"
+    if request.method != "GET":
+        return False
+    return bool(
+        path.startswith(
+            (
+                "/api/catalog/",
+                "/api/deployments/",
+                "/api/services/",
+                "/api/metrics/",
+                "/api/costs/",
+                "/api/releases/",
+            )
+        )
+        or path in {"/api/health/services", "/api/quality/summary", "/api/releases"}
+        or (path.startswith("/api/quality/services/") and path.endswith("/reports"))
+    )
+
+
+def require_private_metadata_request(request: Request) -> None:
+    if not is_private_metadata_request(request):
+        return
+    identity = log_reader_identity(request)
+    if identity and not log_auth_configured():
+        raise HTTPException(403, "You are not allowed to view this metadata")
+    request.state.catalog_visible_services = require_private_catalog_reader(
+        identity,
+        request.path_params.get("service_name"),
+        filtered_catalog=request.url.path == "/api/catalog/services",
+    )
+    request.state.private_catalog_source = catalog_source_identity()

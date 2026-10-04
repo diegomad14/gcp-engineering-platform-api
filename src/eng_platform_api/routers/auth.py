@@ -16,7 +16,7 @@ from fastapi.responses import RedirectResponse
 
 from ..config import config
 from ..models import AuthSession
-from ..security import get_identity
+from ..security import can_view_catalog, can_view_logs, get_identity
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -70,6 +70,8 @@ async def current_session(request: Request):
     return AuthSession(
         authenticated=identity != "anonymous",
         can_deploy=can_deploy,
+        can_view_logs=can_view_logs(request),
+        can_view_catalog=can_view_catalog(request),
         login="" if identity == "anonymous" else identity,
         avatar_url=str(request.session.get("github_avatar_url", "")),
     )
@@ -82,6 +84,7 @@ async def github_login(
 ):
     if config.mock_mode:
         request.session["github_login"] = "diegomad14"
+        request.session["github_auth_provider"] = "mock"
         return RedirectResponse(_safe_return_url(next_url))
     if not _configured():
         raise HTTPException(
@@ -171,6 +174,7 @@ async def github_callback(request: Request):
             detail="GitHub did not return a user login",
         )
     request.session["github_login"] = login
+    request.session["github_auth_provider"] = "github_oauth"
     request.session["github_avatar_url"] = str(user.get("avatar_url", ""))
     destination = str(
         request.session.pop(

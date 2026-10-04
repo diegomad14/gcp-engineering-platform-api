@@ -52,6 +52,19 @@ def isolated_store():
 
 
 @pytest.fixture
+def private_provider_catalog(monkeypatch, tmp_path):
+    """Opt-in mount for provider-unit tests that explicitly enter production mode."""
+    from eng_platform_api.services import log_catalog
+    from tests.test_log_catalog import install_catalog, pin_private_catalog
+
+    # These are already-public, disabled example records, never a runtime
+    # inventory. Installing them does not grant HTTP metadata or log access.
+    rows = log_catalog.load_catalog(log_catalog.CATALOG_PATH)
+    path = install_catalog(monkeypatch, tmp_path, rows)
+    pin_private_catalog(monkeypatch, path)
+
+
+@pytest.fixture
 def client():
     return TestClient(app)
 
@@ -311,7 +324,7 @@ def test_deployment_reads_hide_upstream_error_details(client):
     assert detail.json()["error"] == "GitHub unavailable"
 
 
-def test_refresh_hides_upstream_error_details():
+def test_refresh_hides_upstream_error_details(private_provider_catalog):
     from eng_platform_api.services import github_deployments
 
     github = mock.MagicMock()
@@ -445,7 +458,9 @@ def test_deployment_overview_aggregates_services(client):
     assert item["last_deployment"]["status"] == "SUCCEEDED"
 
 
-def test_dispatch_uses_independent_service_catalog_configuration():
+def test_dispatch_uses_independent_service_catalog_configuration(
+    private_provider_catalog,
+):
     from eng_platform_api.services import catalog, github_deployments
 
     service = catalog.get_service("cgm-sanplat-web")
@@ -476,7 +491,7 @@ def test_dispatch_uses_independent_service_catalog_configuration():
     assert inputs["project_id"] == "cgm-assistant-prod"
 
 
-def test_dispatch_failure_marks_github_deployment_failed():
+def test_dispatch_failure_marks_github_deployment_failed(private_provider_catalog):
     from eng_platform_api.services import catalog, github_deployments
 
     service = catalog.get_service("cgm-sanplat-web")
@@ -785,7 +800,9 @@ def test_start_rollback_mock_mode_returns_synthetic_item():
     assert item.stages[0].key == "rollback"
 
 
-def test_start_rollback_dispatches_with_independent_service_configuration():
+def test_start_rollback_dispatches_with_independent_service_configuration(
+    private_provider_catalog,
+):
     from eng_platform_api.services import catalog, github_deployments
 
     service = catalog.get_service("cgm-sanplat-web")
@@ -819,7 +836,9 @@ def test_start_rollback_dispatches_with_independent_service_configuration():
     assert inputs["project_id"] == "cgm-assistant-prod"
 
 
-def test_retry_dispatch_reuses_github_deployment_and_release_identity():
+def test_retry_dispatch_reuses_github_deployment_and_release_identity(
+    private_provider_catalog,
+):
     from eng_platform_api.services import catalog, github_deployments
 
     service = catalog.get_service("eng-platform-api")
@@ -861,7 +880,9 @@ def test_retry_dispatch_reuses_github_deployment_and_release_identity():
     )
 
 
-def test_refresh_recaptures_production_revision_after_run_id_already_cached():
+def test_refresh_recaptures_production_revision_after_run_id_already_cached(
+    private_provider_catalog,
+):
     """A poll made while the deploy was still running caches github_run_id
     before production_revision is posted; a later poll must still pick it up
     instead of short-circuiting on the cached run id."""
@@ -915,7 +936,9 @@ def test_refresh_recaptures_production_revision_after_run_id_already_cached():
     repo.get_deployment.assert_called_once_with(900)
 
 
-def test_refresh_discovers_unreported_startup_failure_by_exact_tag_and_sha():
+def test_refresh_discovers_unreported_startup_failure_by_exact_tag_and_sha(
+    private_provider_catalog,
+):
     """Billing-rejected workflows cannot post the usual Deployment status."""
     from eng_platform_api.services import github_deployments
 
@@ -955,7 +978,9 @@ def test_refresh_discovers_unreported_startup_failure_by_exact_tag_and_sha():
     repo.get_workflow_run.assert_not_called()
 
 
-def test_refresh_does_not_guess_between_ambiguous_unreported_runs():
+def test_refresh_does_not_guess_between_ambiguous_unreported_runs(
+    private_provider_catalog,
+):
     from eng_platform_api.services import github_deployments
 
     item = _deployment()
@@ -1022,7 +1047,9 @@ def test_open_billing_circuit_only_updates_private_repositories(monkeypatch):
     assert modes == [("owner/private", "cloud_build")]
 
 
-def test_refresh_does_not_recheck_statuses_once_production_revision_known():
+def test_refresh_does_not_recheck_statuses_once_production_revision_known(
+    private_provider_catalog,
+):
     """Once production_revision is captured, refresh should not keep polling
     GitHub Deployment statuses on every subsequent call."""
     from eng_platform_api.services import github_deployments
@@ -1063,7 +1090,9 @@ def test_refresh_does_not_recheck_statuses_once_production_revision_known():
     repo.get_deployment.assert_not_called()
 
 
-def test_refresh_marks_standalone_rollback_deployment_as_rolled_back():
+def test_refresh_marks_standalone_rollback_deployment_as_rolled_back(
+    private_provider_catalog,
+):
     from eng_platform_api.services import github_deployments
 
     item = DeploymentItem(
@@ -1112,7 +1141,9 @@ def test_refresh_marks_standalone_rollback_deployment_as_rolled_back():
     assert result.stages[0].details == job.html_url
 
 
-def test_refresh_still_detects_embedded_auto_rollback_on_deploy_kind_item():
+def test_refresh_still_detects_embedded_auto_rollback_on_deploy_kind_item(
+    private_provider_catalog,
+):
     from eng_platform_api.services import github_deployments
 
     item = _deployment()  # kind="deploy" by default
@@ -1198,7 +1229,7 @@ def _failed_item(**overrides):
     )
 
 
-def test_start_deployment_status_update_failure_is_recorded():
+def test_start_deployment_status_update_failure_is_recorded(private_provider_catalog):
     from eng_platform_api.services import catalog, github_deployments
 
     service = catalog.get_service("cgm-sanplat-web")
@@ -1228,7 +1259,9 @@ def test_start_deployment_status_update_failure_is_recorded():
     )
 
 
-def test_start_rollback_dispatch_failure_marks_github_deployment_failed():
+def test_start_rollback_dispatch_failure_marks_github_deployment_failed(
+    private_provider_catalog,
+):
     from eng_platform_api.services import catalog, github_deployments
 
     service = catalog.get_service("cgm-sanplat-web")
@@ -1260,7 +1293,7 @@ def test_start_rollback_dispatch_failure_marks_github_deployment_failed():
     ] == ["queued", "failure"]
 
 
-def test_start_rollback_status_update_failure_is_recorded():
+def test_start_rollback_status_update_failure_is_recorded(private_provider_catalog):
     from eng_platform_api.services import catalog, github_deployments
 
     service = catalog.get_service("cgm-sanplat-web")
@@ -1322,7 +1355,9 @@ def test_retry_dispatch_requires_matching_service():
         github_deployments.retry_dispatch(service=service, item=item)
 
 
-def test_retry_dispatch_rollback_without_revision_sets_failed_item():
+def test_retry_dispatch_rollback_without_revision_sets_failed_item(
+    private_provider_catalog,
+):
     from eng_platform_api.services import catalog, github_deployments
 
     service = catalog.get_service("eng-platform-api")
@@ -1347,7 +1382,9 @@ def test_retry_dispatch_rollback_without_revision_sets_failed_item():
     assert raised.value.item.error == "GitHub rollback workflow dispatch failed"
 
 
-def test_retry_dispatch_rollback_branch_reuses_target_revision():
+def test_retry_dispatch_rollback_branch_reuses_target_revision(
+    private_provider_catalog,
+):
     from eng_platform_api.services import catalog, github_deployments
 
     service = catalog.get_service("eng-platform-api")
@@ -1380,7 +1417,7 @@ def test_retry_dispatch_rollback_branch_reuses_target_revision():
     assert inputs["target_revision"] == "eng-platform-api-00010-abc"
 
 
-def test_retry_dispatch_failure_sets_failed_item():
+def test_retry_dispatch_failure_sets_failed_item(private_provider_catalog):
     from eng_platform_api.services import catalog, github_deployments
 
     service = catalog.get_service("eng-platform-api")
@@ -1407,7 +1444,7 @@ def test_retry_dispatch_failure_sets_failed_item():
     ] == ["queued", "failure"]
 
 
-def test_retry_dispatch_status_update_failure_is_recorded():
+def test_retry_dispatch_status_update_failure_is_recorded(private_provider_catalog):
     from eng_platform_api.services import catalog, github_deployments
 
     service = catalog.get_service("eng-platform-api")
