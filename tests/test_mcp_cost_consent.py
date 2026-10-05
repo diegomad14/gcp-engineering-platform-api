@@ -181,6 +181,11 @@ async def test_explicit_send_requires_consent_then_pkce_and_does_not_elevate_old
         assert page.status_code == 200
         assert "desplegar y revertir" in page.text and "&lt;Client" in page.text
         assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
+        assert (
+            "form-action 'self' https://client.example;"
+            in page.headers["content-security-policy"]
+        )
+        assert "*" not in page.headers["content-security-policy"]
         assert not mcp_store._memory["code"]
         result = decision(client, callback)
         assert result.status_code == 303

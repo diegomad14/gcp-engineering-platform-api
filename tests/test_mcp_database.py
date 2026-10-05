@@ -5,6 +5,7 @@ import json
 import time
 from contextlib import contextmanager
 from unittest.mock import Mock
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from fastapi import HTTPException, Request
@@ -659,6 +660,64 @@ async def test_registered_legacy_client_can_reconnect_without_elevating_tokens(
             "https://github.com/login/oauth/authorize?"
         )
     assert await mcp_auth.provider.load_access_token("legacy-credential") is None
+    assert not any(
+        value.get("source") == "mcp"
+        for value in environment["control"].records.values()
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "requested",
+    [
+        "eng-platform.read",
+        "eng-platform.read eng-platform.deploy",
+        "eng-platform.cost-alerts.send",
+    ],
+)
+async def test_cached_legacy_scope_redirect_requires_fresh_consent(
+    environment, requested
+):
+    client = OAuthClientInformationFull(
+        client_id="cached-client",
+        redirect_uris=["http://localhost:3333/callback"],
+        token_endpoint_auth_method="none",
+        scope="eng-platform.read eng-platform.deploy",
+    )
+    mcp_store.save(
+        "client", client.client_id, {"metadata": client.model_dump(mode="json")}
+    )
+    params = {
+        "client_id": client.client_id,
+        "redirect_uri": str(client.redirect_uris[0]),
+        "response_type": "code",
+        "scope": requested,
+        "code_challenge": "a" * 43,
+        "code_challenge_method": "S256",
+        "state": "client-state",
+        "resource": config.mcp.public_base_url + "/mcp",
+    }
+    with TestClient(app) as http:
+        response = http.get("/authorize", params=params, follow_redirects=False)
+        assert response.status_code == 302
+        target = urlparse(response.headers["location"])
+        assert target.path == "/authorize" and not target.netloc
+        assert parse_qs(target.query) == {
+            key: [value] for key, value in {**params, "scope": mcp_grants.SCOPE}.items()
+        }
+        assert not mcp_store._memory["state"] and not mcp_store._memory["code"]
+        for scope in ("unknown", "eng-platform.read unknown"):
+            rejected = http.get(
+                "/authorize", params={**params, "scope": scope}, follow_redirects=False
+            )
+            assert "error=invalid_scope" in rejected.headers["location"]
+        mcp_store.save(
+            "client",
+            client.client_id,
+            {"metadata": {**client.model_dump(mode="json"), "scope": mcp_grants.SCOPE}},
+        )
+        rejected = http.get("/authorize", params=params, follow_redirects=False)
+        assert "error=invalid_scope" in rejected.headers["location"]
     assert not any(
         value.get("source") == "mcp"
         for value in environment["control"].records.values()

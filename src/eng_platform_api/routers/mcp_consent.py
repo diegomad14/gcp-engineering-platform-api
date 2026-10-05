@@ -2,11 +2,12 @@
 
 import secrets
 from html import escape
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response
 from mcp.server.auth.provider import AuthorizeError
+from mcp.server.auth.handlers.authorize import AuthorizationHandler
 from mcp.server.auth.middleware.client_auth import (
     AuthenticationError,
     ClientAuthenticator,
@@ -16,9 +17,49 @@ from typing import Literal
 
 from ..config import config
 from ..services.mcp_auth import provider
+from ..services import mcp_grants, mcp_store
 
 router = APIRouter()
 _COOKIE = "eng_platform_mcp_consent"
+
+
+@router.get("/authorize", include_in_schema=False)
+async def authorize_connection(request: Request):
+    """Migrate cached legacy scope requests into a fresh full-consent flow.
+
+    Only old public registrations receive this redirect. The SDK still checks
+    the registered redirect, PKCE and resource, and no credential is upgraded.
+    """
+    if not config.mcp.enabled:
+        raise HTTPException(404)
+    scopes = request.query_params.getlist("scope")
+    legacy = {
+        "eng-platform.read",
+        "eng-platform.deploy",
+        "eng-platform.cost-alerts.send",
+    }
+    requested = set(scopes[0].split()) if len(scopes) == 1 else set()
+    if requested and requested.issubset(legacy):
+        record = mcp_store.get("client", request.query_params.get("client_id", ""))
+        metadata = (record or {}).get("metadata", {})
+        registered = set((metadata.get("scope") or "").split())
+        if (
+            record
+            and not record.get("revoked")
+            and (not registered or registered.issubset(legacy))
+        ):
+            params = [
+                (key, value)
+                for key, value in request.query_params.multi_items()
+                if key != "scope"
+            ]
+            params.append(("scope", mcp_grants.SCOPE))
+            return RedirectResponse(
+                "/authorize?" + urlencode(params),
+                status_code=302,
+                headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+            )
+    return await AuthorizationHandler(provider).handle(request)
 
 
 class _RevocationRequest(BaseModel):
@@ -78,6 +119,10 @@ async def consent_page(request: Request, consent: str = ""):
     permissions = "".join(
         f"<li>{escape(labels[scope])}</li>" for scope in pending["scopes"]
     )
+    # Chromium applies form-action to the POST's redirect as well. This origin
+    # comes from the SDK-validated, registered redirect, never from form input.
+    callback = urlparse(pending["redirect_uri"])
+    callback_origin = f"{callback.scheme}://{callback.netloc}"
     page = (
         '<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width">'
         "<title>Autorizar Engineering Platform</title><main><h1>Autorizar Engineering Platform</h1>"
@@ -95,7 +140,7 @@ async def consent_page(request: Request, consent: str = ""):
         headers={
             "Cache-Control": "no-store",
             "Referrer-Policy": "no-referrer",
-            "Content-Security-Policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+            "Content-Security-Policy": f"default-src 'none'; form-action 'self' {callback_origin}; frame-ancestors 'none'; base-uri 'none'",
             "X-Frame-Options": "DENY",
         },
     )
