@@ -334,6 +334,7 @@ class AuthSession(BaseModel):
     can_deploy: bool = False
     can_view_logs: bool = False
     can_view_catalog: bool = False
+    can_query_databases: bool = False
     login: str = ""
     avatar_url: str = ""
 

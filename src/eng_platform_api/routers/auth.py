@@ -16,7 +16,12 @@ from fastapi.responses import RedirectResponse
 
 from ..config import config
 from ..models import AuthSession
-from ..security import can_view_catalog, can_view_logs, get_identity
+from ..security import (
+    can_query_databases,
+    can_view_catalog,
+    can_view_logs,
+    get_identity,
+)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -72,6 +77,7 @@ async def current_session(request: Request):
         can_deploy=can_deploy,
         can_view_logs=can_view_logs(request),
         can_view_catalog=can_view_catalog(request),
+        can_query_databases=can_query_databases(request),
         login="" if identity == "anonymous" else identity,
         avatar_url=str(request.session.get("github_avatar_url", "")),
     )

@@ -156,6 +156,16 @@ class LogsConfig:
 
 
 @dataclass
+class DatabasesConfig:
+    """Private PostgreSQL console; no discovery or development fallback."""
+
+    enabled: bool = False
+    allowed_logins: tuple[str, ...] = ()
+    registry_path: str | None = field(default=None, repr=False)
+    registry_sha256: str | None = None
+
+
+@dataclass
 class MCPConfig:
     """Configuration for the remote Model Context Protocol surface."""
 
@@ -214,6 +224,7 @@ class PlatformConfig:
     )
     auth: AuthConfig = field(default_factory=AuthConfig)
     logs: LogsConfig = field(default_factory=LogsConfig)
+    databases: DatabasesConfig = field(default_factory=DatabasesConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
     cost_alerts: CostAlertsConfig = field(default_factory=CostAlertsConfig)
     sonarqube: SonarQubeConfig = field(default_factory=SonarQubeConfig)
@@ -632,6 +643,19 @@ def load_config() -> PlatformConfig:
         catalog_path, catalog_sha256, required=logs.enabled and not mock_mode
     )
 
+    databases = DatabasesConfig(
+        enabled=os.getenv("ENG_PLATFORM_DATABASES_ENABLED", "false").lower() == "true",
+        allowed_logins=tuple(
+            login.strip().lower()
+            for login in os.getenv("ENG_PLATFORM_DATABASES_ALLOWED_LOGINS", "").split(
+                ","
+            )
+            if login.strip()
+        ),
+        registry_path=os.getenv("ENG_PLATFORM_DATABASES_REGISTRY_PATH"),
+        registry_sha256=os.getenv("ENG_PLATFORM_DATABASES_REGISTRY_SHA256"),
+    )
+
     public_base_url = os.getenv("ENG_PLATFORM_MCP_PUBLIC_BASE_URL", "").rstrip("/")
     mcp = MCPConfig(
         enabled=os.getenv("ENG_PLATFORM_MCP_ENABLED", "false").lower() == "true",
@@ -710,6 +734,7 @@ def load_config() -> PlatformConfig:
         release_orchestrator=release_orchestrator,
         auth=auth,
         logs=logs,
+        databases=databases,
         mcp=mcp,
         cost_alerts=cost_alerts,
         sonarqube=sonarqube,
