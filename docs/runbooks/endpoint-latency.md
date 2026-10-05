@@ -11,6 +11,19 @@ GitHub webhooks and release callbacks share one dedicated event worker per
 process. This preserves their previous in-process serialization while allowing
 the event loop and the ordinary API worker pool to serve other requests. Work
 already admitted to that queue is not cancelled when its HTTP caller disconnects.
+Admission is bounded to 32 events per process, including the event running on the
+worker. A full queue immediately returns a generic HTTP 503 with `Retry-After: 5`
+without submitting the event or waiting for an ordinary API worker token. A
+cancelled HTTP waiter retains its slot until the admitted processing actually
+finishes; provider errors and real queued-future cancellation also release the
+slot. Slot release does not depend on the caller's event loop remaining open.
+
+An event rejected at capacity has not been processed and requires redelivery by
+its caller. `Retry-After` is advisory. [GitHub does not automatically redeliver
+failed webhook deliveries](https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries):
+operators must redeliver manually or use an already authorized redelivery
+automation. This change does not activate automatic retries, create a redelivery
+automation or acknowledge events early.
 
 Do not use deployment GETs as synthetic probes: some reads reconcile state and
 can start failover. Do not replay webhooks, run load tests against production,
@@ -23,6 +36,11 @@ clear production caches or disable catalog revalidation to measure performance.
   Release the event and verify the original response waits for persistence and
   reconciliation. Invalid signatures, body limits, denied identities and replay
   handling must retain their response and no-provider-call behavior.
+- Fill all event admission slots using controlled offline futures. Verify a
+  further event receives 503 before submission, and cancelling its HTTP waiter
+  does not free an admitted slot prematurely. Verify capacity returns after
+  actual completion, provider failure, queued-future cancellation, submit
+  failure and completion after the caller's event loop has closed.
 - Verify catalog revalidation still fails closed when the source changes or
   becomes unavailable before the response. Offloading changes execution context,
   not the ordering or requirement of the authorization checks.
