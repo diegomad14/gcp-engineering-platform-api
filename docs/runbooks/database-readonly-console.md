@@ -321,6 +321,26 @@ valida cookie revocable y `Sec-Fetch-Site`/`Origin` cuando se presentan.
 
 ## Ordenación global de una captura
 
+La Web presenta valores completos sin inspectores al seleccionar celdas. JSON y
+JSONB se formatean para lectura conservando números y escapes; la captura y el
+Excel mantienen su representación original. Las filas crecen con el contenido,
+incluidas columnas estrechas. Los controles de altura de fila y ancho de columna
+admiten ratón, táctil y teclado; ajustar el tamaño nunca recorta datos. SQL NULL,
+texto NULL y cadenas vacías tienen representaciones distintas.
+
+Pulsar una tabla del explorador despliega sus columnas y tipos. Los botones de
+inserción agregan únicamente el identificador de tabla calificado o el nombre
+de columna entre comillas en la última posición del cursor, sin reemplazar SQL
+seleccionado ni generar SELECT. Devuelven el foco al editor y admiten deshacer
+en una acción. Los encabezados alternan ascendente, descendente y orden original;
+su control de ordenación es independiente del divisor de ancho.
+
+El éxito de Excel aparece en un Snackbar MUI arriba a la derecha durante ocho
+segundos, con cierre y descarga. El enlace permanece disponible en la barra de
+resultados hasta el vencimiento o la purga. La exportación identifica y conserva
+la captura y el orden seleccionados al solicitarla, aunque cambie el borrador o
+se seleccione otra vista después.
+
 `global_sort_enabled` se anuncia en el listado únicamente cuando la política de
 workspaces está vigente. La ordenación usa todas las filas ya capturadas y no
 abre conexiones PostgreSQL, reejecuta SQL ni altera el manifest original. El
