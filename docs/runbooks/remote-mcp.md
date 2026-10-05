@@ -30,6 +30,13 @@ preserving their registered identity, redirects and PKCE metadata. This does
 not change stored registrations or grant access: only a fresh GitHub flow and
 full browser consent can create the new authorization.
 
+Clients caching legacy scopes are redirected from `/authorize` to a fresh
+`eng-platform.access` authorization request only for an existing legacy public
+registration. PKCE, registered redirect validation, GitHub login and explicit
+full consent still run; token exchange and refresh never accept legacy scopes.
+The consent CSP permits only its own form endpoint and the registered callback
+origin so Chromium can follow the POST redirect, including loopback SDK clients.
+
 The browser-bound consent names database reads, operational information,
 production deploy/rollback and activating the fixed private cost alert. Denial,
 wrong browser/CSRF/origin, expiry or replay cannot issue an authorization code.

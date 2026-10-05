@@ -278,7 +278,8 @@ async def oauth_authorization_server_metadata():
 
 
 # The MCP SDK provides RFC 9728 metadata, DCR, authorization, token exchange
-# and Streamable HTTP. Our client-bound /revoke route also handles credentials
+# and Streamable HTTP. Our /authorize adapter migrates cached legacy requests
+# to fresh full consent. Our client-bound /revoke route also handles credentials
 # rotated concurrently, without allowing them to authenticate again.
 # Mount last so the regular FastAPI routes always win.
 _mcp_asgi = _FeatureFlagMCPApp(mcp_server.streamable_http_app())
