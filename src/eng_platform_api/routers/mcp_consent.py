@@ -1,18 +1,56 @@
-"""Browser-bound consent for explicitly requested private cost-alert permission."""
+"""Browser-bound full MCP consent and client-bound connection revocation."""
 
 import secrets
 from html import escape
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response
 from mcp.server.auth.provider import AuthorizeError
+from mcp.server.auth.middleware.client_auth import (
+    AuthenticationError,
+    ClientAuthenticator,
+)
+from pydantic import BaseModel, Field, ValidationError
+from typing import Literal
 
 from ..config import config
 from ..services.mcp_auth import provider
 
 router = APIRouter()
 _COOKIE = "eng_platform_mcp_consent"
+
+
+class _RevocationRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=512)
+    token_type_hint: Literal["access_token", "refresh_token"] | None = None
+
+
+@router.post("/revoke", include_in_schema=False)
+async def revoke_connection(request: Request):
+    """RFC 7009 disconnect, including a credential rotated concurrently.
+
+    Authenticate the registered client using the SDK, but do not use its active
+    token loaders: an inactive retained token is usable only to revoke its own
+    family. Public PKCE clients do not need to supply a client secret.
+    """
+    if not config.mcp.enabled:
+        raise HTTPException(404)
+    headers = {"Cache-Control": "no-store", "Pragma": "no-cache"}
+    try:
+        client = await ClientAuthenticator(provider).authenticate_request(request)
+    except AuthenticationError:
+        return JSONResponse(
+            {"error": "unauthorized_client"}, status_code=401, headers=headers
+        )
+    try:
+        payload = _RevocationRequest.model_validate(dict(await request.form()))
+    except ValidationError:
+        return JSONResponse(
+            {"error": "invalid_request"}, status_code=400, headers=headers
+        )
+    await provider.revoke_client_token(payload.token, client.client_id)
+    return Response(status_code=200, headers=headers)
 
 
 def _pending(request: Request, consent: str):

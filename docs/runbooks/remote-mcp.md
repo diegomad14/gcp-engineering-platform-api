@@ -25,6 +25,10 @@ rejected. Users must reconnect through their host's supported OAuth flow and
 accept the full consent page. Do not edit registrations, forge credentials or
 silently elevate old grants. `/mcp/cost-alerts` remains a compatible URL alias
 with the same full-access consent and tools.
+Existing public client registrations advertise the current supported scope while
+preserving their registered identity, redirects and PKCE metadata. This does
+not change stored registrations or grant access: only a fresh GitHub flow and
+full browser consent can create the new authorization.
 
 The browser-bound consent names database reads, operational information,
 production deploy/rollback and activating the fixed private cost alert. Denial,
@@ -90,6 +94,10 @@ Revoking any retained token from a grant invalidates the entire family, includin
 later rotated credentials. The same durable record is the atomic BD publication
 fence: revoked work cannot publish a completed capture. Revocation invalidates
 workspaces and schedules purge; workers observe revocation independently.
+The RFC 7009 `/revoke` endpoint authenticates the registered public client and
+accepts its retained access/refresh credential without requiring a client secret.
+Revocation lookup is separate from active token verification: a credential
+rotated during disconnect can revoke its family but cannot execute tools.
 Disabling `ENG_PLATFORM_MCP_ENABLED` removes the MCP surface and stops MCP-owned
 work without changing normal REST/UI authorization.
 
