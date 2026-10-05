@@ -609,7 +609,12 @@ def list_databases() -> dict[str, Any]:
     def action(principal):
         return {
             "databases": [
-                database.public() for database in database_registry.databases()
+                {
+                    **database.public(),
+                    "max_rows": None,
+                    "timeout_seconds": 240,
+                }
+                for database in database_registry.databases()
             ],
             "workspace_enabled": True,
             "global_sort_enabled": True,

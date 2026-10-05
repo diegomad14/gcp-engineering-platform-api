@@ -98,7 +98,11 @@ def capture(environment, monkeypatch, *, rows=None):
 
 def test_all_rows_sorted_pages_single_query_and_private_audit(environment, monkeypatch):
     with actor():
-        assert mcp.list_databases()["databases"][0]["id"] == "sample"
+        inventory = mcp.list_databases()
+        assert inventory["databases"][0]["id"] == "sample"
+        assert inventory["databases"][0]["max_rows"] is None
+        assert inventory["databases"][0]["timeout_seconds"] == 240
+        assert inventory["workspace_limits"]["timeout_seconds"] == 240
         workspace, execution, run = capture(environment, monkeypatch)
         original = mcp.get_database_page("sample", workspace, execution)
         assert len(original["rows"]) == 25
