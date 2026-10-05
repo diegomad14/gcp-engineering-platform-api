@@ -493,12 +493,22 @@ def page(
     execution_id: str,
     page_index: int,
     page_size: int,
+    view_id: str | None = None,
 ) -> dict:
     value = _execution(request, database_id, workspace_id, execution_id)
+    if view_id:
+        from .database_views import require_view
+
+        value = require_view(request, database_id, workspace_id, execution_id, view_id)
     if value["state"] != "completed" or not value["manifest"]:
         raise HTTPException(409, "Database result is not complete")
 
     def authorize():
+        _execution(request, database_id, workspace_id, execution_id)
+        if view_id:
+            return require_view(
+                request, database_id, workspace_id, execution_id, view_id
+            )
         return _execution(request, database_id, workspace_id, execution_id)
 
     with _permit("read", value["login"], authorize=authorize):
@@ -519,6 +529,8 @@ def page(
             "row_count": saved["row_count"],
             "total_pages": total_pages,
         }
+        if view_id:
+            response["view_id"] = view_id
         if len(json.dumps(response, ensure_ascii=True).encode()) > 8_388_608:
             raise DatabaseUnavailable("Database page exceeds the budget")
         authorize()
@@ -561,10 +573,16 @@ def _ensure_dispatch(
         _finish(identity, None, "failed", kind=kind, error="DISPATCH_FAILED")
         if kind == "execution":
             cleanup(identity, deadline=deadline)
+        elif kind == "view":
+            from .database_views import cleanup_view
+
+            cleanup_view(identity, deadline=deadline)
         else:
             _cleanup_export(value)
         return
-    database_tasks.enqueue("query" if kind == "execution" else "export", identity)
+    database_tasks.enqueue(
+        {"execution": "query", "view": "sort", "export": "export"}[kind], identity
+    )
 
 
 def _finish(
@@ -586,8 +604,10 @@ def _finish(
             ("session", initial["session_id"]),
             ("control", "active_policy"),
         ]
-        if kind == "export":
+        if kind in {"export", "view"}:
             references.append(("execution", initial["execution_id"]))
+        if kind == "export" and initial.get("source_view_id"):
+            references.append(("view", initial["source_view_id"]))
     fingerprint = policy_fingerprint() if state == "completed" else ""
 
     def change(values):
@@ -609,7 +629,7 @@ def _finish(
             policy = values["control:active_policy"]
             source = (
                 values.get(store.key("execution", value["execution_id"]))
-                if kind == "export"
+                if kind in {"export", "view"}
                 else value
             )
             if (
@@ -625,10 +645,23 @@ def _finish(
                 or policy.get("fingerprint") != fingerprint
                 or not source
                 or (
-                    kind == "export"
+                    kind in {"export", "view"}
                     and (
                         source["state"] != "completed"
                         or source["expires_at"] <= time.time()
+                    )
+                )
+                or (
+                    kind == "export"
+                    and value.get("source_view_id")
+                    and (
+                        not values.get(store.key("view", value["source_view_id"]))
+                        or values[store.key("view", value["source_view_id"])]["state"]
+                        != "completed"
+                        or values[store.key("view", value["source_view_id"])][
+                            "expires_at"
+                        ]
+                        <= time.time()
                     )
                 )
             ):
@@ -699,7 +732,7 @@ class RunContext:
                 or current["expires_at"] <= time.time()
             ):
                 raise HTTPException(409, "Database execution stopped")
-            if self.kind == "export":
+            if self.kind in {"export", "view"}:
                 source = store.get("execution", value["execution_id"])
                 if (
                     not source
@@ -707,6 +740,14 @@ class RunContext:
                     or source["expires_at"] <= time.time()
                 ):
                     raise HTTPException(409, "Database result is unavailable")
+                if value.get("source_view_id"):
+                    selected = store.get("view", value["source_view_id"])
+                    if (
+                        not selected
+                        or selected["state"] != "completed"
+                        or selected["expires_at"] <= time.time()
+                    ):
+                        raise HTTPException(409, "Database view is unavailable")
             self.checked = time.monotonic()
 
     def on_connection(self, connection):
@@ -823,9 +864,19 @@ def cancel(
 
 
 def create_export(
-    request: Request, database_id: str, workspace_id: str, execution_id: str
+    request: Request,
+    database_id: str,
+    workspace_id: str,
+    execution_id: str,
+    view_id: str | None = None,
 ) -> dict:
     source = _execution(request, database_id, workspace_id, execution_id)
+    source_kind, source_id = "execution", execution_id
+    if view_id:
+        from .database_views import require_view
+
+        source = require_view(request, database_id, workspace_id, execution_id, view_id)
+        source_kind, source_id = "view", view_id
     if source["state"] != "completed":
         raise HTTPException(409, "Database result is not complete")
     if source.get("export_id"):
@@ -857,10 +908,12 @@ def create_export(
         "file": None,
         "claim": None,
     }
+    if view_id:
+        value["source_view_id"] = view_id
     selected = {"id": identity}
 
     def change(values):
-        current = values[store.key("execution", execution_id)]
+        current = values[store.key(source_kind, source_id)]
         if (
             not current
             or current["state"] != "completed"
@@ -891,13 +944,13 @@ def create_export(
         current["export_id"] = identity
         return {
             "control:budget": control,
-            store.key("execution", execution_id): current,
+            store.key(source_kind, source_id): current,
             store.key("export", identity): value,
         }
 
     store.mutate(
         [
-            ("execution", execution_id),
+            (source_kind, source_id),
             ("export", identity),
             ("control", "budget"),
             ("session", source["session_id"]),
@@ -931,6 +984,12 @@ def _export(
         or value["workspace_id"] != workspace_id
     ):
         raise HTTPException(404, "Database export not found")
+    if value.get("source_view_id") and value["state"] in {"queued", "running"}:
+        from .database_views import require_view
+
+        require_view(
+            request, database_id, workspace_id, execution_id, value["source_view_id"]
+        )
     if value["expires_at"] <= time.time() or value["state"] in {"expired", "purged"}:
         raise HTTPException(410, "Database export is unavailable")
     return value
@@ -945,13 +1004,16 @@ def export(
 ) -> dict:
     value = _export(request, database_id, workspace_id, execution_id, export_id)
     path = f"/api/databases/{database_id}/workspaces/{workspace_id}/executions/{execution_id}/exports/{export_id}/file"
-    return {
+    public = {
         "export_id": export_id,
         "status": value["state"],
         "expires_at": value["expires_at"],
         "error_code": value["error_code"],
         "download_path": path if value["state"] == "completed" else None,
     }
+    if value.get("source_view_id"):
+        public["source_view_id"] = value["source_view_id"]
+    return public
 
 
 class _BoundedSink:
@@ -982,7 +1044,10 @@ def run_export(identity: str) -> None:
     context = RunContext(value, kind="export")
     try:
         context.authorize(force=True)
-        source = store.get("execution", value["execution_id"])
+        source = store.get(
+            "view" if value.get("source_view_id") else "execution",
+            value.get("source_view_id") or value["execution_id"],
+        )
         if not source or source["state"] != "completed":
             raise DatabaseUnavailable("Database result is unavailable")
         saved = results.manifest(source["manifest"])
@@ -1149,6 +1214,9 @@ def purge_workspace_id(workspace_id: str, *, deadline: float | None = None) -> N
             )
         ):
             raise DatabaseUnavailable("Database worker cleanup is pending")
+        from .database_views import cleanup_children
+
+        cleanup_children(identity, deadline=deadline)
         results.purge(identity, deadline=deadline)
         _check_cleanup_deadline(deadline)
         _release_storage(identity)
@@ -1240,6 +1308,11 @@ def cleanup(workspace_id: str, *, deadline: float | None = None) -> None:
         _check_cleanup_deadline(deadline)
         execution_value = store.get("execution", workspace_id)
         if execution_value is None:
+            from .database_views import cleanup_view
+
+            if store.get("view", workspace_id):
+                cleanup_view(workspace_id, deadline=deadline)
+                return
             # Covers a staging process that died before creating its control row.
             results.purge(workspace_id, deadline=deadline)
             _check_cleanup_deadline(deadline)
@@ -1275,6 +1348,9 @@ def cleanup(workspace_id: str, *, deadline: float | None = None) -> None:
 
             _check_cleanup_deadline(deadline)
             store.mutate([("execution", workspace_id)], expire)
+            from .database_views import cleanup_children
+
+            cleanup_children(workspace_id, deadline=deadline)
             results.purge(workspace_id, deadline=deadline)
             _check_cleanup_deadline(deadline)
             _release_storage(workspace_id)
@@ -1287,7 +1363,10 @@ def cleanup(workspace_id: str, *, deadline: float | None = None) -> None:
 
 def sweep() -> None:
     deadline = time.monotonic() + 230
-    for kind in ("execution", "export"):
+    from .database_views import sweep_views
+
+    sweep_views(deadline)
+    for kind in ("execution", "export", "view"):
         for value in store.find(kind, "state", "queued", limit=64):
             if time.monotonic() >= deadline:
                 return

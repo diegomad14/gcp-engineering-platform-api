@@ -93,7 +93,7 @@ def test_real_complete_json_numeric_lexemes_and_sql_null_are_lossless(database):
     ]
 
 
-def test_real_complete_resource_error_timeout_and_watcher_cancel_close(database):
+def test_real_complete_resource_error_timeout_and_watcher_cancel_close(database, admin):
     import threading
 
     observed = []
@@ -121,29 +121,76 @@ def test_real_complete_resource_error_timeout_and_watcher_cancel_close(database)
             timeout_seconds=0.5,
         )
     assert monotonic() - started < 3
-    timer = None
+    watcher = None
+    stop = threading.Event()
+    cancelled = threading.Event()
+    observed_fetch = threading.Event()
+    observer_errors = []
     observed = []
 
     def watch(connection):
-        nonlocal timer
+        nonlocal watcher
         observed.append(connection)
-        timer = threading.Timer(0.2, lambda: connection.cancel_safe(timeout=1))
-        timer.start()
 
+        def cancel_active_fetch():
+            deadline = monotonic() + 2
+            try:
+                while not stop.wait(0.01) and monotonic() < deadline:
+                    if connection.closed:
+                        return
+                    activity = admin.execute(
+                        "SELECT state, query FROM pg_stat_activity WHERE pid=%s",
+                        (connection.info.backend_pid,),
+                    ).fetchone()
+                    if (
+                        activity
+                        and activity[0] == "active"
+                        and activity[1].startswith(
+                            'FETCH FORWARD 16 FROM "eng_platform_complete_results"'
+                        )
+                    ):
+                        observed_fetch.set()
+                        cancelled.set()
+                        connection.cancel_safe(timeout=0.5)
+                        return
+            except Exception as exc:
+                observer_errors.append(type(exc).__name__)
+            finally:
+                if not observed_fetch.is_set():
+                    # Fail closed and quickly if observation fails. The
+                    # assertion below never accepts checkpoint-only stopping.
+                    cancelled.set()
+                    if not connection.closed:
+                        connection.cancel_safe(timeout=0.5)
+
+        watcher = threading.Thread(target=cancel_active_fetch, daemon=True)
+        watcher.start()
+
+    def authorize():
+        if cancelled.is_set():
+            raise DatabaseUnavailable("Synthetic watcher requested cancellation")
+
+    started = monotonic()
     try:
         with pytest.raises(DatabaseUnavailable):
             console.stream_query(
                 database,
                 statement,
-                lambda: None,
+                authorize,
                 lambda _: None,
                 lambda _: None,
                 on_connection=watch,
             )
         assert observed[0].closed
+        assert observed_fetch.is_set()
+        assert cancelled.is_set()
+        assert observer_errors == []
+        assert monotonic() - started < 3
     finally:
-        if timer is not None:
-            timer.join(timeout=2)
+        stop.set()
+        if watcher is not None:
+            watcher.join(timeout=2)
+            assert not watcher.is_alive()
 
 
 def _test_dsn(value: str) -> str:

@@ -14,7 +14,7 @@ _test_dispatcher: Any = None
 
 
 def enqueue(kind: str, identity: str, *, schedule_at: float | None = None) -> None:
-    if kind not in {"query", "export", "cleanup"} or not re.fullmatch(
+    if kind not in {"query", "export", "sort", "cleanup"} or not re.fullmatch(
         r"[a-f0-9]{32}", identity
     ):
         raise DatabaseUnavailable("Invalid database task identity")
@@ -25,7 +25,7 @@ def enqueue(kind: str, identity: str, *, schedule_at: float | None = None) -> No
         from google.cloud import tasks_v2
 
         settings = config.databases
-        queue = getattr(settings, f"{kind}_queue")
+        queue = getattr(settings, f"{'export' if kind == 'sort' else kind}_queue")
         if not all(
             (
                 settings.project_id,

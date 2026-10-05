@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..config import config
-from ..services import database_jobs
+from ..services import database_jobs, database_views
 from ..services.database_registry import DatabaseUnavailable
 
 router = APIRouter(prefix="/api/internal/database-executions", tags=["internal"])
@@ -77,7 +77,7 @@ async def _body(request: Request) -> dict:
 @router.post("/{operation}")
 async def worker(operation: str, request: Request):
     await anyio.to_thread.run_sync(partial(verify_worker, request))
-    if operation not in {"query", "export", "cleanup", "sweep"}:
+    if operation not in {"query", "export", "sort", "cleanup", "sweep"}:
         raise HTTPException(404, "Database worker operation not found")
     body = await _body(request)
     run: Callable[[], None]
@@ -91,6 +91,7 @@ async def worker(operation: str, request: Request):
             operations: dict[str, Callable[[str], None]] = {
                 "query": database_jobs.run_query,
                 "export": database_jobs.run_export,
+                "sort": database_views.run_sort,
                 "cleanup": database_jobs.cleanup,
             }
             run = partial(operations[operation], value.id)

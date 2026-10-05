@@ -35,6 +35,8 @@ def configured(monkeypatch):
     for name in ("run_query", "run_export", "cleanup", "sweep"):
         handlers[name] = Mock()
         monkeypatch.setattr(worker.database_jobs, name, handlers[name])
+    handlers["run_sort"] = Mock()
+    monkeypatch.setattr(worker.database_views, "run_sort", handlers["run_sort"])
     return verifier, handlers
 
 
@@ -52,7 +54,12 @@ def post(operation="query", body=None, *, headers=None):
 
 @pytest.mark.parametrize(
     "operation,handler",
-    [("query", "run_query"), ("export", "run_export"), ("cleanup", "cleanup")],
+    [
+        ("query", "run_query"),
+        ("export", "run_export"),
+        ("sort", "run_sort"),
+        ("cleanup", "cleanup"),
+    ],
 )
 def test_verified_deliveries_dispatch_only_validated_opaque_id(
     configured, operation, handler
