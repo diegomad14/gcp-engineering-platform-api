@@ -139,7 +139,9 @@ async def consent_page(request: Request, consent: str = ""):
         page,
         headers={
             "Cache-Control": "no-store",
-            "Referrer-Policy": "no-referrer",
+            # no-referrer turns Origin into null for native form POSTs. Send
+            # only the public origin, never consent nonces or URL paths.
+            "Referrer-Policy": "origin",
             "Content-Security-Policy": f"default-src 'none'; form-action 'self' {callback_origin}; frame-ancestors 'none'; base-uri 'none'",
             "X-Frame-Options": "DENY",
         },

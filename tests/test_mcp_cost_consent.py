@@ -179,6 +179,7 @@ async def test_explicit_send_requires_consent_then_pkce_and_does_not_elevate_old
         assert not mcp_store._memory["code"]
         page = client.get(callback.headers["location"])
         assert page.status_code == 200
+        assert page.headers["referrer-policy"] == "origin"
         assert "desplegar y revertir" in page.text and "&lt;Client" in page.text
         assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
         assert (
@@ -189,6 +190,7 @@ async def test_explicit_send_requires_consent_then_pkce_and_does_not_elevate_old
         assert not mcp_store._memory["code"]
         result = decision(client, callback)
         assert result.status_code == 303
+        assert result.headers["referrer-policy"] == "no-referrer"
         query = parse_qs(urlparse(result.headers["location"]).query)
         assert query["state"] == ["client-state"]
         code = query["code"][0]

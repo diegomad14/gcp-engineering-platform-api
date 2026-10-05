@@ -36,6 +36,10 @@ registration. PKCE, registered redirect validation, GitHub login and explicit
 full consent still run; token exchange and refresh never accept legacy scopes.
 The consent CSP permits only its own form endpoint and the registered callback
 origin so Chromium can follow the POST redirect, including loopback SDK clients.
+The consent page uses `Referrer-Policy: origin`: native HTML form POSTs under
+`no-referrer` send `Origin: null` and fail the strict origin check. Only the public
+origin is sent, never URL paths or consent nonces; the callback redirect keeps
+`no-referrer`. CSRF, nonce and exact origin checks remain mandatory.
 
 The browser-bound consent names database reads, operational information,
 production deploy/rollback and activating the fixed private cost alert. Denial,
