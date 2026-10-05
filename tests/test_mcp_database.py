@@ -607,3 +607,59 @@ async def test_http_revoke_binds_client_and_sanitizes_invalid_requests(
             ).status_code
             == 404
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("old_scope", [None, "eng-platform.read eng-platform.deploy"])
+async def test_registered_legacy_client_can_reconnect_without_elevating_tokens(
+    environment, monkeypatch, old_scope
+):
+    client = OAuthClientInformationFull(
+        client_id="legacy-client",
+        client_name="Existing MCP client",
+        redirect_uris=["http://localhost:3333/callback"],
+        token_endpoint_auth_method="none",
+        scope=old_scope,
+    )
+    mcp_store.save(
+        "client", client.client_id, {"metadata": client.model_dump(mode="json")}
+    )
+    mcp_store.save(
+        "access",
+        mcp_store.token_key("legacy-credential"),
+        {
+            "client_id": client.client_id,
+            "subject": "reader",
+            "scopes": ["eng-platform.read"],
+            "expires_at": time.time() + 3600,
+        },
+    )
+    advertised = await mcp_auth.provider.get_client(client.client_id)
+    assert advertised.scope == mcp_grants.SCOPE
+    assert advertised.redirect_uris == client.redirect_uris
+    assert mcp_store.get("client", client.client_id)["metadata"]["scope"] == old_scope
+    monkeypatch.setattr(config.auth, "github_client_id", "test-client-id")
+    monkeypatch.setattr(config.auth, "github_client_secret", "test-client-secret")
+    with TestClient(app) as http:
+        response = http.get(
+            "/authorize",
+            params={
+                "client_id": client.client_id,
+                "redirect_uri": str(client.redirect_uris[0]),
+                "response_type": "code",
+                "scope": mcp_grants.SCOPE,
+                "code_challenge": "a" * 43,
+                "code_challenge_method": "S256",
+                "state": "test-state",
+            },
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+        assert response.headers["location"].startswith(
+            "https://github.com/login/oauth/authorize?"
+        )
+    assert await mcp_auth.provider.load_access_token("legacy-credential") is None
+    assert not any(
+        value.get("source") == "mcp"
+        for value in environment["control"].records.values()
+    )

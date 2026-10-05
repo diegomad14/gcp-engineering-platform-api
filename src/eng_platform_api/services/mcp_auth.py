@@ -70,7 +70,13 @@ class MCPAuthProvider:
         record = mcp_store.get("client", client_id)
         if not record or record.get("revoked"):
             return None
-        return OAuthClientInformationFull.model_validate(record["metadata"])
+        # Registration describes supported scopes, not a user's authorization.
+        # Existing public clients may reconnect with the current scope while
+        # retaining their safe redirect/PKCE metadata. Old tokens still fail
+        # credential verification and only fresh consent can issue a new grant.
+        return OAuthClientInformationFull.model_validate(record["metadata"]).model_copy(
+            update={"scope": mcp_grants.SCOPE}
+        )
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         # Public/native DCR clients with Authorization Code + PKCE must not make
