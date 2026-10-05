@@ -20,6 +20,7 @@ from .routers import (
     auth,
     catalog,
     costs,
+    databases,
     deployments,
     deployment_events,
     github_events,
@@ -172,6 +173,7 @@ app.include_router(mcp_consent.router)
 app.include_router(health.router)
 app.include_router(catalog.router)
 app.include_router(logs.router)
+app.include_router(databases.router)
 app.include_router(releases.router)
 app.include_router(deployments.router)
 app.include_router(deployment_events.router)
@@ -191,7 +193,19 @@ logger = logging.getLogger("eng_platform_api.requests")
 @app.middleware("http")
 async def record_request_duration(request: Request, call_next):
     started = monotonic()
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception:
+        if request.url.path == "/api/databases" or request.url.path.startswith(
+            "/api/databases/"
+        ):
+            # Unexpected adapter/parser errors must not expose SQL, DSNs or
+            # diagnostics, and must carry the same privacy headers as success.
+            response = JSONResponse(
+                {"detail": "Database operation is unavailable"}, status_code=503
+            )
+        else:
+            raise
     source = getattr(request.state, "private_catalog_source", None)
     if source is not None:
         try:
@@ -211,6 +225,12 @@ async def record_request_duration(request: Request, call_next):
     ):
         # Include validation/provider failures, not only successful responses.
         response.headers["Cache-Control"] = "no-store"
+    if request.url.path == "/api/databases" or request.url.path.startswith(
+        "/api/databases/"
+    ):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Vary"] = "Cookie"
     duration_ms = round((monotonic() - started) * 1000, 2)
     response.headers["X-Process-Time-Ms"] = str(duration_ms)
     log = logger.warning if duration_ms >= 1000 else logger.info

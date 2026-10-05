@@ -22,6 +22,8 @@ dependencies = [
     "itsdangerous>=2.2.0",
     "mcp>=1.30.0,<2.0.0",
     "google-cloud-logging==3.16.3",
+    "psycopg[binary]>=3.2.13,<4",
+    "pglast>=7.11,<8",
 ]
 
 [project.optional-dependencies]

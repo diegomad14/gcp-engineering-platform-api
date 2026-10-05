@@ -145,6 +145,30 @@ def require_log_reader(request: Request) -> str:
     return identity
 
 
+def require_database_reader(request: Request) -> str:
+    """Database ACL is independent from deployers and runtime-log readers."""
+    identity = log_reader_identity(request)
+    if not identity:
+        raise HTTPException(401, "Sign in with GitHub to query databases")
+    if (
+        not config.databases.enabled
+        or not log_auth_configured()
+        or identity.lower() not in config.databases.allowed_logins
+    ):
+        raise HTTPException(403, "You are not allowed to query databases")
+    return identity
+
+
+def can_query_databases(request: Request) -> bool:
+    from .services.database_registry import DatabaseUnavailable, databases
+
+    try:
+        identity = require_database_reader(request)
+        return any(item.can_read(identity) for item in databases())
+    except (HTTPException, DatabaseUnavailable):
+        return False
+
+
 def private_catalog_required() -> bool:
     """Only explicit mock mode without a configured source is public."""
     return bool(
