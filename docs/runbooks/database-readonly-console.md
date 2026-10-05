@@ -302,10 +302,13 @@ que `/query`; los GET rechazan parámetros de URL.
 | `GET /{wid}` | Estado del workspace |
 | `POST /{wid}/executions` | `{sql, client_request_id}` → ejecución; mismo ID/cuerpo es idempotente, un SQL distinto con el mismo ID recibe `409` |
 | `GET /{wid}/executions/{eid}` | `status`, `columns`, `row_count`, `elapsed_ms`, `expires_at`, `error_code` y IDs |
-| `POST /{wid}/executions/{eid}/pages` | `{page_index, page_size}` → `columns`, `rows`, índices, `row_count`, `total_pages` |
+| `POST /{wid}/executions/{eid}/pages` | `{page_index, page_size, view_id?}` → `columns`, `rows`, índices, `row_count`, `total_pages` y `view_id` si se seleccionó una vista |
 | `POST /{wid}/executions/{eid}/cancel` | `{}` → cancelación lógica inmediata |
 | `POST /{wid}/purge` | `{}` → invalida el workspace y encola borrado |
-| `POST /{wid}/executions/{eid}/exports` | `{}` → `export_id`, `status`, `expires_at`, `error_code`, `download_path` |
+| `POST /{wid}/executions/{eid}/exports` | `{view_id?}` → `export_id`, `status`, `expires_at`, `error_code`, `download_path` y `source_view_id` para una vista |
+| `POST /{wid}/executions/{eid}/views` | `{column_key, direction: "asc"|"desc", client_request_id}` → `202`, estado de vista |
+| `GET /{wid}/executions/{eid}/views/{vid}` | `view_id`, `execution_id`, `status`, `column_key`, `direction`, `expires_at`, `row_count`, `elapsed_ms`, `error_code` |
+| `DELETE /{wid}/executions/{eid}/views/{vid}` | `{}` con headers privados → `{purged: true}`; invalida y encola borrado |
 | `GET /{wid}/executions/{eid}/exports/{xid}` | Estado del export |
 | `GET /{wid}/executions/{eid}/exports/{xid}/file` | Descarga nativa autenticada, attachment y `no-store`; sin URL firmada ni fetch de todo el fichero |
 
@@ -315,6 +318,48 @@ Estados de ejecución: `queued`, `running`, `completed`, `failed`, `cancelled`,
 `QUERY_FAILED`, `EXPORT_FAILED`, `DISPATCH_FAILED` o `WORKER_LOST`, sin SQL ni
 diagnósticos del proveedor. La descarga admite navegación nativa same-origin y
 valida cookie revocable y `Sec-Fetch-Site`/`Origin` cuando se presentan.
+
+## Ordenación global de una captura
+
+`global_sort_enabled` se anuncia en el listado únicamente cuando la política de
+workspaces está vigente. La ordenación usa todas las filas ya capturadas y no
+abre conexiones PostgreSQL, reejecuta SQL ni altera el manifest original. El
+cliente mantiene la vista anterior hasta publicar la nueva; un fallo o una
+cancelación conservan el resultado original y las otras vistas disponibles.
+La ausencia de `view_id` en páginas/exports selecciona el orden original.
+
+Se ordena por `column_key` posicional, que distingue nombres duplicados. Los
+enteros, decimales y flotantes se comparan a partir de sus lexemas exactos;
+no se convierten a floats de JavaScript/Python. Los booleanos ordenan false
+antes de true. El texto se compara por puntos de código Unicode, sin collation
+de la BD. JSON/JSONB, arrays y otros tipos se comparan como su texto capturado.
+Las fechas/horas usan orden cronológico y normalizan zonas cuando corresponden.
+SQL NULL aparece al final tanto en ascendente como descendente; los empates
+conservan el ordinal original de captura. La exportación conserva valores y
+precisión, incluidos JSON null y SQL NULL distintos.
+
+El worker `/api/internal/database-executions/sort` usa la misma queue de export
+y el mismo permiso pesado global de uno: ordenación y export no compiten por
+RAM simultáneamente. El merge externo escribe runs privados GCS de forma
+create-only, con generation/hash; procesa buffers acotados hasta 64 MiB y no
+tiene un tope fijo de filas. La vista completa final usa el mismo formato
+NDJSON/chunks de 1 MiB/manifest que páginas y Excel. Cada upload, incluidos
+temporales y manifest, reserva cuota antes de iniciarse; cada run se elimina
+después de materializar su reemplazo y sólo entonces se descuenta su tamaño.
+Los temporales, la captura original, otras vistas y XLSX consumen las cuotas
+existentes de 512 MiB por usuario y 2 GiB globales. Si no cabe o excede 240 s,
+falla explícitamente y conserva la captura; no trunca ni ordena sólo una página.
+
+Cada vista hereda el vencimiento de la captura original; ordenar no renueva la
+hora de retención. CAS/fencing verifica sesión, workspace, política y captura
+al publicar. La limpieza espera que los workers terminen, elimina todos los
+objetos de la vista y verifica namespace vacío antes de liberar su reserva.
+Hay hasta 16 vistas vivas por captura para acotar metadata; retirar/limpiar una
+libera ese cupo, sin límite acumulado de comandos. El cliente retira vistas
+anteriores después de seleccionar otra y mantiene las usadas por exports en
+curso. Un XLSX completado vive bajo la captura original y continúa descargable
+si se retira su vista, con la misma ACL, sesión revocable y TTL original.
+Logout, expiración y purga del workspace eliminan también todas sus vistas.
 
 ## Infraestructura y activación de ejecuciones
 
@@ -347,7 +392,7 @@ la API. No compartir el bucket con otros artefactos ni conceder acceso público.
 Mantener acceso uniforme, public access prevention y eliminar soft delete,
 versionado, retention lock y copias de resultados. Programar un sweeper OIDC
 periódico con POST `{}` a `/api/internal/database-executions/sweep`; no contiene
-credenciales de usuarios. Las queues invocan `/query`, `/export`, `/cleanup` en
+credenciales de usuarios. Las queues invocan `/query`, `/export`, `/sort`, `/cleanup` en
 ese prefijo interno y rechazan identidades distintas del SA exacto. No usar
 Cloud Run Jobs nuevos ni ampliar el catálogo de despliegue.
 

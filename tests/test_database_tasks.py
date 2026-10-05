@@ -37,7 +37,7 @@ def sdk(monkeypatch):
     return client, constructor
 
 
-@pytest.mark.parametrize("kind", ["query", "export", "cleanup"])
+@pytest.mark.parametrize("kind", ["query", "export", "sort", "cleanup"])
 def test_sdk_payload_has_only_opaque_id_fixed_oidc_and_bounded_deadline(sdk, kind):
     client, _ = sdk
     tasks.enqueue(kind, IDENTITY)
@@ -45,7 +45,9 @@ def test_sdk_payload_has_only_opaque_id_fixed_oidc_and_bounded_deadline(sdk, kin
     assert call["timeout"] == 4 and call["retry"] is None
     request = call["request"]
     task = request["task"]
-    assert request["parent"].endswith(f"/queues/readonly-{kind}")
+    assert request["parent"].endswith(
+        f"/queues/readonly-{'export' if kind == 'sort' else kind}"
+    )
     assert task["name"] == f"{request['parent']}/tasks/{kind}-{IDENTITY}"
     http = task["http_request"]
     assert http["http_method"] == tasks_v2.HttpMethod.POST

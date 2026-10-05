@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
+from typing import Literal
 import json
 from time import monotonic
 
@@ -14,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from ..config import config
 from ..security import require_database_reader
 from ..services import database_console, database_registry
-from ..services import database_jobs
+from ..services import database_jobs, database_views
 from ..services.database_sql import QueryRejected
 
 router = APIRouter(prefix="/api/databases", tags=["databases"])
@@ -94,13 +95,18 @@ async def list_databases(
         return {
             "databases": public,
             "workspace_enabled": True,
+            "global_sort_enabled": True,
             "workspace_limits": {
                 "timeout_seconds": 240,
                 "page_sizes": [25, 50, 100],
                 "retention_seconds": 3600,
             },
         }
-    return {"databases": public, "workspace_enabled": False}
+    return {
+        "databases": public,
+        "workspace_enabled": False,
+        "global_sort_enabled": False,
+    }
 
 
 async def _run(request: Request, database_id: str, reader: str, operation):
@@ -204,6 +210,19 @@ class PageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     page_index: int = Field(default=0, ge=0, le=2_147_483_647)
     page_size: int = Field(default=100)
+    view_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+
+
+class ExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    view_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+
+
+class ViewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    column_key: str = Field(min_length=1, max_length=128)
+    direction: Literal["asc", "desc"]
+    client_request_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
 
 
 def _payload(model, body):
@@ -316,6 +335,7 @@ async def page(
             execution_id,
             payload.page_index,
             payload.page_size,
+            payload.view_id,
         )
     )
 
@@ -349,7 +369,7 @@ async def create_export(
     reader: str = Depends(require_database_reader),
     body: dict = Depends(private_request),
 ):
-    _empty(body)
+    payload = _payload(ExportRequest, body)
     return await _job_call(
         partial(
             database_jobs.create_export,
@@ -357,6 +377,84 @@ async def create_export(
             database_id,
             workspace_id,
             execution_id,
+            payload.view_id,
+        )
+    )
+
+
+@router.post(
+    "/{database_id}/workspaces/{workspace_id}/executions/{execution_id}/views",
+    status_code=202,
+)
+async def create_view(
+    database_id: str,
+    workspace_id: str,
+    execution_id: str,
+    request: Request,
+    reader: str = Depends(require_database_reader),
+    body: dict = Depends(private_request),
+):
+    payload = _payload(ViewRequest, body)
+    return await _job_call(
+        partial(
+            database_views.create_view,
+            request,
+            database_id,
+            workspace_id,
+            execution_id,
+            payload.column_key,
+            payload.direction,
+            payload.client_request_id,
+        )
+    )
+
+
+@router.get(
+    "/{database_id}/workspaces/{workspace_id}/executions/{execution_id}/views/{view_id}"
+)
+async def get_view(
+    database_id: str,
+    workspace_id: str,
+    execution_id: str,
+    view_id: str,
+    request: Request,
+    reader: str = Depends(require_database_reader),
+):
+    if request.query_params:
+        raise HTTPException(422, "Database request parameters are not supported")
+    return await _job_call(
+        partial(
+            database_views.view,
+            request,
+            database_id,
+            workspace_id,
+            execution_id,
+            view_id,
+        )
+    )
+
+
+@router.delete(
+    "/{database_id}/workspaces/{workspace_id}/executions/{execution_id}/views/{view_id}"
+)
+async def delete_view(
+    database_id: str,
+    workspace_id: str,
+    execution_id: str,
+    view_id: str,
+    request: Request,
+    reader: str = Depends(require_database_reader),
+    body: dict = Depends(private_request),
+):
+    _empty(body)
+    return await _job_call(
+        partial(
+            database_views.delete_view,
+            request,
+            database_id,
+            workspace_id,
+            execution_id,
+            view_id,
         )
     )
 

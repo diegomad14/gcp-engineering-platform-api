@@ -165,6 +165,7 @@ def test_list_only_exposes_authorized_public_fields_and_auth_capability(configur
     assert result.status_code == 200
     assert result.json() == {
         "workspace_enabled": False,
+        "global_sort_enabled": False,
         "databases": [
             {
                 "id": "sample",

@@ -15,7 +15,9 @@ Transform = Callable[[dict[str, Document | None]], dict[str, Document | None]]
 _test_backend: Any = None
 _client: Any = None
 _identity: tuple[str, str] | None = None
-KINDS = frozenset({"session", "workspace", "execution", "export", "control", "request"})
+KINDS = frozenset(
+    {"session", "workspace", "execution", "view", "export", "control", "request"}
+)
 
 
 class _TransactionAPI:

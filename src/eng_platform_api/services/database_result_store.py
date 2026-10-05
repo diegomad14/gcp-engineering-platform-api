@@ -194,7 +194,13 @@ def take_sql(reference: dict) -> str:
 
 
 class ResultWriter:
-    def __init__(self, execution_id: str, authorize: Callable[[], None]):
+    def __init__(
+        self,
+        execution_id: str,
+        authorize: Callable[[], None],
+        *,
+        on_store: Callable[[int], None] | None = None,
+    ):
         self.execution_id = execution_id
         self.authorize = authorize
         self.columns: list[dict] = []
@@ -204,6 +210,7 @@ class ResultWriter:
         self.row_count = 0
         self.byte_count = 0
         self.stored_bytes = 0
+        self.on_store = on_store
 
     def on_columns(self, columns: list[dict]) -> None:
         _columns(columns)
@@ -233,6 +240,8 @@ class ResultWriter:
         self.authorize()
         if not self.buffer:
             return
+        if self.on_store:
+            self.on_store(len(self.buffer))
         reference = put(
             f"results/{self.execution_id}/chunk-{len(self.chunks):06d}.ndjson",
             bytes(self.buffer),
@@ -261,6 +270,8 @@ class ResultWriter:
         self.stored_bytes = self.byte_count - len(_encode(self.columns)) + len(raw)
         if self.stored_bytes > SNAPSHOT_BYTES:
             raise HTTPException(422, "Database result exceeds the resource budget")
+        if self.on_store:
+            self.on_store(len(raw))
         return put(f"results/{self.execution_id}/manifest.json", raw)
 
 
