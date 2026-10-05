@@ -20,6 +20,8 @@ _DEFAULT_STORE_PATH = Path(
     os.getenv("ENG_PLATFORM_DEPLOYMENT_STORE_PATH", "data/deployments.json")
 )
 _COLLECTION = os.getenv("ENG_PLATFORM_DEPLOYMENT_FIRESTORE_COLLECTION", "")
+# A single Firestore IN query supports at most 30 comparison values.
+_FIRESTORE_IN_QUERY_LIMIT = 30
 _lock = threading.RLock()
 
 
@@ -163,10 +165,14 @@ def list_for_service_with_total(
 def latest_for_services(service_names: list[str]) -> dict[str, DeploymentItem]:
     if not service_names:
         return {}
+    service_names = list(dict.fromkeys(service_names))
     collection = _firestore_collection()
     if collection is not None:
-        snapshots = collection.where("service_name", "in", service_names).stream()
-        records = [snapshot.to_dict() for snapshot in snapshots]
+        records: list[dict[str, Any]] = []
+        for offset in range(0, len(service_names), _FIRESTORE_IN_QUERY_LIMIT):
+            batch = service_names[offset : offset + _FIRESTORE_IN_QUERY_LIMIT]
+            snapshots = collection.where("service_name", "in", batch).stream()
+            records.extend(snapshot.to_dict() for snapshot in snapshots)
     else:
         with _lock:
             records = [

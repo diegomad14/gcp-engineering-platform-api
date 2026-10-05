@@ -235,6 +235,99 @@ def test_budget_denial_is_throttled_and_keeps_cache(monkeypatch):
     assert provider.call_count == 1
 
 
+@pytest.mark.parametrize(
+    "reason", ["cadence", "queue", "budget", "pending", "overload"]
+)
+def test_deferral_reason_reaches_response_and_clears_after_success(monkeypatch, reason):
+    monkeypatch.setattr(
+        logs.log_budget,
+        "reserve",
+        Mock(return_value=Reservation(False, NOW, 10, deferral_reason=reason)),
+    )
+    assert read().deferral_reason == reason
+    assert read().deferral_reason == reason  # Coalesced tab retains the same state.
+    logs.fetch_page.assert_not_called()
+    refresh_again()
+    monkeypatch.setattr(
+        logs.log_budget, "reserve", Mock(return_value=Reservation(True, NOW))
+    )
+    result = read()
+    assert result.status == "fresh" and result.deferral_reason is None
+
+
+@pytest.mark.parametrize("previous_success", [False, True])
+@pytest.mark.parametrize("overloaded", [False, True])
+@pytest.mark.parametrize("failure", ["reserve", "finish"])
+def test_coordination_failure_clears_all_previous_deferral_metadata(
+    monkeypatch, previous_success, overloaded, failure
+):
+    if previous_success:
+        assert read().status == "fresh"
+        refresh_again()
+    reason = "overload" if overloaded else "queue"
+    monkeypatch.setattr(
+        logs.log_budget,
+        "reserve",
+        Mock(
+            return_value=Reservation(
+                False,
+                NOW,
+                10,
+                queue_position=None if overloaded else 2,
+                queue_wait_seconds=None if overloaded else 10,
+                overloaded=overloaded,
+                deferral_reason=reason,
+            )
+        ),
+    )
+    deferred = read()
+    assert deferred.status == "throttled" and deferred.deferral_reason == reason
+    assert deferred.overloaded == overloaded
+    if not overloaded:
+        assert deferred.queue_position == 2 and deferred.queue_wait_seconds == 10
+    refresh_again()
+    if failure == "finish":
+        monkeypatch.setattr(
+            logs.log_budget, "reserve", Mock(return_value=Reservation(True, NOW))
+        )
+    monkeypatch.setattr(
+        logs.log_budget, failure, Mock(side_effect=RuntimeError("coordination"))
+    )
+    result = read()
+    assert result.status == (
+        "stale" if previous_success or failure == "finish" else "unavailable"
+    )
+    assert result.deferral_reason is None
+    assert result.queue_position is None and result.queue_wait_seconds is None
+    assert not result.overloaded
+    if previous_success:
+        assert result.entries == deferred.entries
+
+
+def test_local_cadence_starts_after_slow_reservation_acknowledgement(monkeypatch):
+    from tests.log_test_support import FakeClock
+
+    clock = FakeClock()
+    monkeypatch.setattr(logs, "monotonic", clock)
+
+    def slow_reservation(*args, **kwargs):
+        clock.advance(3)
+        return Reservation(True, NOW)
+
+    reservation = Mock(side_effect=slow_reservation)
+    monkeypatch.setattr(logs.log_budget, "reserve", reservation)
+    assert read().status == "fresh"
+    assert clock.now == 103
+    assert logs._caches[logs._key(SERVICE)].next_due == 108
+    for time in (105, 106, 107.999):
+        clock.now = time
+        assert read().status == "fresh"
+    assert reservation.call_count == logs.fetch_page.call_count == 1
+    clock.now = 108
+    assert read().status == "fresh"
+    assert reservation.call_count == logs.fetch_page.call_count == 2
+
+
 def test_rate_limit_errors_back_off_and_do_not_expose_provider_details(monkeypatch):
     read()
     provider = Mock(side_effect=ResourceExhausted("Bearer do-not-return"))
@@ -765,6 +858,7 @@ def test_cache_state_bound_uses_lru_and_never_overflows(monkeypatch):
     try:
         result = read(SERVICE)
         assert result.overloaded and result.status == "unavailable"
+        assert result.deferral_reason == "overload"
         assert len(logs._caches) == 2
     finally:
         for cache in logs._caches.values():

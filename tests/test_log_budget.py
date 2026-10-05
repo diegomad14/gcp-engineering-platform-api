@@ -124,11 +124,11 @@ def test_waiters_expire_on_inactivity_and_polls_refresh_without_reordering(store
     holder = take("holder")
     take("abandoned")
     take("alive")
-    store.now += timedelta(seconds=179)
+    store.now += timedelta(seconds=budget.WAITER_TTL_SECONDS)
     alive = take("alive")
     assert not alive.allowed and alive.queue_position == 2
-    store.now += timedelta(seconds=1)
-    assert take("alive").allowed  # Head inactivity expires exactly at 180s.
+    store.now += timedelta(microseconds=1)
+    assert take("alive").allowed  # Full advice + grace is inclusive.
     assert any(item["token"] == holder.token for item in record(store)["attempts"])
     assert not take("holder").allowed  # Pending slot never expires with waiter TTL.
 
@@ -138,11 +138,122 @@ def test_expired_waiter_rejoins_at_tail(store):
     finish(holder, "holder")
     take("abandoned")
     take("alive")
-    store.now += timedelta(seconds=179)
+    store.now += timedelta(seconds=budget.WAITER_TTL_SECONDS)
     take("alive")
-    store.now += timedelta(seconds=1)
+    store.now += timedelta(microseconds=1)
     assert take("abandoned").queue_position == 2
     assert take("alive").allowed
+
+
+def test_abandoned_navigation_unblocks_empty_budget_within_liveness_bound(store):
+    start = store.now
+    permits = []
+    for i in range(budget.MAX_ATTEMPTS):
+        store.now = start + timedelta(seconds=i * budget.CADENCE_SECONDS)
+        permits.append(take(f"old-{i}"))
+    store.now = start + timedelta(seconds=60)
+    for i, permit in enumerate(permits):
+        finish(permit, f"old-{i}")
+    store.now = start + timedelta(seconds=119)
+    for name in ("closed-tab", "previous-navigation"):
+        assert take(name).deferral_reason == "budget"
+
+    # All completed charges disappear at t=120, but abandoned FIFO owners must
+    # still get their bounded grace rather than allowing callers to jump ahead.
+    for second in range(120, 155, 5):
+        store.now = start + timedelta(seconds=second)
+        result = take("current-navigation")
+        assert result.deferral_reason == "queue"
+        assert not result.allowed and result.queue_position == 3
+        assert 5 <= result.next_poll_seconds <= 10
+        assert record(store)["attempts"] == []
+    store.now = start + timedelta(seconds=155)
+    result = take("current-navigation")
+    assert result.allowed and result.deferral_reason is None
+    assert record(store)["waiters"] == []
+    assert len(record(store)["attempts"]) == 1
+
+
+def test_live_slow_waiter_keeps_turn_through_full_advice_and_transport_grace(store):
+    held = take("holder")
+    take("ahead")
+    slow = take("slow-tab")
+    assert slow.next_poll_seconds == budget.MAX_QUEUE_POLL_SECONDS == 10
+    assert take("other-replica").queue_position == 3
+    start = store.now
+    store.now = start + timedelta(seconds=5)
+    ahead = take("ahead")
+    assert ahead.allowed
+    finish(ahead, "ahead")
+    # Later participants poll aggressively, including exactly at the last
+    # instant covered by 10s advice + 25s request/transport allowance.
+    for second in range(10, 36, 5):
+        store.now = start + timedelta(seconds=second)
+        result = take("other-replica")
+        assert not result.allowed and result.queue_position == 2
+    resumed = take("slow-tab")
+    assert resumed.allowed
+    assert record(store)["attempts"][0]["token"] == held.token
+    assert record(store)["attempts"][0]["completed_at"] is None
+    store.now += timedelta(seconds=5)
+    assert take("other-replica").allowed
+
+
+def test_schema_three_mixed_poll_policies_requeue_only_waiting_membership(
+    store, monkeypatch
+):
+    permits = []
+    for i in range(budget.MAX_ATTEMPTS):
+        permits.append(take(f"owner-{i}"))
+        store.now += timedelta(seconds=5)
+    start = store.now
+    original_attempts = deepcopy(record(store)["attempts"])
+    # Previous schema-3 replicas used the same document/permit shape, a 180s
+    # waiter TTL and 60s maximum advice. Emulate their polling policy at rollout.
+    with monkeypatch.context() as old:
+        old.setattr(budget, "MAX_QUEUE_POLL_SECONDS", 60)
+        old.setattr(budget, "WAITER_TTL_SECONDS", 180)
+        legacy = take("old-replica-waiter")
+        assert legacy.next_poll_seconds == 60
+    store.now = start + timedelta(seconds=36)
+    assert take("new-replica-waiter").queue_position == 1
+    store.now = start + timedelta(seconds=60)
+    with monkeypatch.context() as old:
+        old.setattr(budget, "MAX_QUEUE_POLL_SECONDS", 60)
+        old.setattr(budget, "WAITER_TTL_SECONDS", 180)
+        rejoined = take("old-replica-waiter")
+        assert rejoined.queue_position == 2 and not rejoined.allowed
+        assert record(store)["attempts"] == original_attempts
+        finish(permits[0], "owner-0")
+    current = record(store)
+    assert current["schema_version"] == 3
+    assert set(current) == {
+        "schema_version",
+        "quota_project_id",
+        "attempts",
+        "waiters",
+        "next_due",
+        "updated_at",
+    }
+    assert all(
+        set(waiter) == {"participant", "enqueued_at", "last_seen_at"}
+        for waiter in current["waiters"]
+    )
+    assert current["attempts"][0]["completed_at"] == store.now
+    assert current["attempts"][1:] == original_attempts[1:]
+    assert take("new-replica-waiter").deferral_reason == "budget"
+    # No changed waiter policy creates capacity or authorizes a pending owner.
+    assert take("owner-1").deferral_reason == "pending"
+    assert len(record(store)["attempts"]) == budget.MAX_ATTEMPTS
+
+
+def test_deferral_reasons_separate_cadence_queue_and_pending_from_budget(store):
+    held = take("holder")
+    assert held.allowed and held.deferral_reason is None
+    assert take("holder").deferral_reason == "pending"
+    assert take("head").deferral_reason == "cadence"
+    assert take("tail").deferral_reason == "queue"
+    assert len(record(store)["attempts"]) == 1
 
 
 def test_finite_fifo_overload_does_not_evict_waiters_or_pending_slots(store):
@@ -156,6 +267,7 @@ def test_finite_fifo_overload_does_not_evict_waiters_or_pending_slots(store):
     original = deepcopy(valid)
     rejected = take("overflow")
     assert rejected.overloaded and not rejected.allowed
+    assert rejected.deferral_reason == "overload"
     assert rejected.queue_position is None and rejected.queue_wait_seconds is None
     assert rejected.next_poll_seconds == 60
     assert record(store) == original
@@ -174,6 +286,8 @@ def test_pending_attempts_never_expire_on_restart(store):
         store.now += timedelta(seconds=delta)
         result = take("replacement-replica")
         assert not result.allowed and result.queue_position == 1
+        assert result.deferral_reason == "budget"
+        assert result.next_poll_seconds == 10
         assert result.queue_wait_seconds >= 60  # Lower bound, no recovery promise.
     assert len(record(store)["attempts"]) == 12
     assert all(item["completed_at"] is None for item in record(store)["attempts"])
@@ -719,7 +833,7 @@ def test_active_hundred_resource_fifo_advances_without_starvation(store):
     granted = []
     calls = []
     # Every active caller honors its own bounded polling advice. Long queues
-    # therefore refresh within 60s and remain active beyond the 180s TTL.
+    # therefore refresh within 10s and remain active beyond the waiter TTL.
     for second in range(0, 6001, 5):
         store.now = start + timedelta(seconds=second)
         for name, next_poll in list(due.items()):

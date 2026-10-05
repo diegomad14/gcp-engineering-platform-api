@@ -23,7 +23,7 @@ from urllib.parse import urlencode
 import uuid
 
 from ..config import config
-from ..models import LogEntry, LogSeverity, ServiceLogsResponse
+from ..models import LogDeferralReason, LogEntry, LogSeverity, ServiceLogsResponse
 from . import log_budget
 from .log_catalog import REGION_PATTERN, Resource, resources
 from .log_redaction import sanitize_payload, sanitize_text
@@ -336,6 +336,7 @@ class Cache:
     queue_position: int | None = None
     queue_wait_seconds: int | None = None
     overloaded: bool = False
+    deferral_reason: LogDeferralReason | None = None
     invalidated: bool = False
 
 
@@ -504,10 +505,14 @@ def _refresh(
         cache.queue_position = reservation.queue_position
         cache.queue_wait_seconds = reservation.queue_wait_seconds
         cache.overloaded = reservation.overloaded
+        cache.deferral_reason = reservation.deferral_reason
         if not reservation.allowed:
             cache.status = "throttled"
             cache.next_due = monotonic() + reservation.next_poll_seconds
             return
+        # Firestore admission may take seconds. Start the local cooldown after
+        # the acknowledgement so our next call cannot race its own cadence.
+        cache.next_due = monotonic() + log_budget.CADENCE_SECONDS
         window = reservation.server_time - timedelta(
             minutes=config.logs.lookback_minutes
         )
@@ -570,6 +575,10 @@ def _refresh(
         # Provider errors can contain queries, payloads, identities or secrets.
         cache.errors = min(cache.errors + 1, 4)
         cache.status = "stale" if cache.last_success else "unavailable"
+        cache.queue_position = None
+        cache.queue_wait_seconds = None
+        cache.overloaded = False
+        cache.deferral_reason = None
         cache.next_due = monotonic() + min(60, 5 * 2**cache.errors)
     finally:
         if reservation is not None and reservation.allowed:
@@ -584,6 +593,10 @@ def _refresh(
                 )
             except Exception:
                 cache.status = "stale" if cache.last_success else "unavailable"
+                cache.queue_position = None
+                cache.queue_wait_seconds = None
+                cache.overloaded = False
+                cache.deferral_reason = None
                 cache.next_due = monotonic() + 60
         cache.lock.release()
 
@@ -627,6 +640,7 @@ def read_logs(
     if cache is None:
         response.status = "unavailable"
         response.overloaded = True
+        response.deferral_reason = "overload"
         response.next_poll_seconds = 60
         return response
     _refresh(cache, deadline, authorize)
@@ -666,6 +680,7 @@ def read_logs(
         response.queue_position = cache.queue_position
         response.queue_wait_seconds = cache.queue_wait_seconds
         response.overloaded = cache.overloaded
+        response.deferral_reason = cache.deferral_reason
         entries = list(cache.entries.values())
     matching = []
     for _, entry in entries:
