@@ -17,6 +17,135 @@ from eng_platform_api.services.database_registry import Database, DatabaseUnavai
 from eng_platform_api.services.database_sql import QueryRejected
 
 
+def test_real_complete_snapshot_exceeds_500_and_respects_sql_limit(database):
+    columns, batches = [], []
+    result = console.stream_query(
+        database,
+        "WITH RECURSIVE numbers AS (SELECT 1 AS n UNION ALL SELECT n+1 FROM numbers WHERE n<1251) SELECT n FROM numbers ORDER BY n",
+        lambda: None,
+        columns.extend,
+        lambda values: batches.extend(values),
+    )
+    assert result["row_count"] == 1251
+    assert batches == [[number] for number in range(1, 1252)]
+    assert columns == [{"key": "0", "name": "n", "data_type": "int4"}]
+    rows = []
+    result = console.stream_query(
+        database,
+        "SELECT id FROM sample.items ORDER BY id LIMIT 3",
+        lambda: None,
+        lambda _: None,
+        rows.extend,
+    )
+    assert result["row_count"] == 3 and rows == [[1], [2], [3]]
+
+
+def test_real_complete_zero_rows_exact_types_and_values(database):
+    columns, rows = [], []
+    result = console.stream_query(
+        database,
+        "SELECT 9007199254740993::bigint AS duplicate, 1234567890.12345678901234567890::numeric AS duplicate",
+        lambda: None,
+        columns.extend,
+        rows.extend,
+    )
+    assert result["row_count"] == 1
+    assert [column["data_type"] for column in columns] == ["int8", "numeric"]
+    assert rows == [["9007199254740993", "1234567890.12345678901234567890"]]
+    columns, rows = [], []
+    result = console.stream_query(
+        database,
+        "SELECT id FROM sample.items WHERE false",
+        lambda: None,
+        columns.extend,
+        rows.extend,
+    )
+    assert result["row_count"] == 0 and rows == [] and len(columns) == 1
+
+
+def test_real_complete_json_numeric_lexemes_and_sql_null_are_lossless(database):
+    from decimal import Decimal
+    import json
+
+    columns, rows = [], []
+    console.stream_query(
+        database,
+        "SELECT '{\"amount\":0.12345678901234567890,\"id\":9007199254740993}'::jsonb AS payload, 'null'::jsonb AS json_null, NULL::jsonb AS sql_null, ARRAY[0.12345678901234567890::numeric, 9007199254740993::numeric] AS values",
+        lambda: None,
+        columns.extend,
+        rows.extend,
+    )
+    assert [column["data_type"] for column in columns] == [
+        "jsonb",
+        "jsonb",
+        "jsonb",
+        "_numeric",
+    ]
+    payload = json.loads(rows[0][0], parse_float=Decimal)
+    assert payload == {
+        "amount": Decimal("0.12345678901234567890"),
+        "id": 9007199254740993,
+    }
+    assert rows[0][1:3] == ["null", None]
+    assert json.loads(rows[0][3], parse_float=Decimal) == [
+        Decimal("0.12345678901234567890"),
+        9007199254740993,
+    ]
+
+
+def test_real_complete_resource_error_timeout_and_watcher_cancel_close(database):
+    import threading
+
+    observed = []
+    with pytest.raises(console.DatabaseResourceExceeded):
+        console.stream_query(
+            database,
+            "SELECT '" + "x" * 17000 + "'",
+            lambda: None,
+            lambda _: None,
+            lambda _: None,
+            on_connection=observed.append,
+        )
+    assert observed[0].closed
+    statement = "SELECT count(*) FROM " + " CROSS JOIN ".join(
+        f"sample.items t{index}" for index in range(9)
+    )
+    started = monotonic()
+    with pytest.raises(console.DatabaseResourceExceeded):
+        console.stream_query(
+            database,
+            statement,
+            lambda: None,
+            lambda _: None,
+            lambda _: None,
+            timeout_seconds=0.5,
+        )
+    assert monotonic() - started < 3
+    timer = None
+    observed = []
+
+    def watch(connection):
+        nonlocal timer
+        observed.append(connection)
+        timer = threading.Timer(0.2, lambda: connection.cancel_safe(timeout=1))
+        timer.start()
+
+    try:
+        with pytest.raises(DatabaseUnavailable):
+            console.stream_query(
+                database,
+                statement,
+                lambda: None,
+                lambda _: None,
+                lambda _: None,
+                on_connection=watch,
+            )
+        assert observed[0].closed
+    finally:
+        if timer is not None:
+            timer.join(timeout=2)
+
+
 def _test_dsn(value: str) -> str:
     """Admin fixtures must never accept a service or remote/production DSN."""
     try:

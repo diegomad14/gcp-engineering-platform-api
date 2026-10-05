@@ -164,6 +164,7 @@ def test_list_only_exposes_authorized_public_fields_and_auth_capability(configur
     result = client().get("/api/databases")
     assert result.status_code == 200
     assert result.json() == {
+        "workspace_enabled": False,
         "databases": [
             {
                 "id": "sample",
@@ -173,7 +174,7 @@ def test_list_only_exposes_authorized_public_fields_and_auth_capability(configur
                 "timeout_seconds": 5,
                 "service_names": [],
             }
-        ]
+        ],
     }
     assert "dsn" not in result.text and "allowed_logins" not in result.text
     assert result.headers["cache-control"] == "no-store"
@@ -518,7 +519,7 @@ class ScriptedConnection:
 
 def install_scripted(monkeypatch, connection):
     @contextmanager
-    def open_connection(database, authorize):
+    def open_connection(database, authorize, *, admission=None):
         authorize()
         yield connection
         authorize()

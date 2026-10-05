@@ -163,6 +163,17 @@ class DatabasesConfig:
     allowed_logins: tuple[str, ...] = ()
     registry_path: str | None = field(default=None, repr=False)
     registry_sha256: str | None = None
+    executions_enabled: bool = False
+    project_id: str = ""
+    collection: str = "eng_platform_database_control"
+    result_bucket: str = ""
+    queue_location: str = "us-central1"
+    query_queue: str = ""
+    export_queue: str = ""
+    cleanup_queue: str = ""
+    worker_service_account: str = ""
+    api_origin: str = ""
+    policy_version: str = ""
 
 
 @dataclass
@@ -654,6 +665,24 @@ def load_config() -> PlatformConfig:
         ),
         registry_path=os.getenv("ENG_PLATFORM_DATABASES_REGISTRY_PATH"),
         registry_sha256=os.getenv("ENG_PLATFORM_DATABASES_REGISTRY_SHA256"),
+        executions_enabled=os.getenv(
+            "ENG_PLATFORM_DATABASE_EXECUTIONS_ENABLED", "false"
+        ).lower()
+        == "true",
+        project_id=os.getenv("ENG_PLATFORM_DATABASE_PROJECT_ID", ""),
+        collection=os.getenv(
+            "ENG_PLATFORM_DATABASE_COLLECTION", "eng_platform_database_control"
+        ),
+        result_bucket=os.getenv("ENG_PLATFORM_DATABASE_RESULT_BUCKET", ""),
+        queue_location=os.getenv("ENG_PLATFORM_DATABASE_QUEUE_LOCATION", "us-central1"),
+        query_queue=os.getenv("ENG_PLATFORM_DATABASE_QUERY_QUEUE", ""),
+        export_queue=os.getenv("ENG_PLATFORM_DATABASE_EXPORT_QUEUE", ""),
+        cleanup_queue=os.getenv("ENG_PLATFORM_DATABASE_CLEANUP_QUEUE", ""),
+        worker_service_account=os.getenv(
+            "ENG_PLATFORM_DATABASE_WORKER_SERVICE_ACCOUNT", ""
+        ),
+        api_origin=os.getenv("ENG_PLATFORM_DATABASE_API_ORIGIN", "").rstrip("/"),
+        policy_version=os.getenv("ENG_PLATFORM_DATABASE_POLICY_VERSION", ""),
     )
 
     public_base_url = os.getenv("ENG_PLATFORM_MCP_PUBLIC_BASE_URL", "").rstrip("/")
