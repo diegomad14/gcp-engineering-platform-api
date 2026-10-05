@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 from functools import partial
+from typing import Literal
 import json
 from time import monotonic
 
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..config import config
 from ..security import require_database_reader
 from ..services import database_console, database_registry
+from ..services import database_jobs, database_views
 from ..services.database_sql import QueryRejected
 
 router = APIRouter(prefix="/api/databases", tags=["databases"])
@@ -83,7 +86,27 @@ async def list_databases(
     require_database_reader(request)
     if _visible(reader) != values:
         raise HTTPException(403, "Database permission changed; retry the request")
-    return {"databases": [item.public() for item in values]}
+    public = [item.public() for item in values]
+    if config.databases.executions_enabled:
+        await anyio.to_thread.run_sync(database_jobs.active_policy)
+        require_database_reader(request)
+        if _visible(reader) != values:
+            raise HTTPException(403, "Database permission changed; retry the request")
+        return {
+            "databases": public,
+            "workspace_enabled": True,
+            "global_sort_enabled": True,
+            "workspace_limits": {
+                "timeout_seconds": 240,
+                "page_sizes": [25, 50, 100],
+                "retention_seconds": 3600,
+            },
+        }
+    return {
+        "databases": public,
+        "workspace_enabled": False,
+        "global_sort_enabled": False,
+    }
 
 
 async def _run(request: Request, database_id: str, reader: str, operation):
@@ -102,6 +125,8 @@ async def _run(request: Request, database_id: str, reader: str, operation):
                 raise HTTPException(
                     403, "Database permission changed; retry the request"
                 )
+            if config.databases.executions_enabled:
+                database_jobs.active_policy()
 
         try:
             return database, operation(database, authorize)
@@ -118,6 +143,9 @@ async def _run(request: Request, database_id: str, reader: str, operation):
                 run, abandon_on_cancel=True
             )
         require_database_reader(request)
+        if config.databases.executions_enabled:
+            await anyio.to_thread.run_sync(database_jobs.active_policy)
+            require_database_reader(request)
         if _database(database_id, reader) != database:
             raise HTTPException(403, "Database permission changed; retry the request")
         return result
@@ -155,6 +183,357 @@ async def query(
         database_id,
         reader,
         lambda database, authorize: database_console.query(
-            database, payload.sql, payload.max_rows, authorize
+            database,
+            payload.sql,
+            payload.max_rows,
+            authorize,
+            **(
+                {
+                    "admission": database_jobs.connection_slot(
+                        database, "query", reader, authorize
+                    )
+                }
+                if config.databases.executions_enabled
+                else {}
+            ),
         ),
+    )
+
+
+class ExecutionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    sql: str = Field(min_length=1, max_length=30_000)
+    client_request_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+class PageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    page_index: int = Field(default=0, ge=0, le=2_147_483_647)
+    page_size: int = Field(default=100)
+    view_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+
+
+class ExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    view_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+
+
+class ViewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    column_key: str = Field(min_length=1, max_length=128)
+    direction: Literal["asc", "desc"]
+    client_request_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+def _payload(model, body):
+    try:
+        return model.model_validate(body)
+    except ValidationError:
+        raise HTTPException(422, "Invalid database execution request") from None
+
+
+def _empty(body):
+    if body:
+        raise HTTPException(422, "Database request must be an empty JSON object")
+
+
+async def _job_call(operation):
+    try:
+        with anyio.fail_after(15):
+            return await anyio.to_thread.run_sync(operation, abandon_on_cancel=True)
+    except QueryRejected:
+        raise HTTPException(
+            422, "Query is outside the supported read-only SQL language"
+        ) from None
+    except (database_registry.DatabaseUnavailable, TimeoutError):
+        raise HTTPException(503, "Database operation is unavailable") from None
+
+
+@router.post("/{database_id}/workspaces", status_code=201)
+async def create_workspace(
+    database_id: str,
+    request: Request,
+    reader: str = Depends(require_database_reader),
+    body: dict = Depends(private_request),
+):
+    _empty(body)
+    return await _job_call(
+        partial(database_jobs.create_workspace, request, database_id)
+    )
+
+
+@router.get("/{database_id}/workspaces/{workspace_id}")
+async def workspace(
+    database_id: str,
+    workspace_id: str,
+    request: Request,
+    reader: str = Depends(require_database_reader),
+):
+    if request.query_params:
+        raise HTTPException(422, "Database request parameters are not supported")
+    return await _job_call(
+        partial(database_jobs.workspace, request, database_id, workspace_id)
+    )
+
+
+@router.post("/{database_id}/workspaces/{workspace_id}/executions", status_code=202)
+async def create_execution(
+    database_id: str,
+    workspace_id: str,
+    request: Request,
+    reader: str = Depends(require_database_reader),
+    body: dict = Depends(private_request),
+):
+    payload = _payload(ExecutionRequest, body)
+    return await _job_call(
+        partial(
+            database_jobs.create_execution,
+            request,
+            database_id,
+            workspace_id,
+            payload.sql,
+            payload.client_request_id,
+        )
+    )
+
+
+@router.get("/{database_id}/workspaces/{workspace_id}/executions/{execution_id}")
+async def execution(
+    database_id: str,
+    workspace_id: str,
+    execution_id: str,
+    request: Request,
+    reader: str = Depends(require_database_reader),
+):
+    if request.query_params:
+        raise HTTPException(422, "Database request parameters are not supported")
+    return await _job_call(
+        partial(
+            database_jobs.execution, request, database_id, workspace_id, execution_id
+        )
+    )
+
+
+@router.post("/{database_id}/workspaces/{workspace_id}/executions/{execution_id}/pages")
+async def page(
+    database_id: str,
+    workspace_id: str,
+    execution_id: str,
+    request: Request,
+    reader: str = Depends(require_database_reader),
+    body: dict = Depends(private_request),
+):
+    payload = _payload(PageRequest, body)
+    if payload.page_size not in {25, 50, 100}:
+        raise HTTPException(422, "Database page size must be 25, 50 or 100")
+    return await _job_call(
+        partial(
+            database_jobs.page,
+            request,
+            database_id,
+            workspace_id,
+            execution_id,
+            payload.page_index,
+            payload.page_size,
+            payload.view_id,
+        )
+    )
+
+
+@router.post(
+    "/{database_id}/workspaces/{workspace_id}/executions/{execution_id}/cancel"
+)
+async def cancel(
+    database_id: str,
+    workspace_id: str,
+    execution_id: str,
+    request: Request,
+    reader: str = Depends(require_database_reader),
+    body: dict = Depends(private_request),
+):
+    _empty(body)
+    return await _job_call(
+        partial(database_jobs.cancel, request, database_id, workspace_id, execution_id)
+    )
+
+
+@router.post(
+    "/{database_id}/workspaces/{workspace_id}/executions/{execution_id}/exports",
+    status_code=202,
+)
+async def create_export(
+    database_id: str,
+    workspace_id: str,
+    execution_id: str,
+    request: Request,
+    reader: str = Depends(require_database_reader),
+    body: dict = Depends(private_request),
+):
+    payload = _payload(ExportRequest, body)
+    return await _job_call(
+        partial(
+            database_jobs.create_export,
+            request,
+            database_id,
+            workspace_id,
+            execution_id,
+            payload.view_id,
+        )
+    )
+
+
+@router.post(
+    "/{database_id}/workspaces/{workspace_id}/executions/{execution_id}/views",
+    status_code=202,
+)
+async def create_view(
+    database_id: str,
+    workspace_id: str,
+    execution_id: str,
+    request: Request,
+    reader: str = Depends(require_database_reader),
+    body: dict = Depends(private_request),
+):
+    payload = _payload(ViewRequest, body)
+    return await _job_call(
+        partial(
+            database_views.create_view,
+            request,
+            database_id,
+            workspace_id,
+            execution_id,
+            payload.column_key,
+            payload.direction,
+            payload.client_request_id,
+        )
+    )
+
+
+@router.get(
+    "/{database_id}/workspaces/{workspace_id}/executions/{execution_id}/views/{view_id}"
+)
+async def get_view(
+    database_id: str,
+    workspace_id: str,
+    execution_id: str,
+    view_id: str,
+    request: Request,
+    reader: str = Depends(require_database_reader),
+):
+    if request.query_params:
+        raise HTTPException(422, "Database request parameters are not supported")
+    return await _job_call(
+        partial(
+            database_views.view,
+            request,
+            database_id,
+            workspace_id,
+            execution_id,
+            view_id,
+        )
+    )
+
+
+@router.delete(
+    "/{database_id}/workspaces/{workspace_id}/executions/{execution_id}/views/{view_id}"
+)
+async def delete_view(
+    database_id: str,
+    workspace_id: str,
+    execution_id: str,
+    view_id: str,
+    request: Request,
+    reader: str = Depends(require_database_reader),
+    body: dict = Depends(private_request),
+):
+    _empty(body)
+    return await _job_call(
+        partial(
+            database_views.delete_view,
+            request,
+            database_id,
+            workspace_id,
+            execution_id,
+            view_id,
+        )
+    )
+
+
+@router.get(
+    "/{database_id}/workspaces/{workspace_id}/executions/{execution_id}/exports/{export_id}"
+)
+async def export(
+    database_id: str,
+    workspace_id: str,
+    execution_id: str,
+    export_id: str,
+    request: Request,
+    reader: str = Depends(require_database_reader),
+):
+    if request.query_params:
+        raise HTTPException(422, "Database request parameters are not supported")
+    return await _job_call(
+        partial(
+            database_jobs.export,
+            request,
+            database_id,
+            workspace_id,
+            execution_id,
+            export_id,
+        )
+    )
+
+
+@router.get(
+    "/{database_id}/workspaces/{workspace_id}/executions/{execution_id}/exports/{export_id}/file"
+)
+async def download(
+    database_id: str,
+    workspace_id: str,
+    execution_id: str,
+    export_id: str,
+    request: Request,
+    reader: str = Depends(require_database_reader),
+):
+    if (
+        request.query_params
+        or request.headers.get("sec-fetch-site", "same-origin")
+        not in {"same-origin", "none"}
+        or request.headers.get("origin", config.auth.frontend_url)
+        != config.auth.frontend_url
+    ):
+        raise HTTPException(403, "Invalid database download origin")
+    stream, size = await _job_call(
+        partial(
+            database_jobs.open_download,
+            request,
+            database_id,
+            workspace_id,
+            execution_id,
+            export_id,
+        )
+    )
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="query-{export_id}.xlsx"',
+            "Content-Length": str(size),
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.post("/{database_id}/workspaces/{workspace_id}/purge")
+async def purge(
+    database_id: str,
+    workspace_id: str,
+    request: Request,
+    reader: str = Depends(require_database_reader),
+    body: dict = Depends(private_request),
+):
+    _empty(body)
+    return await _job_call(
+        partial(database_jobs.purge_workspace, request, database_id, workspace_id)
     )

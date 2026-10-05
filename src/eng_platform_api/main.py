@@ -22,6 +22,7 @@ from .routers import (
     catalog,
     costs,
     databases,
+    database_execution_worker,
     deployments,
     deployment_events,
     github_events,
@@ -62,8 +63,7 @@ class _FeatureFlagMCPApp:
                         f"{(config.mcp.issuer_url or base).rstrip('/')}/"
                     ],
                     "scopes_supported": [
-                        "eng-platform.read",
-                        "eng-platform.cost-alerts.send",
+                        "eng-platform.access",
                     ],
                     "bearer_methods_supported": ["header"],
                 }
@@ -71,7 +71,7 @@ class _FeatureFlagMCPApp:
             await response(scope, receive, send)
             return
         if scope.get("path") == "/mcp/cost-alerts":
-            # An opt-in connection negotiates read + alerts without changing /mcp's read default.
+            # Preserve the previous connection URL with the same full-access consent.
             rewritten = {**scope, "path": "/mcp", "raw_path": b"/mcp"}
 
             async def scoped_send(message):
@@ -84,7 +84,7 @@ class _FeatureFlagMCPApp:
                                     f'{config.mcp.public_base_url}/.well-known/oauth-protected-resource/mcp"',
                                     f'{config.mcp.public_base_url}/.well-known/oauth-protected-resource/mcp/cost-alerts"',
                                 )
-                                + ', scope="eng-platform.read eng-platform.cost-alerts.send"'
+                                + ', scope="eng-platform.access"'
                             ).encode()
                         headers.append((name, value))
                     message = {**message, "headers": headers}
@@ -165,7 +165,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[config.auth.frontend_url],
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -175,6 +175,7 @@ app.include_router(health.router)
 app.include_router(catalog.router)
 app.include_router(logs.router)
 app.include_router(databases.router)
+app.include_router(database_execution_worker.router)
 app.include_router(releases.router)
 app.include_router(deployments.router)
 app.include_router(deployment_events.router)
@@ -198,7 +199,7 @@ async def record_request_duration(request: Request, call_next):
         response = await call_next(request)
     except Exception:
         if request.url.path == "/api/databases" or request.url.path.startswith(
-            "/api/databases/"
+            ("/api/databases/", "/api/internal/database-executions/")
         ):
             # Unexpected adapter/parser errors must not expose SQL, DSNs or
             # diagnostics, and must carry the same privacy headers as success.
@@ -227,7 +228,7 @@ async def record_request_duration(request: Request, call_next):
         # Include validation/provider failures, not only successful responses.
         response.headers["Cache-Control"] = "no-store"
     if request.url.path == "/api/databases" or request.url.path.startswith(
-        "/api/databases/"
+        ("/api/databases/", "/api/internal/database-executions/")
     ):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
@@ -277,8 +278,10 @@ async def oauth_authorization_server_metadata():
     )
 
 
-# The MCP SDK provides RFC 9728 metadata, DCR, authorization, token,
-# revocation, and the exact Streamable HTTP route under this same API origin.
+# The MCP SDK provides RFC 9728 metadata, DCR, authorization, token exchange
+# and Streamable HTTP. Our /authorize adapter migrates cached legacy requests
+# to fresh full consent. Our client-bound /revoke route also handles credentials
+# rotated concurrently, without allowing them to authenticate again.
 # Mount last so the regular FastAPI routes always win.
 _mcp_asgi = _FeatureFlagMCPApp(mcp_server.streamable_http_app())
 app.router.routes.append(_MCPRoute(_mcp_asgi))

@@ -16,8 +16,8 @@ from eng_platform_api.main import app
 from eng_platform_api.services import mcp_auth, mcp_store
 
 BASE = "http://localhost:8000"
-READ = "eng-platform.read"
-SEND = "eng-platform.cost-alerts.send"
+READ = "eng-platform.access"
+LEGACY = "eng-platform.read"
 VERIFIER = "v" * 64
 CHALLENGE = (
     base64.urlsafe_b64encode(hashlib.sha256(VERIFIER.encode()).digest())
@@ -109,26 +109,26 @@ def protocol(response):
     )
 
 
-def test_opt_in_discovery_keeps_normal_read_default_and_minimal_challenge():
+def test_both_endpoints_discover_uniform_full_access():
     with TestClient(app, base_url=BASE) as client:
         ordinary = client.get("/.well-known/oauth-protected-resource/mcp").json()
         alert = client.get(
             "/.well-known/oauth-protected-resource/mcp/cost-alerts"
         ).json()
         assert ordinary["scopes_supported"] == [READ]
-        assert alert["scopes_supported"] == [READ, SEND]
+        assert alert["scopes_supported"] == [READ]
         assert alert["resource"] == BASE + "/mcp/cost-alerts"
         assert alert["authorization_servers"] == [BASE + "/"]
         unauthorized = client.get("/mcp/cost-alerts")
         assert unauthorized.status_code == 401
         header = unauthorized.headers["www-authenticate"]
-        assert 'scope="eng-platform.read eng-platform.cost-alerts.send"' in header
+        assert 'scope="eng-platform.access"' in header
         assert (
             f'resource_metadata="{BASE}/.well-known/oauth-protected-resource/mcp/cost-alerts"'
             in header
         )
         assert "deploy" not in header and "rollback" not in header
-        assert SEND not in client.get("/mcp").headers["www-authenticate"]
+        assert "eng-platform.deploy" not in ordinary["scopes_supported"]
         registered = client.post(
             "/register",
             json={
@@ -143,30 +143,34 @@ def test_opt_in_discovery_keeps_normal_read_default_and_minimal_challenge():
 
 
 @pytest.mark.asyncio
-async def test_read_only_login_does_not_request_cost_consent_or_elevate(isolated):
-    isolated["login"] = "reader"
+async def test_any_github_login_requires_explicit_full_consent(isolated):
+    isolated["login"] = "outside-allowlists"
     with TestClient(app, base_url=BASE) as client:
         callback = await begin(client, [READ])
-    assert callback.status_code == 302
-    assert callback.headers["location"].startswith(
-        "https://client.example/callback?code="
-    )
-    assert not mcp_store._memory["consent"]
+        assert (
+            callback.status_code == 302
+            and "/mcp/consent?" in callback.headers["location"]
+        )
+        assert not mcp_store._memory["code"]
+        assert decision(client, callback).status_code == 303
     record = next(iter(mcp_store._memory["code"].values()))
-    assert record["scopes"] == [READ]
-    assert record["subject"] == "reader"
+    assert record["scopes"] == [READ] and record["subject"] == "outside-allowlists"
 
 
 @pytest.mark.asyncio
 async def test_explicit_send_requires_consent_then_pkce_and_does_not_elevate_old_token():
-    old = await mcp_auth.provider._issue_tokens(
-        client_id="old-reader",
-        scopes=[READ],
-        subject="diegomad14",
-        resource=BASE + "/mcp",
+    mcp_store.save(
+        "access",
+        mcp_store.token_key("old-reader"),
+        {
+            "client_id": "old-reader",
+            "scopes": [LEGACY],
+            "subject": "diegomad14",
+            "expires_at": 9999999999,
+        },
     )
     with TestClient(app, base_url=BASE) as client:
-        callback = await begin(client, [READ, SEND])
+        callback = await begin(client, [READ])
         assert (
             callback.status_code == 302
             and "/mcp/consent?" in callback.headers["location"]
@@ -175,11 +179,18 @@ async def test_explicit_send_requires_consent_then_pkce_and_does_not_elevate_old
         assert not mcp_store._memory["code"]
         page = client.get(callback.headers["location"])
         assert page.status_code == 200
-        assert "Enviar alertas" in page.text and "&lt;Client" in page.text
+        assert page.headers["referrer-policy"] == "origin"
+        assert "desplegar y revertir" in page.text and "&lt;Client" in page.text
         assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
+        assert (
+            "form-action 'self' https://client.example;"
+            in page.headers["content-security-policy"]
+        )
+        assert "*" not in page.headers["content-security-policy"]
         assert not mcp_store._memory["code"]
         result = decision(client, callback)
         assert result.status_code == 303
+        assert result.headers["referrer-policy"] == "no-referrer"
         query = parse_qs(urlparse(result.headers["location"]).query)
         assert query["state"] == ["client-state"]
         code = query["code"][0]
@@ -196,10 +207,10 @@ async def test_explicit_send_requires_consent_then_pkce_and_does_not_elevate_old
         )
         token = client.post("/token", data=body)
         assert token.status_code == 200
-        assert set(token.json()["scope"].split()) == {READ, SEND}
+        assert set(token.json()["scope"].split()) == {READ}
         assert client.post("/token", data=body).status_code == 400
         assert decision(client, callback).status_code == 403
-    assert (await mcp_auth.provider.verify_token(old.access_token)).scopes == [READ]
+    assert await mcp_auth.provider.verify_token("old-reader") is None
 
 
 @pytest.mark.asyncio
@@ -207,7 +218,7 @@ async def test_cancel_bad_csrf_cross_origin_and_expired_consent_issue_no_codes(
     monkeypatch,
 ):
     with TestClient(app, base_url=BASE) as client:
-        callback = await begin(client, [READ, SEND])
+        callback = await begin(client, [READ])
         assert decision(client, callback, csrf="wrong").status_code == 403
         consent = parse_qs(urlparse(callback.headers["location"]).query)["consent"][0]
         data = {
@@ -228,7 +239,7 @@ async def test_cancel_bad_csrf_cross_origin_and_expired_consent_issue_no_codes(
             and "error=access_denied" in cancelled.headers["location"]
         )
         assert not mcp_store._memory["code"]
-        callback = await begin(client, [READ, SEND])
+        callback = await begin(client, [READ])
         record = next(iter(mcp_store._memory["consent"].values()))
         record["expires_at"] = 0
         assert client.get(callback.headers["location"]).status_code == 403
@@ -246,12 +257,13 @@ async def test_cancel_bad_csrf_cross_origin_and_expired_consent_issue_no_codes(
 
 
 @pytest.mark.asyncio
-async def test_other_allowed_reader_cannot_obtain_private_send_scope(isolated):
+async def test_other_account_can_consent_to_all_actions(isolated):
     isolated["login"] = "reader"
     with TestClient(app, base_url=BASE) as client:
-        callback = await begin(client, [READ, SEND])
-    assert callback.status_code == 403
-    assert not mcp_store._memory["code"] and not mcp_store._memory["consent"]
+        callback = await begin(client, [READ])
+        assert callback.status_code == 302
+        assert decision(client, callback).status_code == 303
+    assert next(iter(mcp_store._memory["code"].values()))["subject"] == "reader"
 
 
 @pytest.mark.asyncio
@@ -260,7 +272,9 @@ async def test_transport_describes_send_scope_and_returns_chatgpt_scope_challeng
 ):
     from eng_platform_api.services import cost_alerts
 
-    monkeypatch.setattr(cost_alerts, "send", lambda subject: {"status": "test_no_send"})
+    monkeypatch.setattr(
+        cost_alerts, "send", lambda subject, **kwargs: {"status": "test_no_send"}
+    )
     issued = await mcp_auth.provider._issue_tokens(
         client_id="reader", scopes=[READ], subject="diegomad14", resource=BASE + "/mcp"
     )
@@ -280,7 +294,7 @@ async def test_transport_describes_send_scope_and_returns_chatgpt_scope_challeng
         tool = next(
             t for t in listing["result"]["tools"] if t["name"] == "send_cost_alert"
         )
-        assert tool["securitySchemes"] == [{"type": "oauth2", "scopes": [READ, SEND]}]
+        assert tool["securitySchemes"] == [{"type": "oauth2", "scopes": [READ]}]
         assert tool["_meta"]["securitySchemes"] == tool["securitySchemes"]
         call = {
             "jsonrpc": "2.0",
@@ -288,19 +302,16 @@ async def test_transport_describes_send_scope_and_returns_chatgpt_scope_challeng
             "method": "tools/call",
             "params": {"name": "send_cost_alert", "arguments": {}},
         }
-        failure = protocol(client.post("/mcp/cost-alerts", headers=headers, json=call))[
-            "result"
-        ]
-        assert failure["isError"]
-        challenge = failure["_meta"]["mcp/www_authenticate"][0]
+        legacy_headers = {**headers, "Authorization": "Bearer old-reader"}
         assert (
-            'error="insufficient_scope"' in challenge
-            and 'scope="eng-platform.read eng-platform.cost-alerts.send"' in challenge
+            client.post(
+                "/mcp/cost-alerts", headers=legacy_headers, json=call
+            ).status_code
+            == 401
         )
-        assert "deploy" not in challenge and "rollback" not in challenge
         explicit = await mcp_auth.provider._issue_tokens(
             client_id="alerts",
-            scopes=[READ, SEND],
+            scopes=[READ],
             subject="diegomad14",
             resource=BASE + "/mcp/cost-alerts",
         )
@@ -317,27 +328,44 @@ async def test_transport_describes_send_scope_and_returns_chatgpt_scope_challeng
 
 
 @pytest.mark.asyncio
-async def test_read_refresh_and_registration_cannot_silently_add_send():
+async def test_legacy_registration_and_refresh_require_reconnection():
     with TestClient(app, base_url=BASE) as client:
-        await begin(client, [READ])
-        issued = await mcp_auth.provider._issue_tokens(
-            client_id="cost-client",
-            scopes=[READ],
-            subject="diegomad14",
-            resource=BASE + "/mcp",
-        )
         rejected = client.post(
-            "/token",
-            data={
-                "grant_type": "refresh_token",
-                "client_id": "cost-client",
-                "refresh_token": issued.refresh_token,
-                "scope": f"{READ} {SEND}",
+            "/register",
+            json={
+                "redirect_uris": ["https://client.example/callback"],
+                "token_endpoint_auth_method": "none",
+                "grant_types": ["authorization_code", "refresh_token"],
+                "scope": LEGACY,
             },
         )
         assert rejected.status_code == 400
-        registration = await mcp_auth.provider.get_client("cost-client")
-        assert registration.scope == READ
-        assert (await mcp_auth.provider.verify_token(issued.access_token)).scopes == [
-            READ
-        ]
+        mcp_store.save(
+            "client",
+            "old-client",
+            {
+                "metadata": OAuthClientInformationFull(
+                    client_id="old-client",
+                    redirect_uris=["https://client.example/callback"],
+                    token_endpoint_auth_method="none",
+                    scope=LEGACY,
+                ).model_dump(mode="json")
+            },
+        )
+        mcp_store.save(
+            "refresh",
+            mcp_store.token_key("old-refresh"),
+            {"client_id": "old-client", "scopes": [LEGACY], "expires_at": 9999999999},
+        )
+        assert (
+            client.post(
+                "/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "client_id": "old-client",
+                    "refresh_token": "old-refresh",
+                    "scope": READ,
+                },
+            ).status_code
+            == 400
+        )
