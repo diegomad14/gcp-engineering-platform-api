@@ -156,7 +156,32 @@ def require_database_reader(request: Request) -> str:
         or identity.lower() not in config.databases.allowed_logins
     ):
         raise HTTPException(403, "You are not allowed to query databases")
+    if getattr(config.databases, "executions_enabled", False):
+        from .services import database_sessions
+
+        database_sessions.require(request)
     return identity
+
+
+def database_session_required(request: Request) -> bool:
+    """Indicate a fresh OAuth handshake only to an otherwise authorized reader."""
+    identity = log_reader_identity(request)
+    if (
+        not getattr(config.databases, "executions_enabled", False)
+        or not config.databases.enabled
+        or not log_auth_configured()
+        or not identity
+        or identity.lower() not in config.databases.allowed_logins
+    ):
+        return False
+    from .services import database_sessions
+
+    try:
+        database_sessions.require(request)
+    except HTTPException as exc:
+        # An unavailable revocation store cannot authorize or request renewal.
+        return exc.status_code == 401
+    return False
 
 
 def can_query_databases(request: Request) -> bool:

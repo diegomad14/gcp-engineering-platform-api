@@ -20,6 +20,7 @@ def test_session_is_anonymous_without_oauth_cookie():
         "can_view_logs": False,
         "can_view_catalog": False,
         "can_query_databases": False,
+        "database_session_required": False,
         "login": "",
         "avatar_url": "",
     }
@@ -110,6 +111,7 @@ def test_github_oauth_login_and_callback_preserve_safe_destination(
         "can_view_logs": False,
         "can_view_catalog": False,
         "can_query_databases": False,
+        "database_session_required": False,
         "login": "diegomad14",
         "avatar_url": "https://avatars.example/diegomad14",
     }

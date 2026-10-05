@@ -13,6 +13,7 @@ from authlib.integrations.httpx_client import (  # type: ignore[import-untyped]
 )
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
+from starlette.concurrency import run_in_threadpool
 
 from ..config import config
 from ..models import AuthSession
@@ -20,6 +21,7 @@ from ..security import (
     can_query_databases,
     can_view_catalog,
     can_view_logs,
+    database_session_required,
     get_identity,
 )
 
@@ -72,12 +74,17 @@ async def current_session(request: Request):
     can_deploy = identity != "anonymous" and (
         bool(allowed) and identity.lower() in allowed
     )
+    can_query = await run_in_threadpool(can_query_databases, request)
+    renewal_required = not can_query and await run_in_threadpool(
+        database_session_required, request
+    )
     return AuthSession(
         authenticated=identity != "anonymous",
         can_deploy=can_deploy,
         can_view_logs=can_view_logs(request),
         can_view_catalog=can_view_catalog(request),
-        can_query_databases=can_query_databases(request),
+        can_query_databases=can_query,
+        database_session_required=renewal_required,
         login="" if identity == "anonymous" else identity,
         avatar_url=str(request.session.get("github_avatar_url", "")),
     )
@@ -179,6 +186,17 @@ async def github_callback(request: Request):
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="GitHub did not return a user login",
         )
+    from ..services import database_sessions
+
+    if config.mock_mode:
+        # A development callback can never establish a production DB session.
+        request.session.pop(database_sessions.COOKIE_FIELD, None)
+    elif getattr(config.databases, "executions_enabled", False):
+        # Account changes and repeated OAuth handshakes invalidate the previous
+        # server session before a fresh nonce replaces it in the signed cookie.
+        await run_in_threadpool(_revoke_database_session, request)
+        nonce = await run_in_threadpool(database_sessions.create, login)
+        request.session[database_sessions.COOKIE_FIELD] = nonce
     request.session["github_login"] = login
     request.session["github_auth_provider"] = "github_oauth"
     request.session["github_avatar_url"] = str(user.get("avatar_url", ""))
@@ -192,5 +210,21 @@ async def github_callback(request: Request):
 
 @router.post("/logout", response_model=AuthSession)
 async def logout(request: Request):
+    await run_in_threadpool(_revoke_database_session, request)
     request.session.clear()
     return AuthSession()
+
+
+def _revoke_database_session(request: Request) -> None:
+    from ..services import database_sessions
+
+    session_id = database_sessions.revoke(request)
+    if session_id is not None:
+        try:
+            from ..services import database_jobs
+
+            database_jobs.purge_session(session_id)
+        except Exception:
+            # Revocation already prevents reads and future worker phases. The
+            # control-plane cleanup can reconcile deletion independently.
+            return

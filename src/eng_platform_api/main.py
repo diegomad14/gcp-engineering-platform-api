@@ -21,6 +21,7 @@ from .routers import (
     catalog,
     costs,
     databases,
+    database_execution_worker,
     deployments,
     deployment_events,
     github_events,
@@ -174,6 +175,7 @@ app.include_router(health.router)
 app.include_router(catalog.router)
 app.include_router(logs.router)
 app.include_router(databases.router)
+app.include_router(database_execution_worker.router)
 app.include_router(releases.router)
 app.include_router(deployments.router)
 app.include_router(deployment_events.router)
@@ -197,7 +199,7 @@ async def record_request_duration(request: Request, call_next):
         response = await call_next(request)
     except Exception:
         if request.url.path == "/api/databases" or request.url.path.startswith(
-            "/api/databases/"
+            ("/api/databases/", "/api/internal/database-executions/")
         ):
             # Unexpected adapter/parser errors must not expose SQL, DSNs or
             # diagnostics, and must carry the same privacy headers as success.
@@ -226,7 +228,7 @@ async def record_request_duration(request: Request, call_next):
         # Include validation/provider failures, not only successful responses.
         response.headers["Cache-Control"] = "no-store"
     if request.url.path == "/api/databases" or request.url.path.startswith(
-        "/api/databases/"
+        ("/api/databases/", "/api/internal/database-executions/")
     ):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
