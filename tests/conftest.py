@@ -35,6 +35,11 @@ def mcp_durable_test_store(request, monkeypatch):
     from eng_platform_api.services import database_job_store
     from tests.mcp_helpers import Control
 
+    if request.module.__name__.split(".")[-1] == "test_private_metadata_access":
+        from eng_platform_api.services import mcp_store
+
+        monkeypatch.setattr(mcp_store, "_collection", lambda _: None)
+
     monkeypatch.setattr(config.mcp, "enabled", True)
     with database_job_store.testing_backend(Control()) as backend:
         yield backend
