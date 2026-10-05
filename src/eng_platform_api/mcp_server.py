@@ -17,7 +17,7 @@ from mcp.server.auth.settings import (
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, Tool
-from pydantic import AnyHttpUrl
+from pydantic import AnyHttpUrl, ValidationError
 
 from .config import catalog_source_identity, config
 from .routers import costs, metrics, releases
@@ -30,20 +30,23 @@ from .services import (
     mcp_store,
 )
 from .services.mcp_auth import _SCOPES, provider
-from .security import require_private_catalog_reader
+from .services import mcp_grants, log_catalog
+from .services import database_jobs, database_views, database_registry, database_console
+from .services.database_sql import QueryRejected
+from .services.database_registry import DatabaseUnavailable
 
 _BASE_URL = config.mcp.public_base_url or "http://localhost:8000"
 _RESOURCE_URL = f"{_BASE_URL}/mcp"
 _PUBLIC_ORIGIN = urlparse(_BASE_URL)
-_COST_ALERT_SCOPES = ["eng-platform.read", "eng-platform.cost-alerts.send"]
+_ACCESS_SCOPES = [mcp_grants.SCOPE]
 
 
 class _ScopedFastMCP(FastMCP):
     async def list_tools(self) -> list[Tool]:
         tools = await super().list_tools()
         for index, tool in enumerate(tools):
-            if tool.name == "send_cost_alert":
-                schemes = [{"type": "oauth2", "scopes": _COST_ALERT_SCOPES}]
+            if tool.name:
+                schemes = [{"type": "oauth2", "scopes": _ACCESS_SCOPES}]
                 tools[index] = tool.model_copy(
                     update={
                         "securitySchemes": schemes,
@@ -56,8 +59,9 @@ class _ScopedFastMCP(FastMCP):
 mcp = _ScopedFastMCP(
     "eng-platform",
     instructions=(
-        "Use eng-platform only for read-only release insight and authorized tagged "
-        "deployments or rollbacks, plus explicitly scoped cost alerts to the approved private recipient. "
+        "Use eng-platform for platform insight, tagged deployments, rollbacks, cost alerts "
+        "and read-only PostgreSQL queries. Queries are asynchronous; poll status and "
+        "read individual pages, never automatically retrieve every page. "
         "The platform, not the client, chooses its executor."
     ),
     auth_server_provider=provider,
@@ -72,11 +76,11 @@ mcp = _ScopedFastMCP(
         issuer_url=AnyHttpUrl(config.mcp.issuer_url or _BASE_URL),
         resource_server_url=AnyHttpUrl(_RESOURCE_URL),
         validate_token_resource=False,
-        required_scopes=["eng-platform.read"],
+        required_scopes=["eng-platform.access"],
         client_registration_options=ClientRegistrationOptions(
             enabled=True,
             valid_scopes=sorted(_SCOPES),
-            default_scopes=["eng-platform.read"],
+            default_scopes=["eng-platform.access"],
         ),
         revocation_options=RevocationOptions(enabled=True),
     ),
@@ -92,20 +96,57 @@ def _fingerprint(value: dict[str, Any]) -> str:
     safe = {
         key: value[key]
         for key in sorted(value)
-        if key not in {"token", "secret", "authorization"}
+        if key
+        not in {
+            "token",
+            "secret",
+            "authorization",
+            "sql",
+            "statement",
+            "rows",
+            "reason",
+        }
     }
     return hashlib.sha256(
         json.dumps(safe, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
 
 
-def _identity(scope: str) -> tuple[str, str]:
+def _principal() -> mcp_grants.Principal:
     token = get_access_token()
     if token is None or not token.subject:
-        raise HTTPException(status_code=401, detail="MCP authentication required")
-    if scope not in token.scopes:
-        raise HTTPException(status_code=403, detail=f"MCP scope '{scope}' is required")
-    return token.subject, token.client_id
+        raise HTTPException(401, "MCP authentication required")
+    if token.scopes != [mcp_grants.SCOPE]:
+        raise HTTPException(403, "Reconnect MCP to authorize full access")
+    record = provider._credential("access", token.token)
+    if (
+        not record
+        or record.get("subject") != token.subject
+        or record.get("client_id") != token.client_id
+    ):
+        raise HTTPException(401, "MCP authentication was revoked")
+    return mcp_grants.principal(
+        mcp_grants.validate(record["session_id"], token.subject)
+    )
+
+
+def _identity(scope: str) -> tuple[str, str]:
+    value = _principal()
+    return value.login, value.client_id
+
+
+def _catalog_access(
+    subject: str, service_name: str | None = None, *, filtered_catalog=False
+):
+    _principal()
+    try:
+        resources = log_catalog.resources()
+    except log_catalog.CatalogUnavailable:
+        raise HTTPException(503, "Runtime catalog is unavailable") from None
+    visible = {item.service_id for item in resources}
+    if service_name and service_name not in visible:
+        raise HTTPException(404, "Service not found")
+    return visible
 
 
 def _audit(
@@ -132,14 +173,14 @@ def _audit(
 
 
 def _read(tool: str, payload: dict[str, Any], action, *, filtered_catalog=False):
-    subject, client_id = _identity("eng-platform.read")
+    subject, client_id = _identity("eng-platform.access")
     source = catalog_source_identity()
-    visible = require_private_catalog_reader(
+    visible = _catalog_access(
         subject, payload.get("service_name"), filtered_catalog=filtered_catalog
     )
     try:
         value = action(visible) if filtered_catalog else action()
-        require_private_catalog_reader(
+        _catalog_access(
             subject, payload.get("service_name"), filtered_catalog=filtered_catalog
         )
         if source != catalog_source_identity():
@@ -167,16 +208,13 @@ def _read(tool: str, payload: dict[str, Any], action, *, filtered_catalog=False)
 
 def _mutate(tool: str, payload: dict[str, Any], scope: str, action):
     subject, client_id = _identity(scope)
-    if subject.lower() not in config.auth.allowed_logins:
-        raise HTTPException(
-            status_code=403, detail="GitHub user is not allowed to operate eng-platform"
-        )
     if mcp_store.mutation_count(subject) >= config.mcp.mutation_limit_per_hour:
         raise HTTPException(
             status_code=429, detail="MCP mutation limit reached; retry after one hour"
         )
     try:
-        value = action(subject)
+        with mcp_grants.authority(_principal()):
+            value = action(subject)
     except Exception:
         _audit(
             subject=subject,
@@ -292,7 +330,7 @@ def start_deployment(
     return _mutate(
         "start_deployment",
         payload,
-        "eng-platform.deploy",
+        "eng-platform.access",
         lambda subject: deployment_commands.start_deployment(
             service_name=service_name,
             tag_name=tag,
@@ -353,7 +391,7 @@ def start_rollback(
     return _mutate(
         "start_rollback",
         payload,
-        "eng-platform.rollback",
+        "eng-platform.access",
         lambda subject: deployment_commands.start_rollback(
             service_name=service_name,
             target_deployment_id=deployment_id,
@@ -430,7 +468,10 @@ def send_cost_alert() -> dict[str, Any]:
     from .services import cost_alerts
 
     return _mutate(
-        "send_cost_alert", {}, "eng-platform.cost-alerts.send", cost_alerts.send
+        "send_cost_alert",
+        {},
+        "eng-platform.access",
+        lambda subject: cost_alerts.send(subject, mcp_authority=_principal()),
     )
 
 
@@ -441,7 +482,7 @@ def _send_cost_alert_tool() -> CallToolResult:
     if (
         token is None
         or not token.subject
-        or not set(_COST_ALERT_SCOPES).issubset(token.scopes)
+        or not set(_ACCESS_SCOPES).issubset(token.scopes)
     ):
         error = (
             "invalid_token"
@@ -449,16 +490,16 @@ def _send_cost_alert_tool() -> CallToolResult:
             else "insufficient_scope"
         )
         challenge = (
-            f'Bearer error="{error}", error_description="Explicit cost alert authorization required", '
+            f'Bearer error="{error}", error_description="Full Engineering Platform authorization required", '
             f'resource_metadata="{_BASE_URL}/.well-known/oauth-protected-resource/mcp/cost-alerts", '
-            f'scope="{" ".join(_COST_ALERT_SCOPES)}"'
+            f'scope="{" ".join(_ACCESS_SCOPES)}"'
         )
         return CallToolResult(
             isError=True,
             content=[
                 TextContent(
                     type="text",
-                    text="Authorize reading costs and sending private cost alerts to continue.",
+                    text="Reconnect MCP to authorize all platform actions.",
                 )
             ],
             _meta={"mcp/www_authenticate": [challenge]},
@@ -473,13 +514,13 @@ def _send_cost_alert_tool() -> CallToolResult:
 @mcp.tool()
 async def get_metrics_summary(window: Literal["1h", "24h"] = "24h") -> dict[str, Any]:
     """Get public Cloud Run operational metrics from the existing monitoring source."""
-    subject, client_id = _identity("eng-platform.read")
+    subject, client_id = _identity("eng-platform.access")
     source = catalog_source_identity()
-    require_private_catalog_reader(subject)
+    _catalog_access(subject)
     payload = {"window": window}
     try:
         value = await metrics.get_cloud_run_metrics(window)
-        require_private_catalog_reader(subject)
+        _catalog_access(subject)
         if source != catalog_source_identity():
             raise HTTPException(503, "Runtime catalog changed; retry the request")
     except Exception:
@@ -501,3 +542,300 @@ async def get_metrics_summary(window: Literal["1h", "24h"] = "24h") -> dict[str,
         result="ok",
     )
     return _serialized(value)
+
+
+def _database_payload(model, **value):
+    try:
+        return model(**value)
+    except ValidationError:
+        raise HTTPException(422, "Invalid database request") from None
+
+
+# These are storage operations against the existing engine, not deployment
+# mutations. They use its own distributed admission and sanitized audit trail.
+def _database_call(tool: str, payload: dict, action):
+    principal = _principal()
+    try:
+        database_jobs._session(principal)
+        value = action(principal)
+        database_jobs._session(principal)
+    except QueryRejected:
+        _audit(
+            subject=principal.login,
+            client_id=principal.client_id,
+            tool=tool,
+            payload=payload,
+            mutation=False,
+            result="error",
+        )
+        raise HTTPException(
+            422, "Query is outside the supported read-only SQL language"
+        ) from None
+    except DatabaseUnavailable:
+        _audit(
+            subject=principal.login,
+            client_id=principal.client_id,
+            tool=tool,
+            payload=payload,
+            mutation=False,
+            result="error",
+        )
+        raise HTTPException(503, "Database operation is unavailable") from None
+    except Exception:
+        _audit(
+            subject=principal.login,
+            client_id=principal.client_id,
+            tool=tool,
+            payload=payload,
+            mutation=False,
+            result="error",
+        )
+        raise
+    _audit(
+        subject=principal.login,
+        client_id=principal.client_id,
+        tool=tool,
+        payload=payload,
+        mutation=False,
+        result="ok",
+    )
+    return value
+
+
+@mcp.tool()
+def list_databases() -> dict[str, Any]:
+    """List enabled PostgreSQL databases. SQL is read-only; complete captures expire in one hour."""
+
+    def action(principal):
+        return {
+            "databases": [
+                database.public() for database in database_registry.databases()
+            ],
+            "workspace_enabled": True,
+            "global_sort_enabled": True,
+            "workspace_limits": {
+                "timeout_seconds": 240,
+                "page_sizes": [25, 50, 100],
+                "retention_seconds": 3600,
+            },
+        }
+
+    return _database_call("list_databases", {}, action)
+
+
+@mcp.tool()
+def get_database_schema(database_id: str) -> dict[str, Any]:
+    """Get tables, complete columns/types and associated services for an enabled database."""
+
+    def action(principal):
+        session = database_jobs._session(principal)
+        database = database_jobs._database(database_id, principal.login, session)
+
+        def authorize():
+            current = database_jobs._session(principal)
+            if database != database_jobs._database(
+                database_id, principal.login, current
+            ):
+                raise HTTPException(403, "Database permission changed")
+
+        return database_console.read_schema(
+            database,
+            authorize,
+            admission=database_jobs.connection_slot(
+                database, "metadata", principal.login, authorize
+            ),
+        )
+
+    return _database_call("get_database_schema", {"database_id": database_id}, action)
+
+
+@mcp.tool()
+def create_database_workspace(database_id: str) -> dict[str, Any]:
+    """Create a private workspace belonging to this OAuth connection."""
+    return _database_call(
+        "create_database_workspace",
+        {"database_id": database_id},
+        lambda principal: database_jobs.create_workspace(principal, database_id),
+    )
+
+
+@mcp.tool()
+def start_database_query(
+    database_id: str, workspace_id: str, sql: str, client_request_id: str
+) -> dict[str, Any]:
+    """Start asynchronous read-only SQL once. Poll get_database_query; do not resubmit to poll."""
+    from .routers.databases import ExecutionRequest
+
+    payload = _database_payload(
+        ExecutionRequest, sql=sql, client_request_id=client_request_id
+    )
+    return _database_call(
+        "start_database_query",
+        {
+            "database_id": database_id,
+            "workspace_id": workspace_id,
+            "client_request_id": client_request_id,
+        },
+        lambda principal: database_jobs.create_execution(
+            principal, database_id, workspace_id, payload.sql, payload.client_request_id
+        ),
+    )
+
+
+@mcp.tool()
+def get_database_query(
+    database_id: str, workspace_id: str, execution_id: str
+) -> dict[str, Any]:
+    """Get execution status, typed columns, final row count and expiry. Poll pending work with backoff."""
+    return _database_call(
+        "get_database_query",
+        {
+            "database_id": database_id,
+            "workspace_id": workspace_id,
+            "execution_id": execution_id,
+        },
+        lambda principal: database_jobs.execution(
+            principal, database_id, workspace_id, execution_id
+        ),
+    )
+
+
+@mcp.tool()
+def get_database_page(
+    database_id: str,
+    workspace_id: str,
+    execution_id: str,
+    page_index: int = 0,
+    page_size: Literal[25, 50, 100] = 25,
+    view_id: str | None = None,
+) -> dict[str, Any]:
+    """Read one page of a completed immutable capture/view. Zero-based pages; default 25 rows."""
+    from .routers.databases import PageRequest
+
+    payload = _database_payload(
+        PageRequest, page_index=page_index, page_size=page_size, view_id=view_id
+    )
+    return _database_call(
+        "get_database_page",
+        {
+            "database_id": database_id,
+            "workspace_id": workspace_id,
+            "execution_id": execution_id,
+            **payload.model_dump(),
+        },
+        lambda principal: database_jobs.page(
+            principal,
+            database_id,
+            workspace_id,
+            execution_id,
+            payload.page_index,
+            payload.page_size,
+            payload.view_id,
+        ),
+    )
+
+
+@mcp.tool()
+def cancel_database_query(
+    database_id: str, workspace_id: str, execution_id: str
+) -> dict[str, Any]:
+    """Cancel pending execution; never executes SQL again."""
+    return _database_call(
+        "cancel_database_query",
+        {
+            "database_id": database_id,
+            "workspace_id": workspace_id,
+            "execution_id": execution_id,
+        },
+        lambda principal: database_jobs.cancel(
+            principal, database_id, workspace_id, execution_id
+        ),
+    )
+
+
+@mcp.tool()
+def create_database_view(
+    database_id: str,
+    workspace_id: str,
+    execution_id: str,
+    column_key: str,
+    direction: Literal["asc", "desc"],
+    client_request_id: str,
+) -> dict[str, Any]:
+    """Sort the entire completed capture asynchronously, by unique column key. NULL last; stable ties."""
+    from .routers.databases import ViewRequest
+
+    payload = _database_payload(
+        ViewRequest,
+        column_key=column_key,
+        direction=direction,
+        client_request_id=client_request_id,
+    )
+    return _database_call(
+        "create_database_view",
+        {
+            "database_id": database_id,
+            "workspace_id": workspace_id,
+            "execution_id": execution_id,
+            **payload.model_dump(),
+        },
+        lambda principal: database_views.create_view(
+            principal,
+            database_id,
+            workspace_id,
+            execution_id,
+            payload.column_key,
+            payload.direction,
+            payload.client_request_id,
+        ),
+    )
+
+
+@mcp.tool()
+def get_database_view(
+    database_id: str, workspace_id: str, execution_id: str, view_id: str
+) -> dict[str, Any]:
+    """Get sorted-view status and inherited capture expiry. Use pages only after completion."""
+    return _database_call(
+        "get_database_view",
+        {
+            "database_id": database_id,
+            "workspace_id": workspace_id,
+            "execution_id": execution_id,
+            "view_id": view_id,
+        },
+        lambda principal: database_views.view(
+            principal, database_id, workspace_id, execution_id, view_id
+        ),
+    )
+
+
+@mcp.tool()
+def cancel_database_view(
+    database_id: str, workspace_id: str, execution_id: str, view_id: str
+) -> dict[str, Any]:
+    """Cancel or purge a sorted view; the original capture remains available."""
+    return _database_call(
+        "cancel_database_view",
+        {
+            "database_id": database_id,
+            "workspace_id": workspace_id,
+            "execution_id": execution_id,
+            "view_id": view_id,
+        },
+        lambda principal: database_views.delete_view(
+            principal, database_id, workspace_id, execution_id, view_id
+        ),
+    )
+
+
+@mcp.tool()
+def purge_database_workspace(database_id: str, workspace_id: str) -> dict[str, Any]:
+    """Invalidate a workspace and purge its private captures and derived objects."""
+    return _database_call(
+        "purge_database_workspace",
+        {"database_id": database_id, "workspace_id": workspace_id},
+        lambda principal: database_jobs.purge_workspace(
+            principal, database_id, workspace_id
+        ),
+    )

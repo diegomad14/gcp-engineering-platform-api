@@ -39,8 +39,10 @@ def expires_in(seconds: int) -> str:
 
 
 def _collection(kind: str):
-    if config.mock_mode or not config.mcp.oauth_collection:
+    if config.mock_mode:
         return None
+    if not config.mcp.oauth_collection:
+        raise RuntimeError("Persistent MCP OAuth storage is required")
     from google.cloud import firestore
 
     project = config.monitoring.gcp_project_id or config.cloud_build.project_id
@@ -81,12 +83,12 @@ def delete(kind: str, key: str) -> None:
 _consent_lock = RLock()
 
 
-def consume_consent(key: str) -> dict[str, Any] | None:
+def consume(kind: str, key: str) -> dict[str, Any] | None:
     """Consume one approved OAuth consent atomically; never issue two codes on replay."""
-    collection = _collection("consent")
+    collection = _collection(kind)
     if collection is None:
         with _consent_lock:
-            return _memory["consent"].pop(key, None)
+            return _memory.setdefault(kind, {}).pop(key, None)
     from google.cloud.firestore import transactional
 
     document = collection.document(key)
@@ -176,3 +178,7 @@ def update_cost_alert(key: str, transform):
         return result
 
     return update(document._client.transaction())
+
+
+def consume_consent(key: str) -> dict[str, Any] | None:
+    return consume("consent", key)

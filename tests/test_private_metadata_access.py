@@ -7,7 +7,7 @@ from unittest.mock import Mock
 from fastapi import HTTPException
 from mcp.server.auth.middleware.auth_context import auth_context_var
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
-from mcp.server.auth.provider import AccessToken
+from tests.mcp_helpers import access_token
 import pytest
 
 from eng_platform_api import mcp_server
@@ -215,37 +215,31 @@ def test_machine_quality_evidence_remains_reachable_without_browser_session(
 def mcp_context(login="demo-reader", scopes=None):
     return auth_context_var.set(
         AuthenticatedUser(
-            AccessToken(
+            access_token(
                 token="synthetic-context",
                 client_id="synthetic-client",
                 subject=login,
-                scopes=["eng-platform.read"] if scopes is None else scopes,
+                scopes=["eng-platform.access"] if scopes is None else scopes,
             )
         )
     )
 
 
-def test_mcp_requires_current_approved_principal_and_filters_catalog(
+def test_mcp_full_access_is_independent_of_web_allowlists(
     monkeypatch, private_authority
 ):
-    token = mcp_context()
+    token = mcp_context(login="outside-allowlists")
     try:
         assert mcp_server.list_services()["total"] == 1
         monkeypatch.setattr(config.logs, "allowed_logins", ())
-        with pytest.raises(HTTPException) as error:
-            mcp_server.list_services()
-        assert error.value.status_code == 403
-        monkeypatch.setattr(config.logs, "allowed_logins", ("demo-reader",))
+        assert mcp_server.list_services()["total"] == 1
         document = deepcopy(PRIVATE)
         hidden = deepcopy(document["services"][0])
         hidden["service_name"] = "future-disabled"
         hidden["logs"] = {"enabled": False, "allowed_logins": []}
         document["services"].append(hidden)
         replace_authority(monkeypatch, private_authority, document)
-        assert mcp_server.list_services()["total"] == 1
-        with pytest.raises(HTTPException) as error:
-            mcp_server.get_service("future-disabled")
-        assert error.value.status_code == 403
+        assert mcp_server.list_services()["total"] == 2
     finally:
         auth_context_var.reset(token)
 
@@ -340,7 +334,7 @@ def test_mcp_rechecks_private_policy_after_provider_io(monkeypatch):
     token = mcp_context()
 
     def late_response():
-        monkeypatch.setattr(config.logs, "allowed_logins", ())
+        monkeypatch.setattr(config.mcp, "enabled", False)
         return {"private_result": "must-not-return"}
 
     try:
@@ -348,7 +342,7 @@ def test_mcp_rechecks_private_policy_after_provider_io(monkeypatch):
             mcp_server._read(
                 "get_service", {"service_name": "private-example"}, late_response
             )
-        assert error.value.status_code == 403
+        assert error.value.status_code == 401
     finally:
         auth_context_var.reset(token)
 

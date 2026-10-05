@@ -62,8 +62,7 @@ class _FeatureFlagMCPApp:
                         f"{(config.mcp.issuer_url or base).rstrip('/')}/"
                     ],
                     "scopes_supported": [
-                        "eng-platform.read",
-                        "eng-platform.cost-alerts.send",
+                        "eng-platform.access",
                     ],
                     "bearer_methods_supported": ["header"],
                 }
@@ -71,7 +70,7 @@ class _FeatureFlagMCPApp:
             await response(scope, receive, send)
             return
         if scope.get("path") == "/mcp/cost-alerts":
-            # An opt-in connection negotiates read + alerts without changing /mcp's read default.
+            # Preserve the previous connection URL with the same full-access consent.
             rewritten = {**scope, "path": "/mcp", "raw_path": b"/mcp"}
 
             async def scoped_send(message):
@@ -84,7 +83,7 @@ class _FeatureFlagMCPApp:
                                     f'{config.mcp.public_base_url}/.well-known/oauth-protected-resource/mcp"',
                                     f'{config.mcp.public_base_url}/.well-known/oauth-protected-resource/mcp/cost-alerts"',
                                 )
-                                + ', scope="eng-platform.read eng-platform.cost-alerts.send"'
+                                + ', scope="eng-platform.access"'
                             ).encode()
                         headers.append((name, value))
                     message = {**message, "headers": headers}

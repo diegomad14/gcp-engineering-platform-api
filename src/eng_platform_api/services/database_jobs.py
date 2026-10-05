@@ -13,6 +13,7 @@ import time
 from typing import Any, BinaryIO, Callable, cast
 
 from fastapi import HTTPException, Request
+from .mcp_grants import Principal
 from psycopg.conninfo import conninfo_to_dict
 
 from ..config import config
@@ -95,16 +96,25 @@ def active_policy() -> str:
     return version
 
 
-def _database(identity: str, login: str) -> database_registry.Database:
+def _database(
+    identity: str, login: str, session: dict | None = None
+) -> database_registry.Database:
     for database in database_registry.databases():
-        if database.id == identity and database.can_read(login):
+        if database.id == identity and (
+            (session and session.get("source") == "mcp") or database.can_read(login)
+        ):
             return database
     raise HTTPException(404, "Database not found")
 
 
-def _session(request: Request) -> dict:
+def _session(request: Request | Principal) -> dict:
     from ..security import require_database_reader
 
+    if isinstance(request, Principal):
+        from . import mcp_grants
+
+        active_policy()
+        return mcp_grants.require(request)
     require_database_reader(request)
     active_policy()
     return database_sessions.require(request)
@@ -122,11 +132,13 @@ def _workspace(workspace_id: str, session: dict, database_id: str) -> dict:
         raise HTTPException(410, "Database workspace is unavailable")
     if value.get("policy_version") != active_policy():
         raise HTTPException(403, "Database permission changed")
-    _database(database_id, session["login"])
+    _database(database_id, session["login"], session)
     return value
 
 
-def workspace(request: Request, database_id: str, workspace_id: str) -> dict:
+def workspace(
+    request: Request | Principal, database_id: str, workspace_id: str
+) -> dict:
     session = _session(request)
     value = _workspace(workspace_id, session, database_id)
     return {
@@ -135,9 +147,9 @@ def workspace(request: Request, database_id: str, workspace_id: str) -> dict:
     }
 
 
-def create_workspace(request: Request, database_id: str) -> dict:
+def create_workspace(request: Request | Principal, database_id: str) -> dict:
     session = _session(request)
-    _database(database_id, session["login"])
+    _database(database_id, session["login"], session)
     identity = secrets.token_hex(16)
     value = {
         "kind": "workspace",
@@ -208,7 +220,7 @@ def _reserve(control: dict, identity: str, owner: str, size: int) -> None:
 
 
 def create_execution(
-    request: Request,
+    request: Request | Principal,
     database_id: str,
     workspace_id: str,
     statement: str,
@@ -216,7 +228,7 @@ def create_execution(
 ) -> dict:
     session = _session(request)
     place = _workspace(workspace_id, session, database_id)
-    database = _database(database_id, session["login"])
+    database = _database(database_id, session["login"], session)
     validate_query(statement, database.schemas)
     request_id = hashlib.sha256(
         f"{workspace_id}:{client_request_id}".encode()
@@ -369,7 +381,7 @@ def _public_execution(value: dict) -> dict:
 
 
 def _execution(
-    request: Request, database_id: str, workspace_id: str, execution_id: str
+    request: Request | Principal, database_id: str, workspace_id: str, execution_id: str
 ) -> dict:
     session = _session(request)
     _workspace(workspace_id, session, database_id)
@@ -389,7 +401,7 @@ def _execution(
 
 
 def execution(
-    request: Request, database_id: str, workspace_id: str, execution_id: str
+    request: Request | Principal, database_id: str, workspace_id: str, execution_id: str
 ) -> dict:
     return _public_execution(
         _execution(request, database_id, workspace_id, execution_id)
@@ -487,7 +499,7 @@ def connection_slot(
 
 
 def page(
-    request: Request,
+    request: Request | Principal,
     database_id: str,
     workspace_id: str,
     execution_id: str,
@@ -639,6 +651,7 @@ def _finish(
                 or not session
                 or session["revoked_at"]
                 or session["expires_at"] <= time.time()
+                or (session.get("source") == "mcp" and not config.mcp.enabled)
                 or not policy
                 or policy.get("enabled") is not True
                 or policy.get("version") != value["policy_version"]
@@ -785,7 +798,11 @@ def run_query(identity: str) -> None:
     writer = results.ResultWriter(identity, context.authorize)
     try:
         context.authorize(force=True)
-        database = _database(value["database_id"], value["login"])
+        database = _database(
+            value["database_id"],
+            value["login"],
+            database_sessions.validate(value["session_id"], value["login"]),
+        )
         statement = results.take_sql(value["input"])
         from .database_console import stream_query
 
@@ -855,7 +872,7 @@ def run_query(identity: str) -> None:
 
 
 def cancel(
-    request: Request, database_id: str, workspace_id: str, execution_id: str
+    request: Request | Principal, database_id: str, workspace_id: str, execution_id: str
 ) -> dict:
     value = _execution(request, database_id, workspace_id, execution_id)
     _finish(execution_id, value.get("claim"), "cancelled", error="QUERY_CANCELLED")
@@ -864,7 +881,7 @@ def cancel(
 
 
 def create_export(
-    request: Request,
+    request: Request | Principal,
     database_id: str,
     workspace_id: str,
     execution_id: str,
@@ -970,7 +987,7 @@ def create_export(
 
 
 def _export(
-    request: Request,
+    request: Request | Principal,
     database_id: str,
     workspace_id: str,
     execution_id: str,
@@ -996,7 +1013,7 @@ def _export(
 
 
 def export(
-    request: Request,
+    request: Request | Principal,
     database_id: str,
     workspace_id: str,
     execution_id: str,
@@ -1127,7 +1144,7 @@ def _cleanup_export(value: dict) -> None:
 
 
 def open_download(
-    request: Request,
+    request: Request | Principal,
     database_id: str,
     workspace_id: str,
     execution_id: str,
@@ -1260,7 +1277,9 @@ def _cleaned_execution(identity: str, exported: list[dict]) -> None:
     store.mutate(references, change)
 
 
-def purge_workspace(request: Request, database_id: str, workspace_id: str) -> dict:
+def purge_workspace(
+    request: Request | Principal, database_id: str, workspace_id: str
+) -> dict:
     session = _session(request)
     value = store.get("workspace", workspace_id)
     if (

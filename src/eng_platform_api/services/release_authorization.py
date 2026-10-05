@@ -98,6 +98,9 @@ def issue(
         "kind": kind,
         "execution_mode": execution_mode,
     }
+    from . import mcp_grants
+
+    claims.update(mcp_grants.release_claims(requested_by))
     for key, value in {
         "release_id": release_id,
         "artifact_digest": artifact_digest,

@@ -12,6 +12,7 @@ from ..services import (
     release_authorization,
     release_authorization_store,
     workflow_identity,
+    mcp_grants,
 )
 
 from ..services.resource_access import require_managed_service_name
@@ -40,6 +41,12 @@ def consume_authorization(
                 "kind": payload.kind,
             },
         )
+        if claims.get("mcp_grant_id"):
+            if claims.get("mcp_authority_policy") != mcp_grants.POLICY:
+                raise release_authorization.ReleaseAuthorizationError(
+                    "MCP policy changed"
+                )
+            mcp_grants.validate(claims["mcp_grant_id"], claims.get("requested_by"))
         identity = {}
         # Legacy callers omit this field; central callers must bind it server-side.
         if (claims.get("execution_repository") or payload.target_revision) and (
@@ -49,7 +56,11 @@ def consume_authorization(
                 "Rollback target mismatch"
             )
         if claims.get("execution_repository"):
-            if claims.get("requested_by", "").lower() not in config.auth.allowed_logins:
+            if (
+                not claims.get("mcp_grant_id")
+                and claims.get("requested_by", "").lower()
+                not in config.auth.allowed_logins
+            ):
                 raise release_authorization.ReleaseAuthorizationError(
                     "Operator authorization was revoked"
                 )

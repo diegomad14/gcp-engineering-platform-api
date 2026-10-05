@@ -441,3 +441,15 @@ Validación adicional independiente: pruebas de jobs/Firestore/Cloud Tasks/GCS y
 OIDC; prueba PostgreSQL de más de 500 filas, timeout y cancelación; lectura de
 XLSX con `openpyxl` como consumidor independiente. Los dobles de almacenamiento
 solo se inyectan expresamente en tests; no son un modo de ejecución de producción.
+
+## MCP transport
+
+The same capture engine is exposed through `/mcp` using the unified
+`eng-platform.access` grant. All enabled bases are accessible to any GitHub
+account that explicitly consents; Web/REST allowlists remain in force.
+MCP requests use a verified transport-neutral principal, not browser cookies.
+The durable MCP grant doubles as its BD session and atomic publication fence;
+rotation preserves captures and revocation cancels/purges them. MCP pages default
+to 25 rows (25/50/100 allowed), with the same capture limits, typed data, global
+sorting and one-hour retention. No Excel MCP tool is introduced.
+See [Remote MCP](remote-mcp.md) for connection migration, tools and verification.
