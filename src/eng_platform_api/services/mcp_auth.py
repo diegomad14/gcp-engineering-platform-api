@@ -458,17 +458,41 @@ class MCPAuthProvider:
         return await self.load_access_token(token)
 
     async def revoke_token(
-        self, token: str, token_type_hint: str | None = None
+        self,
+        token: AccessToken | RefreshToken | str,
+        token_type_hint: str | None = None,
     ) -> None:
         del token_type_hint
+        await self.revoke_client_token(
+            token if isinstance(token, str) else token.token,
+            None if isinstance(token, str) else token.client_id,
+        )
+
+    async def revoke_client_token(self, token: str, client_id: str | None) -> None:
+        """Revocation may use a retained credential; it never authenticates it.
+
+        The HTTP caller authenticates the public client first. Lookup stays
+        separate from access/refresh loaders so rotated tokens cannot regain
+        access, but a disconnect racing with refresh still revokes the family.
+        """
         for kind in ("access", "refresh"):
             record = mcp_store.get(kind, mcp_store.token_key(token))
-            if (
-                record
-                and record.get("session_id")
-                and record.get("scopes") == [mcp_grants.SCOPE]
+            if not record or (
+                client_id is not None and record.get("client_id") != client_id
             ):
+                continue
+            if record.get("session_id") and record.get("scopes") == [mcp_grants.SCOPE]:
                 mcp_grants.revoke(record["session_id"])
+                mcp_store.save_audit(
+                    {
+                        "subject": record.get("subject", ""),
+                        "client_id": record["client_id"],
+                        "tool": "revoke_mcp_connection",
+                        "grant_id": record["session_id"],
+                        "mutation": False,
+                        "result": "revoked",
+                    }
+                )
                 return
             mcp_store.delete(kind, mcp_store.token_key(token))
 

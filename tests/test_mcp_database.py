@@ -477,3 +477,133 @@ async def test_transaction_retry_does_not_return_inactive_refresh_pair(
     assert (
         len(mcp_store._memory["access"]) == 1 and len(mcp_store._memory["refresh"]) == 1
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["access", "refresh"])
+@pytest.mark.parametrize("rotated", [False, True])
+async def test_http_disconnect_revokes_entire_family_after_rotation(
+    environment, monkeypatch, kind, rotated
+):
+    client = OAuthClientInformationFull(
+        client_id="http-client",
+        redirect_uris=["http://localhost:3333/callback"],
+        token_endpoint_auth_method="none",
+        scope=mcp_grants.SCOPE,
+    )
+    await mcp_auth.provider.register_client(client)
+    issued = await mcp_auth.provider._issue_tokens(
+        client_id=client.client_id,
+        scopes=[mcp_grants.SCOPE],
+        subject="outside-allowlists",
+        resource=None,
+    )
+    active = issued
+    if rotated:
+        refresh = await mcp_auth.provider.load_refresh_token(
+            client, issued.refresh_token
+        )
+        active = await mcp_auth.provider.exchange_refresh_token(
+            client, refresh, [mcp_grants.SCOPE]
+        )
+    token = await mcp_auth.provider.load_access_token(active.access_token)
+    with actor(token=token) as principal:
+        workspace, execution, _ = capture(environment, monkeypatch)
+    raw = issued.access_token if kind == "access" else issued.refresh_token
+    with TestClient(app) as http:
+        response = http.post(
+            "/revoke",
+            data={
+                "client_id": client.client_id,
+                "token": raw,
+                "token_type_hint": kind + "_token",
+            },
+        )
+        assert response.status_code == 200 and response.content == b""
+        assert response.headers["cache-control"] == "no-store"
+        assert (
+            http.post(
+                "/revoke", data={"client_id": client.client_id, "token": raw}
+            ).status_code
+            == 200
+        )
+    assert await mcp_auth.provider.load_access_token(active.access_token) is None
+    assert (
+        await mcp_auth.provider.load_refresh_token(client, active.refresh_token) is None
+    )
+    assert await mcp_auth.provider.load_access_token(issued.access_token) is None
+    with pytest.raises(HTTPException):
+        jobs.page(principal, "sample", workspace, execution, 0, 25)
+    audit = json.dumps(mcp_store._memory["audit"])
+    assert issued.access_token not in audit and issued.refresh_token not in audit
+    assert "revoke_mcp_connection" in audit
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["access", "refresh"])
+async def test_sdk_token_object_can_revoke_family(environment, kind):
+    client = OAuthClientInformationFull(
+        client_id="sdk-client", redirect_uris=["http://localhost:3333/callback"]
+    )
+    issued = await mcp_auth.provider._issue_tokens(
+        client_id=client.client_id,
+        scopes=[mcp_grants.SCOPE],
+        subject="reader",
+        resource=None,
+    )
+    token = (
+        await mcp_auth.provider.load_access_token(issued.access_token)
+        if kind == "access"
+        else await mcp_auth.provider.load_refresh_token(client, issued.refresh_token)
+    )
+    await mcp_auth.provider.revoke_token(token)
+    assert await mcp_auth.provider.load_access_token(issued.access_token) is None
+    assert (
+        await mcp_auth.provider.load_refresh_token(client, issued.refresh_token) is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_http_revoke_binds_client_and_sanitizes_invalid_requests(
+    environment, monkeypatch
+):
+    for name in ("owner", "other"):
+        await mcp_auth.provider.register_client(
+            OAuthClientInformationFull(
+                client_id=name,
+                redirect_uris=["http://localhost:3333/callback"],
+                token_endpoint_auth_method="none",
+                scope=mcp_grants.SCOPE,
+            )
+        )
+    issued = await mcp_auth.provider._issue_tokens(
+        client_id="owner", scopes=[mcp_grants.SCOPE], subject="reader", resource=None
+    )
+    with TestClient(app) as http:
+        assert (
+            http.post(
+                "/revoke", data={"client_id": "other", "token": issued.access_token}
+            ).status_code
+            == 200
+        )
+        assert await mcp_auth.provider.load_access_token(issued.access_token)
+        assert (
+            http.post(
+                "/revoke", data={"client_id": "unknown", "token": issued.access_token}
+            ).status_code
+            == 401
+        )
+        for value in (
+            {"client_id": "owner"},
+            {"client_id": "owner", "token": "secret" * 100},
+        ):
+            response = http.post("/revoke", data=value)
+            assert response.status_code == 400
+            assert response.json() == {"error": "invalid_request"}
+        monkeypatch.setattr(config.mcp, "enabled", False)
+        assert (
+            http.post(
+                "/revoke", data={"client_id": "owner", "token": issued.access_token}
+            ).status_code
+            == 404
+        )
