@@ -8,7 +8,9 @@ the circuit: a real, started health probe is required.
 from __future__ import annotations
 
 import hashlib
+import math
 import secrets
+import time
 from datetime import datetime, timezone
 from threading import RLock
 from typing import Any
@@ -17,6 +19,12 @@ from ..config import config
 
 _memory: dict[str, dict[str, Any]] = {}
 _lock = RLock()
+# Repository variables are best-effort hints; the persisted circuit remains the
+# provider safety boundary. These shared intervals bound GitHub fan-out and allow
+# repair after partial failures, worker crashes, or later catalog changes.
+_MODE_PROPAGATION_LEASE_SECONDS = 300
+_MODE_PROPAGATION_RETRY_SECONDS = 60
+_MODE_PROPAGATION_REFRESH_SECONDS = 600
 
 
 def _now() -> str:
@@ -111,6 +119,114 @@ def open_circuit(
         return value, True
 
     return write(transaction)
+
+
+def mode_propagation_due(circuit: dict[str, Any]) -> bool:
+    """Check a read snapshot before attempting the shared propagation claim."""
+    if circuit.get("state") != "open":
+        return False
+    propagation = circuit.get("mode_propagation")
+    if not isinstance(propagation, dict):
+        return True
+    try:
+        retry_after = float(propagation.get("retry_after", 0))
+    except (TypeError, ValueError, OverflowError):
+        return True
+    now = time.time()
+    # Malformed metadata must neither affect provider safety nor suppress repair
+    # forever. Allow one lease of clock skew beyond the longest valid cooldown.
+    latest = now + _MODE_PROPAGATION_REFRESH_SECONDS + _MODE_PROPAGATION_LEASE_SECONDS
+    return not math.isfinite(retry_after) or not now < retry_after <= latest
+
+
+def claim_mode_propagation(owner: str) -> str | None:
+    """Lease one best-effort sweep across processes, without changing safety state.
+
+    No writes occur for a closed circuit or during the lease/cooldown. A crashed
+    worker's claim expires; duplicate GitHub mode writes after expiry are safe.
+    """
+    token = secrets.token_urlsafe(24)
+
+    def changes(current):
+        if not mode_propagation_due(current):
+            return None
+        return {
+            "mode_propagation": {
+                "token": token,
+                "retry_after": time.time() + _MODE_PROPAGATION_LEASE_SECONDS,
+            }
+        }
+
+    collection = _collection()
+    if collection is None:
+        with _lock:
+            current = _memory.get(_id(owner), {})
+            update = changes(current)
+            if update is None:
+                return None
+            current.update(update)
+            return token
+
+    document = collection.document(_id(owner))
+    transaction = document._client.transaction()
+    from google.cloud.firestore import transactional
+
+    @transactional
+    def write(txn):
+        snapshot = document.get(transaction=txn)
+        update = changes(snapshot.to_dict() if snapshot.exists else {})
+        if update is None:
+            return None
+        txn.update(document, update)
+        return token
+
+    return write(transaction)
+
+
+def finish_mode_propagation(owner: str, *, token: str, succeeded: bool) -> None:
+    """Release only this sweep's lease and retain a bounded retry/refresh time."""
+    interval = (
+        _MODE_PROPAGATION_REFRESH_SECONDS
+        if succeeded
+        else _MODE_PROPAGATION_RETRY_SECONDS
+    )
+
+    def changes(current):
+        propagation = current.get("mode_propagation")
+        if (
+            current.get("state") != "open"
+            or not isinstance(propagation, dict)
+            or propagation.get("token") != token
+        ):
+            return None
+        return {
+            "mode_propagation": {
+                "token": "",
+                "retry_after": time.time() + interval,
+            }
+        }
+
+    collection = _collection()
+    if collection is None:
+        with _lock:
+            current = _memory.get(_id(owner), {})
+            update = changes(current)
+            if update is not None:
+                current.update(update)
+        return
+
+    document = collection.document(_id(owner))
+    transaction = document._client.transaction()
+    from google.cloud.firestore import transactional
+
+    @transactional
+    def write(txn):
+        snapshot = document.get(transaction=txn)
+        update = changes(snapshot.to_dict() if snapshot.exists else {})
+        if update is not None:
+            txn.update(document, update)
+
+    write(transaction)
 
 
 def request_probe(

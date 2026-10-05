@@ -1,6 +1,7 @@
 """GitHub release and CI evidence for catalog services."""
 
 from concurrent.futures import ThreadPoolExecutor
+from itertools import islice
 from typing import Any
 
 from ..config import config
@@ -22,7 +23,7 @@ from .resource_access import require_managed
 def _fetch_recent_releases(repository: str, limit: int = 5) -> list[object]:
     repo = github_deployments.github_client().get_repo(repository)
     releases = repo.get_releases()
-    return [release for index, release in enumerate(releases) if index < limit]
+    return list(islice(releases, max(0, limit)))
 
 
 def _release_item(

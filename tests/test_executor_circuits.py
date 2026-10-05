@@ -505,3 +505,180 @@ def test_memory_probe_operations_recheck_state_after_initial_read(monkeypatch):
             conclusion="success",
             jobs_started=1,
         )
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_mode_propagation_claim_and_cooldown_are_shared(monkeypatch, request, durable):
+    if durable:
+        collection = request.getfixturevalue("firestore_collection")
+        document = collection.document(circuits._id(OWNER))
+    now = [1000.0]
+    monkeypatch.setattr(circuits.time, "time", lambda: now[0])
+    assert circuits.claim_mode_propagation(OWNER) is None
+    assert circuits.mode_propagation_due(circuits.get(OWNER)) is False
+    original, _ = _open()
+    assert circuits.mode_propagation_due(original) is True
+    token = circuits.claim_mode_propagation(OWNER)
+    assert token
+    assert circuits.claim_mode_propagation(OWNER) is None
+    assert circuits.mode_propagation_due(circuits.get(OWNER)) is False
+    circuits.finish_mode_propagation(OWNER, token=token, succeeded=True)
+    finished = circuits.get(OWNER)
+    assert {key: finished[key] for key in original} == original
+    assert finished["mode_propagation"]["retry_after"] == 1600.0
+    # Reads during the cooldown do not update any shared metadata.
+    if durable:
+        stored = deepcopy(document.value)
+    now[0] = 1599.0
+    assert circuits.claim_mode_propagation(OWNER) is None
+    if durable:
+        assert document.value == stored
+    now[0] = 1600.0
+    assert circuits.claim_mode_propagation(OWNER)
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_mode_propagation_partial_failure_and_crash_are_retryable(
+    monkeypatch, request, durable
+):
+    if durable:
+        request.getfixturevalue("firestore_collection")
+    now = [1000.0]
+    monkeypatch.setattr(circuits.time, "time", lambda: now[0])
+    _open()
+    token = circuits.claim_mode_propagation(OWNER)
+    circuits.finish_mode_propagation(OWNER, token=token, succeeded=False)
+    now[0] = 1059.0
+    assert circuits.claim_mode_propagation(OWNER) is None
+    now[0] = 1060.0
+    abandoned = circuits.claim_mode_propagation(OWNER)
+    assert abandoned and abandoned != token
+    # No completion call: a different worker can recover the expired lease.
+    now[0] = 1359.0
+    assert circuits.claim_mode_propagation(OWNER) is None
+    now[0] = 1360.0
+    recovered = circuits.claim_mode_propagation(OWNER)
+    assert recovered and recovered != abandoned
+    # A delayed worker must not clear or extend the successor's claim.
+    current = circuits.get(OWNER)
+    circuits.finish_mode_propagation(OWNER, token=abandoned, succeeded=True)
+    assert circuits.get(OWNER) == current
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_mode_propagation_never_overwrites_closed_or_reopened_circuit(
+    monkeypatch, request, durable
+):
+    if durable:
+        request.getfixturevalue("firestore_collection")
+    monkeypatch.setattr(circuits.time, "time", lambda: 1000.0)
+    _open()
+    token = circuits.claim_mode_propagation(OWNER)
+    circuits.request_probe(
+        OWNER, repository="owner/repo", workflow="health.yml", requested_by="admin"
+    )
+    verified = circuits.record_probe(
+        OWNER,
+        repository="owner/repo",
+        workflow="health.yml",
+        run_id="1",
+        conclusion="success",
+        jobs_started=1,
+    )
+    circuits.finish_mode_propagation(OWNER, token=token, succeeded=True)
+    assert circuits.get(OWNER)["probe"] == verified["probe"]
+    closed = circuits.close_after_successful_probe(OWNER, run_id="1")
+    circuits.finish_mode_propagation(OWNER, token=token, succeeded=False)
+    assert circuits.get(OWNER) == closed
+    assert circuits.claim_mode_propagation(OWNER) is None
+    reopened, _ = _open(reason="new failure")
+    assert "mode_propagation" not in reopened
+    new_token = circuits.claim_mode_propagation(OWNER)
+    assert new_token and new_token != token
+    current = circuits.get(OWNER)
+    circuits.finish_mode_propagation(OWNER, token=token, succeeded=False)
+    assert circuits.get(OWNER) == current
+
+
+def test_mode_propagation_concurrent_claims_have_one_winner():
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    _open()
+    barrier = Barrier(8)
+
+    def claim(_):
+        barrier.wait(timeout=5)
+        return circuits.claim_mode_propagation(OWNER)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        claims = list(pool.map(claim, range(8)))
+    assert sum(token is not None for token in claims) == 1
+
+
+def test_finishing_unknown_propagation_does_not_create_circuit(firestore_collection):
+    circuits.finish_mode_propagation(OWNER, token="unknown", succeeded=True)
+    assert firestore_collection.document(circuits._id(OWNER)).value is None
+
+
+def test_durable_concurrent_claims_use_shared_state_without_per_event_writes(
+    monkeypatch, firestore_collection
+):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier, RLock
+
+    from google.cloud import firestore
+
+    # Model Firestore's serializable transaction retry/commit boundary. The
+    # durable path must coordinate through the document, not a process-local cache.
+    transaction_lock = RLock()
+
+    def transactional(function):
+        def execute(transaction):
+            with transaction_lock:
+                return function(transaction)
+
+        return execute
+
+    monkeypatch.setattr(firestore, "transactional", transactional)
+    writes = []
+    original_update = _Transaction.update
+
+    def update(transaction, document, changes):
+        writes.append(deepcopy(changes))
+        original_update(transaction, document, changes)
+
+    monkeypatch.setattr(_Transaction, "update", update)
+    _open()
+    barrier = Barrier(8)
+
+    def claim(_):
+        barrier.wait(timeout=5)
+        return circuits.claim_mode_propagation(OWNER)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        claims = list(pool.map(claim, range(8)))
+    winners = [token for token in claims if token is not None]
+    assert len(winners) == 1
+    assert len(writes) == 1
+    circuits.finish_mode_propagation(OWNER, token=winners[0], succeeded=True)
+    for _ in range(20):
+        assert circuits.claim_mode_propagation(OWNER) is None
+    assert len(writes) == 2
+    assert circuits._memory == {}
+
+
+def test_malformed_durable_propagation_metadata_can_be_repaired(
+    monkeypatch, firestore_collection
+):
+    monkeypatch.setattr(circuits.time, "time", lambda: 1000.0)
+    _open()
+    document = firestore_collection.document(circuits._id(OWNER))
+    document.value["mode_propagation"] = "invalid"
+    circuits.finish_mode_propagation(OWNER, token="old", succeeded=True)
+    assert document.value["mode_propagation"] == "invalid"
+    token = circuits.claim_mode_propagation(OWNER)
+    assert token
+    circuits.finish_mode_propagation(OWNER, token=token, succeeded=True)
+    assert document.value["mode_propagation"]["retry_after"] == 1600.0
+    assert document.value["state"] == "open"

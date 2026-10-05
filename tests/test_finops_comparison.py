@@ -235,6 +235,37 @@ def test_latest_consumption_watermark_matches_previous_elapsed_hours(dataset):
     assert not result.is_final and not result.current.data_quality.is_complete
 
 
+def test_full_watermarks_do_not_repeat_identical_comparison_queries(dataset):
+    dataset.rows = records("2026-10-01", 7, 2) + records("2026-09-30", 7)
+    result = billing.get_cost_comparison()
+    assert result.comparable and result.net_change == 5.25
+    assert result.current_end_at == "2026-10-01T07:00:00-05:00"
+    assert len(dataset.queries) == 4
+    assert len(set(dataset.queries)) == 4
+
+
+def test_short_watermarks_still_requery_both_comparison_windows(dataset):
+    result = billing.get_cost_comparison()
+    assert result.comparable and result.net_change == 3
+    assert result.current_end_at == "2026-10-01T04:00:00-05:00"
+    assert len(dataset.queries) == 8
+
+
+@pytest.mark.parametrize("complete, expected_queries", [(True, 6), (False, 10)])
+def test_daily_skips_unused_item_query_preserving_coverage(
+    dataset, complete, expected_queries
+):
+    if complete:
+        dataset.rows = records("2026-10-01", 7, 2) + records("2026-09-30", 7)
+    result = billing.get_daily_costs(days=1)
+    assert "COUNT(*) AS n" in dataset.queries[0]
+    assert "usage_date" in dataset.queries[1]
+    assert len(dataset.queries) == expected_queries
+    assert result.days[0].net_cost == (10.5 if complete else 6)
+    assert result.previous_comparable is complete
+    assert result.previous_total_net_cost == (5.25 if complete else None)
+
+
 @pytest.mark.parametrize("currency", ["USD", "COP"])
 @pytest.mark.parametrize("group_by", ["resource", "service", "sku"])
 def test_sdk_rows_reach_summary_and_comparison_dtos(

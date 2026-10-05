@@ -174,8 +174,11 @@ def get_quality_summary():
     source = catalog_source_identity()
     with _summary_cache_lock:
         now = monotonic()
+        # get_services reads the current validated authority once. Each miss
+        # still rechecks management in _quality_project before provider I/O;
+        # do not reread the whole catalog per service just to check this cache.
         services = [
-            require_managed(service)
+            service
             for service in catalog.get_services().services
             if service.management_mode == "managed" and service.repository is not None
         ]

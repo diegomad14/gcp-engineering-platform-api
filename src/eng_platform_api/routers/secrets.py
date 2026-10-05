@@ -4,6 +4,7 @@ import json
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from starlette.concurrency import run_in_threadpool
 
 from ..config import config
 from ..security import require_deployer
@@ -66,7 +67,7 @@ async def save_secret(
         raise HTTPException(403, "Invalid request origin")
     if request.headers.get("content-type", "").split(";")[0] != "application/json":
         raise HTTPException(415, "JSON required")
-    service = selected_service(service_name)
+    service = await run_in_threadpool(selected_service, service_name)
     secret = next(
         (item for item in service.operational_secrets if item.key == secret_key), None
     )
@@ -97,8 +98,6 @@ async def save_secret(
     response.headers["Cache-Control"] = "no-store"
     try:
         # Do not return or log provider exceptions: they may contain request data.
-        from starlette.concurrency import run_in_threadpool
-
         return await run_in_threadpool(
             operational_secrets.publish,
             service,
