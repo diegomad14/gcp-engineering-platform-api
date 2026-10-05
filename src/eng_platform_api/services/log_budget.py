@@ -21,6 +21,7 @@ import uuid
 from google.api_core.exceptions import AlreadyExists, FailedPrecondition, NotFound
 
 from ..config import config
+from ..models import LogDeferralReason
 from .deployment_store import firestore_client
 
 CADENCE_SECONDS = 5
@@ -28,7 +29,12 @@ MAX_ATTEMPTS = 12
 MAX_CAS_ATTEMPTS = 3
 COORDINATION_TIMEOUT_SECONDS = 2
 MAX_WAITERS = 4096
-WAITER_TTL_SECONDS = 180
+MAX_QUEUE_POLL_SECONDS = 10
+WAITER_GRACE_SECONDS = 25
+# Keep schema 3 readable by existing replicas: liveness changes only waiting
+# membership, never the ownership or lifetime of a reserved permit. An old
+# replica advising 60s may have to rejoin the FIFO during a rolling deployment.
+WAITER_TTL_SECONDS = MAX_QUEUE_POLL_SECONDS + WAITER_GRACE_SECONDS
 SCHEMA_VERSION = 3
 _PARTICIPANT = re.compile(r"[0-9a-f]{64}\Z")
 _TOKEN = re.compile(r"[0-9a-f]{32}\Z")
@@ -84,6 +90,7 @@ class Reservation:
     queue_position: int | None = None
     queue_wait_seconds: int | None = None
     overloaded: bool = False
+    deferral_reason: LogDeferralReason | None = None
 
 
 def _quota_project() -> str:
@@ -261,7 +268,7 @@ def _record(snapshot, quota_project: str):
         ):
             raise RuntimeError("Invalid log budget waiter order")
         previous_enqueued = enqueued
-        if last_seen > now - timedelta(seconds=WAITER_TTL_SECONDS):
+        if last_seen >= now - timedelta(seconds=WAITER_TTL_SECONDS):
             waiters.append(dict(value))
     return now, record, attempts, waiters
 
@@ -348,14 +355,16 @@ def reserve(
         ):
             # Replaying a successful/ambiguous reservation cannot authorize a
             # second outbound call or mint a second pending slot for this owner.
-            return Reservation(False, now, 60), None
+            return Reservation(False, now, 60, deferral_reason="pending"), None
         index = next(
             (i for i, item in enumerate(waiters) if item["participant"] == participant),
             None,
         )
         if index is None:
             if len(waiters) >= MAX_WAITERS:
-                return Reservation(False, now, 60, overloaded=True), None
+                return Reservation(
+                    False, now, 60, overloaded=True, deferral_reason="overload"
+                ), None
             index = len(waiters)
             waiters.append(
                 {
@@ -389,9 +398,16 @@ def reserve(
         result = Reservation(
             False,
             now,
-            max(5, min(60, wait)),
+            max(CADENCE_SECONDS, min(MAX_QUEUE_POLL_SECONDS, wait)),
             queue_position=index + 1,
             queue_wait_seconds=wait,
+            deferral_reason=(
+                "budget"
+                if len(attempts) >= MAX_ATTEMPTS
+                else "queue"
+                if index > 0
+                else "cadence"
+            ),
         )
         return result, replacement if replacement != record else None
 

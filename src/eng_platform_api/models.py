@@ -726,6 +726,7 @@ LogSeverity = Literal[
     "ALERT",
     "EMERGENCY",
 ]
+LogDeferralReason = Literal["cadence", "queue", "budget", "pending", "overload"]
 
 
 class LogEntry(BaseModel):
@@ -750,6 +751,7 @@ class ServiceLogsResponse(BaseModel):
     queue_position: int | None = Field(default=None, ge=1, le=4096)
     queue_wait_seconds: int | None = Field(default=None, ge=0)
     overloaded: bool = False
+    deferral_reason: LogDeferralReason | None = None
     next_poll_seconds: int = 5
     explorer_url: str
     observed_at: str | None = None

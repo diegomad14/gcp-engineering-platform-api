@@ -144,11 +144,18 @@ Response fields:
   Null success/age means no local sample (including a restarted/evicted cache).
   Another resource's success never supplies these values or a watermark.
 - `next_poll_seconds`: 5–60 seconds; honor it. `queue_position`: 1–4096 or null.
+  Queued participants poll every 5–10 seconds to renew their waiting membership.
   `queue_wait_seconds`: a nonnegative **minimum estimated wait**, or null; it is
   not a guaranteed ETA or the polling interval. It assumes the current queue
   remains active; expiring waiters can reduce it. Failures, pending permits and
   head-of-queue polling can make the actual wait substantially longer.
   `overloaded` identifies queue or local-state capacity exhaustion.
+- `deferral_reason`: optional/null when not deferred; `cadence` is the normal
+  five-second admission interval, `queue` is an earlier waiting participant,
+  `budget` means all 12 charged permits are occupied, `pending` is an unresolved
+  permit already owned by this participant, and `overload` is finite queue/cache
+  capacity. Neither cadence nor FIFO waiting means Cloud Logging exhausted its
+  quota. Older replicas may omit this field.
 - `window_start`: actual requested local history cutoff. `explorer_url`: fixed
   Google Cloud Console origin with only a catalog-built resource query.
 - `limitations`: machine-readable replica-local, incomplete/late sampling and
@@ -202,8 +209,11 @@ leave the queue and return at its tail for later demand. New participants cannot
 skip existing ones. A participant with an unresolved permit cannot dispatch again.
 
 The FIFO holds at most 4096 participants. Waiting participants refresh their
-activity when they poll and expire after 180 seconds of inactivity; stopping a
-viewer does not leave a permanent waiter. Full queues report overload and make
+activity when they poll and expire after more than 35 seconds of inactivity:
+the maximum 10-second queued poll advice plus 25 seconds for request/transport
+latency. The exact 35-second boundary remains valid. Stopping a viewer can still
+hold the head until this bound; the next successful coordination after expiry
+removes it. Suspended viewers rejoin at the tail. Full queues report overload and make
 no Logging call. Active queue positions and wait estimates are exposed honestly.
 FIFO fairness is conditional on continued polling and successful coordination;
 there is no wall-clock freshness SLA. At five seconds per slot, 500 independent
@@ -231,16 +241,27 @@ The ceiling is at most 720 Logging calls/hour **globally for this viewer**, not
 per source project or replica. Other applications can independently consume the
 same external quota. This is not zero-cost: admitted calls normally require
 reserve/finalize reads and writes, and queued/denied polling can also write FIFO
-heartbeats. The Logging ceiling does not imply a 24-write/minute Firestore ceiling.
+heartbeats. The shorter 5–10-second queue polling increases coordination traffic
+relative to the previous maximum 60-second advice. The Logging ceiling does not
+imply a 24-write/minute Firestore ceiling.
 Costs depend on demand, contention and current provider pricing; no fixed dollar
 amount or production latency is asserted here.
 
 ## Safe rollout and pending-permit recovery
 
+The 35-second liveness change preserves schema 3, its document identity, and every
+permit's ownership/completion semantics. Existing schema-3 replicas can therefore
+reserve and finish against the same record during a rolling deployment. Their
+older 60-second poll advice can outlive the new waiting lease, so an active old
+waiter may lose its FIFO place and rejoin at the tail; it never loses a pending
+permit. Complete the rollout for consistent waiting fairness. No document reset,
+schema migration, quota change, or automatic pending-permit recovery is involved.
+
 Schema 3 uses a global scope instead of legacy per-source-project documents.
 Running old project-budget readers alongside new global-budget readers would
-create independent allowance and violate the intended total. **Do not perform a
-mixed-version activation or simply change namespace, database or quota project.**
+create independent allowance and violate the intended total. **Do not mix legacy
+per-project readers with global-budget readers or simply change namespace,
+database or quota project.**
 This code change does not implement any production migration or permission change.
 
 Before a separately authorized migration, disable admission and drain/stop every
