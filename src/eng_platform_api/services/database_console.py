@@ -223,8 +223,10 @@ def _check_relations(connection, database: Database, references: set, inventory:
         raise QueryRejected("Inherited relation is not supported or authorized")
 
 
-def read_schema(database: Database, authorize: Callable[[], None]) -> dict:
-    with _connection(database, authorize) as connection:
+def read_schema(
+    database: Database, authorize: Callable[[], None], *, admission=None
+) -> dict:
+    with _connection(database, authorize, admission=admission) as connection:
         tables, _ = _inventory(connection, database)
         result = {"tables": tables}
         if len(json.dumps(result).encode()) > MAX_RESPONSE_BYTES:

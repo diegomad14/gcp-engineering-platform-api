@@ -106,12 +106,20 @@ def validate(session_id: str, login: str) -> dict[str, Any]:
     identity = _login(login)
     if not isinstance(session_id, str) or not _IDENTITY.fullmatch(session_id):
         raise _unauthorized()
-    if not config.databases.enabled or identity not in config.databases.allowed_logins:
-        raise HTTPException(403, "You are not allowed to query databases")
     try:
         record = _store().get("session", session_id)
+        if record and record.get("source") == "mcp":
+            from . import mcp_grants
+
+            if not config.databases.enabled:
+                raise _unauthorized()
+            return mcp_grants.validate(session_id, identity)
+    except HTTPException:
+        raise
     except Exception:
         raise _unavailable() from None
+    if not config.databases.enabled or identity not in config.databases.allowed_logins:
+        raise HTTPException(403, "You are not allowed to query databases")
     now = time()
     if (
         not isinstance(record, dict)
@@ -138,6 +146,8 @@ def require(request: Request) -> dict[str, Any]:
     identity = _login(request.session.get("github_login"))
     session_id = _session_id(request.session.get(COOKIE_FIELD))
     record = validate(session_id, identity)
+    if record.get("source") == "mcp":
+        raise _unauthorized()
     request.state.database_session = record
     return record
 

@@ -225,6 +225,9 @@ def submit(
     """Submit once.  Any uncertain response is recoverable by fingerprint."""
     service = require_managed(service)
     require_managed_service_name(item.service_name)
+    from . import mcp_grants
+
+    mcp_grants.release_claims(item.requested_by)
     request = build_request(item, service)
     validate_submission(request)
     request_fingerprint = request["substitutions"]["_REQUEST_FINGERPRINT"]

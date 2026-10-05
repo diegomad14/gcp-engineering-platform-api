@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException
 from mcp.server.auth.middleware.auth_context import auth_context_var
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
-from mcp.server.auth.provider import AccessToken
+from tests.mcp_helpers import access_token
 
 from eng_platform_api import mcp_server
 from eng_platform_api.config import CostAlertsConfig, config, load_config
@@ -335,7 +335,7 @@ def identity():
         tokens.append(
             auth_context_var.set(
                 AuthenticatedUser(
-                    AccessToken(
+                    access_token(
                         token="fake-oauth-token",
                         client_id="test",
                         subject=subject,
@@ -365,12 +365,14 @@ def test_notification_tool_has_no_arbitrary_parameters_and_requires_scope(
 def test_notification_tool_passes_owner_and_audits_no_private_payload(
     approved, identity, monkeypatch
 ):
-    identity(["eng-platform.cost-alerts.send"])
+    identity(["eng-platform.access"])
     subjects = []
     monkeypatch.setattr(
         alerts,
         "send",
-        lambda subject: subjects.append(subject) or {"status": "no_comparable_change"},
+        lambda subject, **kwargs: (
+            subjects.append(subject) or {"status": "no_comparable_change"}
+        ),
     )
     assert mcp_server.send_cost_alert()["status"] == "no_comparable_change"
     assert subjects == [alerts.OWNER_LOGIN]
@@ -396,7 +398,7 @@ def test_new_finops_tools_require_read_scope_and_return_quality(
     identity([])
     with pytest.raises(HTTPException):
         method()
-    identity(["eng-platform.read"])
+    identity(["eng-platform.access"])
     monkeypatch.setattr(
         mcp_server.costs,
         tool,

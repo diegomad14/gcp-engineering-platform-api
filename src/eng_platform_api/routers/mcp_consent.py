@@ -31,20 +31,21 @@ async def consent_page(request: Request, consent: str = ""):
     if client is None:
         raise HTTPException(403, "OAuth client is no longer available")
     labels = {
-        "eng-platform.read": "Consultar costes y estado de Engineering Platform",
-        "eng-platform.cost-alerts.send": "Enviar alertas de costes al chat privado autorizado de Diego",
-        "eng-platform.deploy": "Promover despliegues autorizados",
-        "eng-platform.rollback": "Revertir despliegues autorizados",
+        "eng-platform.access": (
+            "Acceso completo: consultar costes, métricas y estado; ejecutar consultas "
+            "BD de solo lectura sobre todas las bases habilitadas; desplegar y revertir "
+            "servicios de producción; activar alertas al destinatario privado configurado de Diego"
+        ),
     }
     permissions = "".join(
         f"<li>{escape(labels[scope])}</li>" for scope in pending["scopes"]
     )
     page = (
         '<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width">'
-        "<title>Autorizar alertas de costes</title><main><h1>Autorizar alertas de costes</h1>"
+        "<title>Autorizar Engineering Platform</title><main><h1>Autorizar Engineering Platform</h1>"
         f"<p>Aplicación: {escape(client.client_name or 'Cliente MCP')}. Cuenta: {escape(pending['subject'])}.</p>"
         f"<p>Permisos solicitados:</p><ul>{permissions}</ul>"
-        "<p>Autorizar permite a esta conexión solicitar alertas privadas. No activa el envío ni modifica otros permisos.</p>"
+        "<p>Esta conexión podrá usar todas las acciones disponibles. Las consultas SQL siguen siendo de solo lectura. Desconectar revoca el acceso y las capturas privadas.</p>"
         '<form method="post" action="/mcp/consent">'
         f'<input type="hidden" name="consent" value="{escape(consent, quote=True)}">'
         f'<input type="hidden" name="csrf" value="{escape(request.cookies[_COOKIE], quote=True)}">'

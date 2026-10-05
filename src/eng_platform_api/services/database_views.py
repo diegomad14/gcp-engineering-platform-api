@@ -9,6 +9,7 @@ import time
 from typing import Iterator
 
 from fastapi import HTTPException, Request
+from .mcp_grants import Principal
 
 from . import database_jobs as jobs
 from . import database_job_store as store
@@ -20,7 +21,7 @@ MAX_VIEWS = 16
 
 
 def require_view(
-    request: Request,
+    request: Request | Principal,
     database_id: str,
     workspace_id: str,
     execution_id: str,
@@ -65,7 +66,7 @@ def _public(value: dict) -> dict:
 
 
 def view(
-    request: Request,
+    request: Request | Principal,
     database_id: str,
     workspace_id: str,
     execution_id: str,
@@ -79,7 +80,7 @@ def view(
 
 
 def create_view(
-    request: Request,
+    request: Request | Principal,
     database_id: str,
     workspace_id: str,
     execution_id: str,
@@ -352,7 +353,7 @@ def run_sort(identity: str) -> None:
 
 
 def delete_view(
-    request: Request,
+    request: Request | Principal,
     database_id: str,
     workspace_id: str,
     execution_id: str,

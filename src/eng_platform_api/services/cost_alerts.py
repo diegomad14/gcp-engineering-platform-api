@@ -20,18 +20,25 @@ OWNER_LOGIN = "diegomad14"
 GATEWAY_URL = "https://communications-ms-pzzhmu7una-uc.a.run.app/api/v2/messages"
 
 
-def _authorized(subject: str) -> None:
+def _authorized(subject: str, *, mcp_authority=None) -> None:
     settings = config.cost_alerts
     if not settings.enabled:
         raise HTTPException(409, "Cost notifications are disabled")
-    if (
+    if mcp_authority is not None:
+        from . import mcp_grants
+
+        mcp_grants.require(mcp_authority)
+        if mcp_authority.login != subject.lower():
+            raise HTTPException(403, "MCP operator mismatch")
+    if mcp_authority is None and (
         subject.lower() != OWNER_LOGIN
         or subject.lower() not in settings.allowed_logins
         or settings.recipient_owner_login != subject.lower()
     ):
         raise HTTPException(403, "Cost notification recipient authorization required")
     if (
-        not settings.private_destination_confirmed
+        settings.recipient_owner_login != OWNER_LOGIN
+        or not settings.private_destination_confirmed
         or settings.recipient_id != RECIPIENT_ID
         or not re.fullmatch(r"[1-9][0-9]{4,14}", settings.recipient_address)
         or not settings.recipient_address.endswith("7589")
@@ -152,8 +159,8 @@ def _deliver(text: str, event_key: str) -> dict:
         ) from None
 
 
-def send(subject: str) -> dict:
-    _authorized(subject)
+def send(subject: str, *, mcp_authority=None) -> dict:
+    _authorized(subject, mcp_authority=mcp_authority)
     now = billing.utc_now()
     day = now.astimezone(billing._TIMEZONE).date().isoformat()
     event_key = (

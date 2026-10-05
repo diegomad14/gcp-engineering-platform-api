@@ -25,14 +25,11 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import AnyUrl
 
 from ..config import config
-from . import mcp_store
+from . import mcp_store, mcp_grants
+from . import database_job_store as grant_store
+from fastapi import HTTPException
 
-_SCOPES = {
-    "eng-platform.read",
-    "eng-platform.deploy",
-    "eng-platform.rollback",
-    "eng-platform.cost-alerts.send",
-}
+_SCOPES = {mcp_grants.SCOPE}
 _GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 _GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 _GITHUB_USER_URL = "https://api.github.com/user"
@@ -100,7 +97,7 @@ class MCPAuthProvider:
                 "invalid_client_metadata",
                 "authorization_code and refresh_token are required",
             )
-        scopes = set((client_info.scope or "eng-platform.read").split())
+        scopes = set((client_info.scope or "eng-platform.access").split())
         if not scopes or not scopes.issubset(_SCOPES):
             raise RegistrationError(
                 "invalid_client_metadata", "Requested scopes are not supported"
@@ -120,6 +117,9 @@ class MCPAuthProvider:
             )
         if not config.mcp.public_base_url:
             raise AuthorizeError("server_error", "MCP public URL is not configured")
+        if (params.scopes or [mcp_grants.SCOPE]) != [mcp_grants.SCOPE]:
+            raise AuthorizeError("invalid_scope", "Reconnect MCP for full access")
+        mcp_grants.resource(params.resource)
         state = mcp_store.opaque_id()
         callback = _github_callback_url()
         mcp_store.save(
@@ -127,7 +127,7 @@ class MCPAuthProvider:
             mcp_store.token_key(state),
             {
                 "client_id": client.client_id,
-                "scopes": params.scopes or ["eng-platform.read"],
+                "scopes": params.scopes or ["eng-platform.access"],
                 "code_challenge": params.code_challenge,
                 "redirect_uri": str(params.redirect_uri),
                 "redirect_uri_provided_explicitly": params.redirect_uri_provided_explicitly,
@@ -149,8 +149,7 @@ class MCPAuthProvider:
     ) -> str:
         """Turn a verified GitHub identity into a one-time MCP authorization code."""
         key = mcp_store.token_key(state)
-        pending = mcp_store.get("state", key)
-        mcp_store.delete("state", key)
+        pending = mcp_store.consume("state", key)
         if not pending or _expires_at(pending) < time.time():
             raise AuthorizeError("access_denied", "OAuth state is invalid or expired")
         callback = _github_callback_url()
@@ -168,25 +167,15 @@ class MCPAuthProvider:
         )
         response.raise_for_status()
         login = str(response.json().get("login", "")).strip().lower()
-        if not login or login not in config.auth.allowed_logins:
-            raise AuthorizeError(
-                "access_denied", "GitHub user is not allowed to access eng-platform"
-            )
-        if "eng-platform.cost-alerts.send" in pending["scopes"]:
-            from .cost_alerts import OWNER_LOGIN
-
-            if login != OWNER_LOGIN:
-                raise AuthorizeError(
-                    "access_denied", "Private cost alerts belong to the approved owner"
-                )
-            consent = mcp_store.opaque_id()
-            mcp_store.save(
-                "consent",
-                mcp_store.token_key(consent),
-                {**pending, "subject": login, "expires_at": time.time() + 300},
-            )
-            return f"{config.mcp.public_base_url}/mcp/consent?consent={consent}"
-        return self._authorization_redirect({**pending, "subject": login})
+        if not login or not database_login(login):
+            raise AuthorizeError("access_denied", "GitHub identity is invalid")
+        consent = mcp_store.opaque_id()
+        mcp_store.save(
+            "consent",
+            mcp_store.token_key(consent),
+            {**pending, "subject": login, "expires_at": time.time() + 300},
+        )
+        return f"{config.mcp.public_base_url}/mcp/consent?consent={consent}"
 
     @staticmethod
     def _authorization_redirect(pending: dict[str, Any]) -> str:
@@ -283,47 +272,114 @@ class MCPAuthProvider:
         scopes: list[str],
         subject: str | None,
         resource: str | None,
+        grant_id: str | None = None,
+        previous_refresh: str | None = None,
     ) -> OAuthToken:
-        access = mcp_store.opaque_id()
-        refresh = mcp_store.opaque_id()
-        session_id = mcp_store.opaque_id()
+        if scopes != [mcp_grants.SCOPE] or not subject or not database_login(subject):
+            raise TokenError("invalid_grant", "Reconnect MCP for full access")
+        canonical = mcp_grants.resource(resource)
+        access, refresh = mcp_store.opaque_id(), mcp_store.opaque_id()
+        identity = grant_id or mcp_store.token_key(mcp_store.opaque_id())
+        old = mcp_grants.validate(identity, subject) if grant_id else None
+        generation = old["generation"] + 1 if old else 1
+        now = time.time()
+        expires = now + config.mcp.refresh_token_ttl_seconds
+        common = {
+            "client_id": client_id,
+            "scopes": scopes,
+            "subject": subject,
+            "resource": canonical,
+            "session_id": identity,
+            "generation": generation,
+        }
+        # Inactive indices are harmless if the atomic grant commit fails.
         mcp_store.save(
             "access",
             mcp_store.token_key(access),
-            {
-                "client_id": client_id,
-                "scopes": scopes,
-                "subject": subject,
-                "resource": resource,
-                "session_id": session_id,
-                "expires_at": time.time() + config.mcp.access_token_ttl_seconds,
-            },
+            {**common, "expires_at": now + config.mcp.access_token_ttl_seconds},
         )
         mcp_store.save(
-            "refresh",
-            mcp_store.token_key(refresh),
-            {
-                "client_id": client_id,
-                "scopes": scopes,
-                "subject": subject,
-                "resource": resource,
-                "session_id": session_id,
-                "expires_at": time.time() + config.mcp.refresh_token_ttl_seconds,
-            },
+            "refresh", mcp_store.token_key(refresh), {**common, "expires_at": expires}
         )
+
+        activation = {"accepted": False}
+
+        def activate(values):
+            activation["accepted"] = False
+            current = values[f"session:{identity}"]
+            if old:
+                if (
+                    not current
+                    or current.get("revoked_at")
+                    or current.get("generation") != old["generation"]
+                    or current.get("refresh_hash") != previous_refresh
+                    or current.get("expires_at", 0) <= time.time()
+                    or current.get("client_id") != client_id
+                ):
+                    return {}
+            elif current:
+                return {}
+            activation["accepted"] = True
+            return {
+                f"session:{identity}": {
+                    **(current or {}),
+                    "kind": "session",
+                    "id": identity,
+                    "source": "mcp",
+                    "login": subject,
+                    "client_id": client_id,
+                    "resource": canonical,
+                    "scopes": scopes,
+                    "authority_policy": mcp_grants.POLICY,
+                    "generation": generation,
+                    "refresh_hash": mcp_store.token_key(refresh),
+                    "access_hash": mcp_store.token_key(access),
+                    "created_at": current["created_at"] if current else now,
+                    "expires_at": expires,
+                    "revoked_at": 0.0,
+                }
+            }
+
+        grant_store.mutate([("session", identity)], activate)
+        if not activation["accepted"]:
+            mcp_store.delete("access", mcp_store.token_key(access))
+            mcp_store.delete("refresh", mcp_store.token_key(refresh))
+            raise TokenError("invalid_grant", "Refresh token already used or revoked")
         return OAuthToken(
             access_token=access,
             token_type="Bearer",
             expires_in=config.mcp.access_token_ttl_seconds,
-            scope=" ".join(scopes),
+            scope=mcp_grants.SCOPE,
             refresh_token=refresh,
         )
+
+    def _credential(self, kind: str, token: str) -> dict | None:
+        record = mcp_store.get(kind, mcp_store.token_key(token))
+        if (
+            not record
+            or _expires_at(record) <= time.time()
+            or record.get("scopes") != [mcp_grants.SCOPE]
+            or not record.get("session_id")
+        ):
+            return None
+        try:
+            grant = mcp_grants.validate(record["session_id"], record.get("subject"))
+        except HTTPException:
+            return None
+        if (
+            record.get("generation") != grant.get("generation")
+            or record.get("client_id") != grant.get("client_id")
+            or record.get("resource") != grant.get("resource")
+            or grant.get(f"{kind}_hash") != mcp_store.token_key(token)
+        ):
+            return None
+        return record
 
     async def exchange_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: AuthorizationCode
     ) -> OAuthToken:
         key = mcp_store.token_key(authorization_code.code)
-        record = mcp_store.get("code", key)
+        record = mcp_store.consume("code", key)
         if (
             not record
             or _expires_at(record) < time.time()
@@ -332,18 +388,17 @@ class MCPAuthProvider:
             raise TokenError(
                 "invalid_grant", "authorization code is invalid or already used"
             )
-        mcp_store.delete("code", key)
         return await self._issue_tokens(
             client_id=client.client_id or "",
-            scopes=authorization_code.scopes,
-            subject=authorization_code.subject,
-            resource=authorization_code.resource,
+            scopes=list(record["scopes"]),
+            subject=record.get("subject"),
+            resource=record.get("resource"),
         )
 
     async def load_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: str
     ) -> RefreshToken | None:
-        record = mcp_store.get("refresh", mcp_store.token_key(refresh_token))
+        record = self._credential("refresh", refresh_token)
         if (
             not record
             or _expires_at(record) < time.time()
@@ -366,7 +421,7 @@ class MCPAuthProvider:
         scopes: list[str],
     ) -> OAuthToken:
         key = mcp_store.token_key(refresh_token.token)
-        record = mcp_store.get("refresh", key)
+        record = self._credential("refresh", refresh_token.token)
         if (
             not record
             or _expires_at(record) < time.time()
@@ -375,20 +430,19 @@ class MCPAuthProvider:
             raise TokenError(
                 "invalid_grant", "refresh token is invalid or already used"
             )
-        mcp_store.delete("refresh", key)
-        # Rotation invalidates the previous access token session as well.
-        session_id = record.get("session_id")
-        if session_id:
-            mcp_store.delete_access_session(str(session_id))
+        if scopes != [mcp_grants.SCOPE]:
+            raise TokenError("invalid_scope", "Full MCP access is required")
         return await self._issue_tokens(
             client_id=client.client_id or "",
             scopes=scopes,
             subject=record.get("subject"),
             resource=record.get("resource"),
+            grant_id=record["session_id"],
+            previous_refresh=key,
         )
 
     async def load_access_token(self, token: str) -> AccessToken | None:
-        record = mcp_store.get("access", mcp_store.token_key(token))
+        record = self._credential("access", token)
         if not record or _expires_at(record) < time.time():
             return None
         return AccessToken(
@@ -409,9 +463,20 @@ class MCPAuthProvider:
         del token_type_hint
         for kind in ("access", "refresh"):
             record = mcp_store.get(kind, mcp_store.token_key(token))
+            if (
+                record
+                and record.get("session_id")
+                and record.get("scopes") == [mcp_grants.SCOPE]
+            ):
+                mcp_grants.revoke(record["session_id"])
+                return
             mcp_store.delete(kind, mcp_store.token_key(token))
-            if record and record.get("session_id"):
-                mcp_store.delete_access_session(str(record["session_id"]))
+
+
+def database_login(value: str) -> bool:
+    import re
+
+    return re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", value) is not None
 
 
 provider = MCPAuthProvider()

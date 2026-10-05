@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from mcp.server.auth.middleware.auth_context import auth_context_var
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
-from mcp.server.auth.provider import AccessToken
+from tests.mcp_helpers import access_token
 from mcp.shared.auth import OAuthClientInformationFull
 
 from eng_platform_api.config import config
@@ -28,7 +28,7 @@ def isolated_mcp(monkeypatch):
     for values in mcp_store._memory.values():
         values.clear()
     monkeypatch.setattr(config, "mock_mode", True)
-    monkeypatch.setattr(config.mcp, "enabled", False)
+    monkeypatch.setattr(config.mcp, "enabled", True)
     monkeypatch.setattr(config.mcp, "public_base_url", "http://testserver")
     monkeypatch.setattr(config.auth, "allowed_logins", ("diegomad14",))
 
@@ -38,7 +38,7 @@ def _client(client_id="mcp-test"):
         client_id=client_id,
         redirect_uris=["http://localhost:3333/callback"],
         token_endpoint_auth_method="none",
-        scope="eng-platform.read eng-platform.deploy eng-platform.rollback",
+        scope="eng-platform.access",
     )
 
 
@@ -81,12 +81,14 @@ async def test_dcr_uses_public_pkce_client_and_hashed_opaque_tokens():
         mcp_store.token_key(raw_access),
         {
             "client_id": "mcp-test",
-            "scopes": ["eng-platform.read"],
+            "scopes": ["eng-platform.access"],
             "subject": "diegomad14",
             "expires_at": time.time() + 60,
         },
     )
-    assert await provider.verify_token(raw_access)
+    assert (
+        await provider.verify_token(raw_access) is None
+    )  # Legacy indices cannot authorize access.
     assert raw_access not in mcp_store._memory["access"]
 
 
@@ -115,7 +117,7 @@ async def test_refresh_rotation_revokes_previous_access_token():
     await provider.register_client(client)
     issued = await provider._issue_tokens(
         client_id="mcp-test",
-        scopes=["eng-platform.read"],
+        scopes=["eng-platform.access"],
         subject="diegomad14",
         resource=None,
     )
@@ -128,6 +130,7 @@ async def test_refresh_rotation_revokes_previous_access_token():
 
 
 def test_feature_flag_hides_mcp_and_enabled_endpoint_requires_oauth(monkeypatch):
+    monkeypatch.setattr(config.mcp, "enabled", False)
     with TestClient(app, base_url="http://localhost:8000") as client:
         assert client.get("/mcp").status_code == 404
         monkeypatch.setattr(config.mcp, "enabled", True)
@@ -151,7 +154,7 @@ def test_oauth_metadata_matches_public_pkce_dcr_contract(monkeypatch):
     assert metadata["code_challenge_methods_supported"] == ["S256"]
     assert metadata["registration_endpoint"] == "http://testserver/register"
     assert metadata["scopes_supported"] == sorted(_SCOPES)
-    assert "eng-platform.cost-alerts.send" in metadata["scopes_supported"]
+    assert "eng-platform.access" in metadata["scopes_supported"]
 
 
 def test_advertised_cost_alert_scopes_can_register_without_deploy_permissions(
@@ -160,7 +163,7 @@ def test_advertised_cost_alert_scopes_can_register_without_deploy_permissions(
     monkeypatch.setattr(config.mcp, "enabled", True)
     with TestClient(app) as client:
         metadata = client.get("/.well-known/oauth-authorization-server").json()
-        scopes = {"eng-platform.read", "eng-platform.cost-alerts.send"}
+        scopes = {"eng-platform.access", "eng-platform.access"}
         assert scopes.issubset(metadata["scopes_supported"])
         response = client.post(
             "/register",
@@ -185,7 +188,7 @@ def test_http_dcr_accepts_public_pkce_and_rejects_confidential_method(monkeypatc
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "token_endpoint_auth_method": "none",
-        "scope": "eng-platform.read",
+        "scope": "eng-platform.access",
     }
     with TestClient(app) as client:
         accepted = client.post("/register", json=body)
@@ -222,16 +225,7 @@ def test_existing_github_callback_routes_pending_mcp_state(monkeypatch):
 
 def test_streamable_http_initialize_and_tool_discovery(monkeypatch):
     monkeypatch.setattr(config.mcp, "enabled", True)
-    mcp_store.save(
-        "access",
-        mcp_store.token_key("mcp-access"),
-        {
-            "client_id": "mcp-client",
-            "scopes": ["eng-platform.read"],
-            "subject": "diegomad14",
-            "expires_at": time.time() + 60,
-        },
-    )
+    access_token(token="mcp-access", client_id="mcp-client")
     headers = {
         "Authorization": "Bearer mcp-access",
         "MCP-Protocol-Version": "2025-06-18",
@@ -264,10 +258,10 @@ def test_streamable_http_initialize_and_tool_discovery(monkeypatch):
 def test_read_tool_requires_scope_and_audits_no_raw_inputs():
     token = auth_context_var.set(
         AuthenticatedUser(
-            AccessToken(
+            access_token(
                 token="opaque",
                 client_id="client",
-                scopes=["eng-platform.read"],
+                scopes=["eng-platform.access"],
                 subject="diegomad14",
             )
         )
@@ -282,10 +276,10 @@ def test_read_tool_requires_scope_and_audits_no_raw_inputs():
     assert len(record["input_fingerprint"]) == 64
 
 
-def test_mutation_does_not_accept_executor_or_sha_and_requires_deploy_scope():
+def test_mutation_does_not_accept_executor_or_sha_and_rejects_legacy_scope():
     token = auth_context_var.set(
         AuthenticatedUser(
-            AccessToken(
+            access_token(
                 token="opaque",
                 client_id="client",
                 scopes=["eng-platform.read"],
@@ -308,10 +302,10 @@ def test_mutation_does_not_accept_executor_or_sha_and_requires_deploy_scope():
 def test_tool_errors_are_audited_and_mutation_rate_limit_is_enforced():
     token = auth_context_var.set(
         AuthenticatedUser(
-            AccessToken(
+            access_token(
                 token="opaque",
                 client_id="client",
-                scopes=["eng-platform.read", "eng-platform.deploy"],
+                scopes=["eng-platform.access"],
                 subject="diegomad14",
             )
         )
@@ -406,13 +400,11 @@ async def test_tools_return_only_public_dtos_and_audit_operations(monkeypatch):
     monkeypatch.setattr(mcp_server.metrics, "get_cloud_run_metrics", metrics)
     token = auth_context_var.set(
         AuthenticatedUser(
-            AccessToken(
+            access_token(
                 token="opaque",
                 client_id="client",
                 scopes=[
-                    "eng-platform.read",
-                    "eng-platform.deploy",
-                    "eng-platform.rollback",
+                    "eng-platform.access",
                 ],
                 subject="diegomad14",
             )
@@ -473,7 +465,7 @@ async def test_oauth_provider_rejects_wrong_client_and_revokes_session():
     await provider.register_client(other_client)
     issued = await provider._issue_tokens(
         client_id="mcp-test",
-        scopes=["eng-platform.read"],
+        scopes=["eng-platform.access"],
         subject="diegomad14",
         resource=None,
     )
