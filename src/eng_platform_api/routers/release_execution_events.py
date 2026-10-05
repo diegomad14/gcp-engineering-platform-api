@@ -21,6 +21,7 @@ from ..services import (
     release_reconciler,
     release_workflow_identity,
 )
+from ..services.event_processing import run_event_processing
 
 from ..services.resource_access import require_managed_service_name
 
@@ -266,6 +267,23 @@ async def accept_event(
         raise HTTPException(status_code=400, detail="Invalid content length") from exc
     if len(await request.body()) > 1_000_000:
         raise HTTPException(status_code=413, detail="Release event exceeds 1 MB")
+    # Do not acknowledge the callback until verification, persistence and
+    # reconciliation finish; their synchronous I/O must not block the loop.
+    return await run_event_processing(
+        _accept_event,
+        execution_id,
+        payload,
+        authorization,
+        x_eng_platform_event_token,
+    )
+
+
+def _accept_event(
+    execution_id: str,
+    payload: ReleaseExecutionEvent,
+    authorization: str | None,
+    x_eng_platform_event_token: str | None,
+):
     execution = release_executions.get(execution_id)
     if execution is None or payload.execution_id != execution_id:
         raise HTTPException(status_code=404, detail="Unknown release execution")

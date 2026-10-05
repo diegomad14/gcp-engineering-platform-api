@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
+
 from eng_platform_api.models import CatalogResponse, CatalogService, DeploymentItem
 from eng_platform_api.services import github_actions
 
@@ -16,6 +18,35 @@ def _service() -> CatalogService:
         project_id="test-project",
         region="us-central1",
     )
+
+
+@pytest.mark.parametrize("limit", [0, 1, 5, -1])
+def test_recent_releases_does_not_consume_beyond_requested_limit(limit):
+    releases = [object() for _ in range(max(0, limit))]
+
+    def paginated():
+        yield from releases
+        raise AssertionError("Fetched an unnecessary GitHub release page")
+
+    with mock.patch.object(
+        github_actions.github_deployments, "github_client"
+    ) as github_client:
+        repo = github_client.return_value.get_repo.return_value
+        repo.get_releases.return_value = paginated()
+        assert (
+            github_actions._fetch_recent_releases("test-org/test-api", limit)
+            == releases
+        )
+
+
+def test_recent_releases_preserves_short_results_and_order():
+    releases = [object(), object()]
+    with mock.patch.object(
+        github_actions.github_deployments, "github_client"
+    ) as github_client:
+        repo = github_client.return_value.get_repo.return_value
+        repo.get_releases.return_value = iter(releases)
+        assert github_actions._fetch_recent_releases("test-org/test-api") == releases
 
 
 def test_release_summary_uses_semver_releases_and_deployment_state(

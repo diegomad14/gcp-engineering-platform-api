@@ -99,33 +99,62 @@ def _policy_hash(service: CatalogService) -> str:
 
 def _open_circuit(*, repository: str, run_id: str, reason: str, evidence: str) -> None:
     owner = _owner(repository)
-    executor_circuits.open_circuit(
+    circuit, _created = executor_circuits.open_circuit(
         owner,
         reason=reason,
         repository=repository,
         run_id=run_id,
         evidence=evidence,
     )
-    # Circuit persistence is the safety boundary. Repository variables are an
-    # economic optimization and can be retried independently after a partial
-    # GitHub API failure.
-    repositories = {
-        service.repository
-        for service in catalog.get_services().services
-        if service.repository
-        and (
-            not config.cloud_build.repositories
-            or getattr(service, "service_name", "") in config.cloud_build.repositories
-        )
-    }
-    for candidate in repositories:
-        try:
-            if github_release_control.repository_is_private(candidate):
-                github_release_control.set_repository_execution_mode(
-                    candidate, "cloud_build"
+    _propagate_open_circuit(owner, circuit)
+
+
+def _propagate_open_circuit(owner: str, circuit: dict[str, Any]) -> None:
+    # Never cache the provider decision or reopen from a stale read. Only the
+    # best-effort repository hints are deduplicated, using the existing durable
+    # circuit document so bursts on different workers share one sweep.
+    if not executor_circuits.mode_propagation_due(circuit):
+        return
+    token = None
+    succeeded = False
+    try:
+        token = executor_circuits.claim_mode_propagation(owner)
+        if token is None:
+            return
+        repositories = {
+            service.repository
+            for service in catalog.get_services().services
+            if service.repository
+            and (
+                not config.cloud_build.repositories
+                or getattr(service, "service_name", "")
+                in config.cloud_build.repositories
+            )
+        }
+        succeeded = True
+        for candidate in repositories:
+            try:
+                if github_release_control.repository_is_private(candidate):
+                    github_release_control.set_repository_execution_mode(
+                        candidate, "cloud_build"
+                    )
+            except Exception:
+                succeeded = False
+                logger.exception("Unable to propagate open circuit to %s", candidate)
+    except Exception:
+        # The circuit has already been persisted/read. A catalog or lease failure
+        # must not switch execution back to GitHub; a later event can repair hints.
+        logger.exception("Unable to propagate open circuit for %s", owner)
+    finally:
+        if token is not None:
+            try:
+                executor_circuits.finish_mode_propagation(
+                    owner, token=token, succeeded=succeeded
                 )
-        except Exception:
-            logger.exception("Unable to propagate open circuit to %s", candidate)
+            except Exception:
+                # An uncertain completion is retried after the durable lease
+                # expires. It must not turn an economic optimization into an outage.
+                logger.exception("Unable to finish circuit propagation for %s", owner)
 
 
 def _provider(service: CatalogService) -> str:
@@ -137,13 +166,9 @@ def _provider(service: CatalogService) -> str:
     if not private:
         return "github_actions"
     owner = _owner(service.repository)
-    if executor_circuits.is_open(owner):
-        _open_circuit(
-            repository=service.repository,
-            run_id="",
-            reason="persistent_github_actions_billing_circuit",
-            evidence="circuit already open",
-        )
+    circuit = executor_circuits.get(owner)
+    if circuit.get("state") == "open":
+        _propagate_open_circuit(owner, circuit)
         return "cloud_build"
     usage = github_actions_quota.current_usage()
     if usage and usage.exhausted:

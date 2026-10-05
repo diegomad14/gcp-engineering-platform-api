@@ -1,9 +1,10 @@
 """Costs router — BigQuery billing data."""
 
 from typing import Literal
+from concurrent.futures import Future
 from threading import Lock
 from time import monotonic
-from typing import Callable, TypeVar
+from typing import Callable, TypeVar, cast
 
 from fastapi import APIRouter, Query
 
@@ -15,6 +16,7 @@ from ..services import gcp_billing_bigquery as billing
 router = APIRouter(prefix="/api/costs", tags=["costs"])
 _CACHE_TTL_SECONDS = 300
 _cache: dict[tuple[object, ...], tuple[float, object]] = {}
+_inflight: dict[tuple[object, ...], Future[object]] = {}
 _cache_lock = Lock()
 _T = TypeVar("_T")
 
@@ -32,10 +34,28 @@ def _cached(key: tuple[object, ...], loader: Callable[[], _T]) -> _T:
         cached = _cache.get(key)
         now = monotonic()
         if cached and now - cached[0] < _CACHE_TTL_SECONDS:
-            return cached[1]  # type: ignore[return-value]
+            return cast(_T, cached[1])
+        pending = _inflight.get(key)
+        owner = pending is None
+        if pending is None:
+            pending = Future()
+            _inflight[key] = pending
+    # Only callers for this exact window/key share a load. A slow daily query
+    # must not hold up cached responses or unrelated billing summaries.
+    if not owner:
+        return cast(_T, pending.result())
+    try:
         value = loader()
+    except BaseException as exc:
+        with _cache_lock:
+            _inflight.pop(key, None)
+        pending.set_exception(exc)
+        raise
+    with _cache_lock:
         _cache[key] = (monotonic(), value)
-        return value
+        _inflight.pop(key, None)
+    pending.set_result(value)
+    return value
 
 
 @router.get("/status")

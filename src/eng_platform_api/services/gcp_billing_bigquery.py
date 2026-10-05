@@ -143,7 +143,13 @@ def _build_items_sql(
     """
 
 
-def _query_billing(table_fqn: str, where_clause: str, group_by: str = "resource"):
+def _query_billing(
+    table_fqn: str,
+    where_clause: str,
+    group_by: str = "resource",
+    *,
+    include_items: bool = True,
+):
     try:
         client = bigquery.Client(project=_PROJECT_ID)
         items = [
@@ -170,9 +176,13 @@ def _query_billing(table_fqn: str, where_clause: str, group_by: str = "resource"
                     for c in (getattr(row, "components", None) or [])
                 ],
             )
-            for row in client.query(
-                _build_items_sql(table_fqn, where_clause, group_by)
-            ).result()
+            for row in (
+                client.query(
+                    _build_items_sql(table_fqn, where_clause, group_by)
+                ).result()
+                if include_items
+                else ()
+            )
         ]
         sql = f"""
         SELECT SUM(cost) AS total_cost, {_CREDITS_SUM} AS total_credits,
@@ -188,7 +198,13 @@ def _query_billing(table_fqn: str, where_clause: str, group_by: str = "resource"
 
 
 def _summary(
-    table: str | None, start: datetime, end: datetime, as_of: datetime, group_by: str
+    table: str | None,
+    start: datetime,
+    end: datetime,
+    as_of: datetime,
+    group_by: str,
+    *,
+    include_items: bool = True,
 ) -> CostSummary:
     quality = BillingQuality(retrieved_at=as_of.isoformat())
     result = CostSummary(period=_period(start, end), data_quality=quality)
@@ -196,7 +212,9 @@ def _summary(
         quality.status, quality.reason = "unavailable", "export_unavailable"
         return result
     try:
-        items, row = _query_billing(table, _where(start, end, as_of), group_by)
+        items, row = _query_billing(
+            table, _where(start, end, as_of), group_by, include_items=include_items
+        )
     except BillingUnavailable:
         quality.status, quality.reason = "unavailable", "billing_query_unavailable"
         return result
@@ -292,7 +310,9 @@ def get_daily_costs(days: int = 30, month_to_date: bool = False) -> DailyCostSer
     start, end, prev_start, prev_end = _windows(days, month_to_date, now)
     current, previous = _period(start, end), _period(prev_start, prev_end)
     table = _billing_table_exists()
-    summary = _summary(table, prev_start, end, now, "service")
+    # Daily output uses only the currency and data-quality metadata here. Its
+    # plotted values come from the daily query and comparison keeps components.
+    summary = _summary(table, prev_start, end, now, "service", include_items=False)
     quality = summary.data_quality
     rows = []
     if table and quality.status == "partial":
@@ -446,9 +466,13 @@ def _comparison(
                 prev_latest - prev_start,
             ),
         )
-        end, prev_end = start + duration, prev_start + duration
-        current = _summary(table, start, end, now, group_by)
-        previous = _summary(table, prev_start, prev_end, now, group_by)
+        bounded_end, bounded_prev_end = start + duration, prev_start + duration
+        # Requery only when the watermark actually changes the requested cut.
+        # An unchanged interval has the same as-of timestamp and query inputs.
+        if bounded_end != end or bounded_prev_end != prev_end:
+            end, prev_end = bounded_end, bounded_prev_end
+            current = _summary(table, start, end, now, group_by)
+            previous = _summary(table, prev_start, prev_end, now, group_by)
 
     def key(i):
         return i.project_id, i.gcp_service, i.service_name, i.currency

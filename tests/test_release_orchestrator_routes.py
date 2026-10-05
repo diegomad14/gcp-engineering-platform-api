@@ -64,7 +64,9 @@ def test_provider_opens_persistent_circuit_only_for_confirmed_quota(monkeypatch)
     monkeypatch.setattr(
         orchestrator.github_release_control, "repository_is_private", lambda _: True
     )
-    monkeypatch.setattr(orchestrator.executor_circuits, "is_open", lambda _: False)
+    monkeypatch.setattr(
+        orchestrator.executor_circuits, "get", lambda _: {"state": "closed"}
+    )
     monkeypatch.setattr(orchestrator, "_open_circuit", opened)
     monkeypatch.setattr(
         orchestrator.github_actions_quota, "current_usage", lambda: None
@@ -81,15 +83,18 @@ def test_provider_opens_persistent_circuit_only_for_confirmed_quota(monkeypatch)
     assert opened.call_args.kwargs["reason"] == "included_private_minutes_exhausted"
 
     opened.reset_mock()
-    monkeypatch.setattr(orchestrator.executor_circuits, "is_open", lambda _: True)
-    assert orchestrator._provider(service) == "cloud_build"
-    assert (
-        opened.call_args.kwargs["reason"] == "persistent_github_actions_billing_circuit"
+    monkeypatch.setattr(
+        orchestrator.executor_circuits, "get", lambda _: {"state": "open"}
     )
+    propagated = mock.Mock()
+    monkeypatch.setattr(orchestrator, "_propagate_open_circuit", propagated)
+    assert orchestrator._provider(service) == "cloud_build"
+    opened.assert_not_called()
+    propagated.assert_called_once_with("owner", {"state": "open"})
 
 
 def test_open_circuit_persists_then_propagates_to_private_repositories(monkeypatch):
-    persisted = mock.Mock()
+    persisted = mock.Mock(wraps=orchestrator.executor_circuits.open_circuit)
     set_mode = mock.Mock()
     monkeypatch.setattr(orchestrator.executor_circuits, "open_circuit", persisted)
     monkeypatch.setattr(

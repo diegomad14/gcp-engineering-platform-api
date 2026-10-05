@@ -13,6 +13,7 @@ from authlib.integrations.httpx_client import (  # type: ignore[import-untyped]
 )
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
+from starlette.concurrency import run_in_threadpool
 
 from ..config import config
 from ..models import AuthSession
@@ -76,8 +77,8 @@ async def current_session(request: Request):
         authenticated=identity != "anonymous",
         can_deploy=can_deploy,
         can_view_logs=can_view_logs(request),
-        can_view_catalog=can_view_catalog(request),
-        can_query_databases=can_query_databases(request),
+        can_view_catalog=await run_in_threadpool(can_view_catalog, request),
+        can_query_databases=await run_in_threadpool(can_query_databases, request),
         login="" if identity == "anonymous" else identity,
         avatar_url=str(request.session.get("github_avatar_url", "")),
     )
@@ -120,7 +121,11 @@ async def github_callback(request: Request):
     # sign-in, so the two flows stay isolated.
     from ..services.mcp_auth import owns_pending_state, provider as mcp_provider
 
-    if config.mcp.enabled and supplied_state and owns_pending_state(supplied_state):
+    if (
+        config.mcp.enabled
+        and supplied_state
+        and await run_in_threadpool(owns_pending_state, supplied_state)
+    ):
         try:
             destination = await mcp_provider.complete_github_authorization(
                 state=supplied_state, authorization_response=str(request.url)
@@ -133,7 +138,7 @@ async def github_callback(request: Request):
         response = RedirectResponse(
             destination, status_code=302, headers={"Cache-Control": "no-store"}
         )
-        nonce = mcp_provider.bind_consent_browser(destination)
+        nonce = await run_in_threadpool(mcp_provider.bind_consent_browser, destination)
         if nonce:
             response.set_cookie(
                 "eng_platform_mcp_consent",

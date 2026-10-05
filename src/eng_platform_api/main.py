@@ -12,6 +12,7 @@ from time import monotonic
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.routing import BaseRoute, Match, NoMatchFound
 
@@ -209,7 +210,7 @@ async def record_request_duration(request: Request, call_next):
     source = getattr(request.state, "private_catalog_source", None)
     if source is not None:
         try:
-            require_private_metadata_request(request)
+            await run_in_threadpool(require_private_metadata_request, request)
             if source != catalog_source_identity():
                 raise HTTPException(503, "Runtime catalog changed; retry the request")
         except HTTPException as exc:

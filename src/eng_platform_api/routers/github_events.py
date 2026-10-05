@@ -8,6 +8,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 
 from ..config import config
 from ..services import catalog, github_webhooks, release_orchestrator
+from ..services.event_processing import run_event_processing
 from ..services.repository_identity import verify_webhook_identity
 
 router = APIRouter(prefix="/api/internal/github", tags=["internal"])
@@ -31,6 +32,16 @@ async def github_event(
     body = await request.body()
     if len(body) > 2_000_000:
         raise HTTPException(status_code=413, detail="GitHub event exceeds 2 MB")
+    # Keep verification, journaling and orchestration ordered and awaited while
+    # synchronous providers run off the event loop shared by other requests.
+    return await run_event_processing(
+        _process_event, body, x_github_event, x_github_delivery, x_hub_signature_256
+    )
+
+
+def _process_event(
+    body: bytes, x_github_event: str, x_github_delivery: str, x_hub_signature_256: str
+):
     if not github_webhooks.verify_signature(body, x_hub_signature_256):
         raise HTTPException(status_code=401, detail="Invalid GitHub webhook signature")
     try:
