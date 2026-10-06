@@ -11,6 +11,12 @@ evidence, then stage the corresponding full SHA in Engineering Platform with
 release of Engineering Platform before requesting the next Artemis API deploy.
 Preserve all other environment values, secret references, identity and traffic.
 
+After the maintenance deployment succeeds, read `ENG_PLATFORM_ARTEMIS_WEB_SHA`
+from the Engineering Platform revision actually serving traffic and compare it
+with every serving Web revision. A staged `--no-traffic` revision does not update
+the pin used by the previous serving revision. Verify this pin explicitly even
+when the generic candidate configuration checks pass.
+
 ## Verified maintenance target on 2026-10-05
 
 - Serving web revision: `cgm-artemis-web-ep-6c0528f4cb` (100% traffic).
