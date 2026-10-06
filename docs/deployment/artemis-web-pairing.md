@@ -5,8 +5,10 @@ web commit passed to the Artemis API release executor. The executor compares it
 with the commit labels of every web revision serving traffic and blocks an API
 deployment on a mismatch. Keep this validation enabled.
 
-After publishing Artemis Web, verify its serving revision and exact release
-evidence, then stage the corresponding full SHA in Engineering Platform with
+Before deploying Artemis Web, retain its exact release evidence in the
+access-controlled deployment record. After publishing Web, verify its serving
+revision against that evidence, then stage the corresponding full SHA in
+Engineering Platform with
 `--no-traffic`. Publish that configuration through a new eligible maintenance
 release of Engineering Platform before requesting the next Artemis API deploy.
 Preserve all other environment values, secret references, identity and traffic.
@@ -31,3 +33,11 @@ verified pin after promotion.
 For later Web releases, repeat this procedure using only the full commit actually
 serving traffic, confirmed by its release evidence. Never advance the pin to a
 candidate or merely eligible web release.
+
+## Live-tag eligibility
+
+The currently live tag is excluded from eligible deployments and release-evidence
+lookups. Retain exact-SHA evidence before promotion; a post-promotion eligibility
+error does not invalidate the evidence already verified. Do not use another
+service name to bypass this check. Updating the serving pin requires a new,
+eligible Engineering Platform maintenance release through the canonical flow.
