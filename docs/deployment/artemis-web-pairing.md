@@ -17,22 +17,16 @@ with every serving Web revision. A staged `--no-traffic` revision does not updat
 the pin used by the previous serving revision. Verify this pin explicitly even
 when the generic candidate configuration checks pass.
 
-## Verified maintenance target on 2026-10-05
+## Recording a maintenance target
 
-- Serving web revision: `cgm-artemis-web-ep-6c0528f4cb` (100% traffic).
-- Web repository: `diegomad14/cgm-artemis-web`.
-- Expected web commit: `232b889589c7d6c56bb78246cb6edb1ac7b497b3` (`v1.41.0`).
-- Superseded configuration: `2f37ce20be43133e888b6dac4ee18f902652a38a`.
-- Maintenance source starts from the serving Engineering Platform release
-  `v0.37.5` / `ad4df25fc6c7567f31f1210a806e689b109f47d0`; no functional source
-  change is needed for this configuration correction.
+Record the serving Web revision, verified full commit and release tag, previous
+pin and rollback target in an access-controlled deployment record. Keep private
+application SHAs and runtime identifiers out of this public runbook.
 
-The notification update is published in Web `v1.41.0`. This maintenance aligns
-the central pin with that verified serving commit without changing the pairing
-validation. This procedure does not redeploy Artemis API, Web or any Artemis
-worker, change permissions, or alter recovery settings. Retry the original
-eligible Artemis API tag only after the maintenance release and live pin are
-verified.
+Use the verified record when staging the pin and starting the canonical
+maintenance release. Retain exact-SHA oss-v2 evidence and candidate/production
+checks, then record the new serving Engineering Platform revision and the
+verified pin after promotion.
 
 For later Web releases, repeat this procedure using only the full commit actually
 serving traffic, confirmed by its release evidence. Never advance the pin to a
