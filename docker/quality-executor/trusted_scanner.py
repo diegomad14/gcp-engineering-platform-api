@@ -20,6 +20,38 @@ from untrusted_command import _kill_descendants
 _UID = 65532
 _GID = 65532
 _MAX_OUTPUT_BYTES = 128 * 1024 * 1024
+_SEMGREP_ERROR_ENTRY_LIMIT = 4096
+_SEMGREP_ERROR_COUNT_LIMIT = 65535
+_SCANNER_DETAIL_LIMIT = 500
+_SEMGREP_ERROR_GENERIC = "Semgrep reported scan errors"
+# Exact JSON labels from Semgrep 1.136.0's semgrep-interfaces revision
+# 85c728ef38c1aef822f28035078fa2671ec7d10a, semgrep_output_v1.atd.
+# Diagnostic categories only: never use this mapping to accept/reject a scan.
+_SEMGREP_ERROR_CATEGORIES = {
+    "Lexical error": "parse",
+    "Syntax error": "parse",
+    "Other syntax error": "parse",
+    "AST builder error": "parse",
+    "PartialParsing": "partial_parse",
+    "Timeout": "timeout",
+    "Fixpoint timeout": "timeout",
+    "Timeout during interfile analysis": "timeout",
+    "Out of memory": "memory",
+    "OOM during interfile analysis": "memory",
+    "Stack overflow": "memory",
+    "Rule parse error": "rule",
+    "InvalidRuleSchemaError": "rule",
+    "UnknownLanguageError": "rule",
+    "Invalid YAML": "rule",
+    "PatternParseError": "rule",
+    "Pattern parse error": "rule",
+    "IncompatibleRule": "rule",
+    "Incompatible rule": "rule",
+    "Missing plugin": "rule",
+    "Internal matching error": "internal",
+    "SemgrepError": "internal",
+    "Fatal error": "internal",
+}
 _BINARIES = {
     "semgrep": Path("/usr/local/bin/semgrep"),
     "trivy": Path("/usr/local/bin/trivy"),
@@ -201,6 +233,70 @@ def _read_normalized_capture(path: Path, handle: BinaryIO) -> dict[str, object]:
     return value
 
 
+def _semgrep_error_category(error: object) -> str:
+    if not isinstance(error, dict):
+        return "malformed"
+    kind = error.get("type")
+    if isinstance(kind, list):
+        kind = kind[0] if kind else None
+    if not isinstance(kind, str):
+        return "malformed"
+    # Do not hash or inspect arbitrarily long, attacker-controlled labels.
+    if len(kind) > 64:
+        return "other"
+    return _SEMGREP_ERROR_CATEGORIES.get(kind, "other")
+
+
+def _semgrep_error_summary(errors: object) -> str:
+    if not isinstance(errors, list):
+        return f"{_SEMGREP_ERROR_GENERIC}: state=INVALID_OUTPUT"
+    total = len(errors)
+    processed = min(total, _SEMGREP_ERROR_ENTRY_LIMIT)
+    counts = dict.fromkeys(
+        (
+            "parse",
+            "partial_parse",
+            "timeout",
+            "memory",
+            "rule",
+            "internal",
+            "other",
+            "malformed",
+        ),
+        0,
+    )
+    for index in range(processed):
+        counts[_semgrep_error_category(errors[index])] += 1
+    fields = " ".join(f"{category}={count}" for category, count in counts.items())
+    return (
+        f"{_SEMGREP_ERROR_GENERIC}: state=COLLECTED "
+        f"total={min(total, _SEMGREP_ERROR_COUNT_LIMIT)} "
+        f"capped={int(total > _SEMGREP_ERROR_COUNT_LIMIT)} "
+        f"processed={processed} incomplete={int(total > processed)} "
+        f"entry_limit={_SEMGREP_ERROR_ENTRY_LIMIT} "
+        f"count_limit={_SEMGREP_ERROR_COUNT_LIMIT} {fields}"
+    )
+
+
+def _semgrep_error_detail(errors: object) -> str:
+    # A diagnostic failure must never replace the existing rejection, reveal
+    # its exception/payload, or overflow the normalized detail's 500 characters.
+    try:
+        summary = _semgrep_error_summary(errors)
+        if not isinstance(summary, str):
+            return _SEMGREP_ERROR_GENERIC
+        line = f"trusted scanner: {summary}"
+        if (
+            not line.isascii()
+            or not line.isprintable()
+            or len(line) > _SCANNER_DETAIL_LIMIT
+        ):
+            return _SEMGREP_ERROR_GENERIC
+        return summary
+    except Exception:
+        return _SEMGREP_ERROR_GENERIC
+
+
 def _validate_scanner_result(scanner: str, value: dict[str, object]) -> None:
     if scanner != "semgrep":
         return
@@ -213,14 +309,14 @@ def _validate_scanner_result(scanner: str, value: dict[str, object]) -> None:
         raise TrustedScannerError("Semgrep did not scan any source files")
     errors = value.get("errors", [])
     if not isinstance(errors, list):
-        raise TrustedScannerError("Semgrep reported scan errors")
+        raise TrustedScannerError(_semgrep_error_detail(errors))
     # Semgrep reports parser limitations as PartialParsing even when the rest
     # of the file was scanned. Preserve these in the sealed report, but fail
     # closed on any scanner/runtime/configuration error.
     for error in errors:
         kind = error.get("type") if isinstance(error, dict) else None
         if not isinstance(kind, list) or not kind or kind[0] != "PartialParsing":
-            raise TrustedScannerError("Semgrep reported scan errors")
+            raise TrustedScannerError(_semgrep_error_detail(errors))
 
 
 def _seal_output(target: Path, value: dict[str, object]) -> None:
