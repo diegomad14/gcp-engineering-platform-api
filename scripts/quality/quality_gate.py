@@ -345,7 +345,34 @@ def main() -> int:
         artifact.unlink()
     (report_dir / "lcov.info").unlink(missing_ok=True)
     raw: dict[str, dict[str, Any]] = {}
-    for name, command in commands.items():
+    order = list(commands)
+    if args.profile == "python":
+        order = ["install", "format", "lint"] + [
+            name for name in order if name not in {"install", "format", "lint"}
+        ]
+    preflight_failure = ""
+    for name in order:
+        command = commands[name]
+        if args.profile == "python" and name == "tests":
+            failed_preflight = [
+                step for step in ("format", "lint") if raw[step]["returncode"] != 0
+            ]
+            if failed_preflight:
+                preflight_failure = (
+                    "Tests and coverage were not executed because Python preflight "
+                    f"failed: {', '.join(failed_preflight)}."
+                )
+                raw[name] = {
+                    "returncode": 0,
+                    "duration": 0.0,
+                    "output": preflight_failure,
+                    "skipped": True,
+                }
+                (report_dir / "tests.log").write_text(
+                    preflight_failure + "\n", encoding="utf-8"
+                )
+                print(preflight_failure, flush=True)
+                continue
         raw[name] = _run(command, cwd, report_dir / f"{name}.log")
 
     coverage_file = report_dir / "coverage.json"
@@ -353,8 +380,8 @@ def main() -> int:
     eslint_file = report_dir / "eslint.json"
     semgrep_file = report_dir / "semgrep.json"
     trivy_file = report_dir / "trivy.json"
-    coverage = _coverage(coverage_file)
-    if coverage is None:
+    coverage = None if preflight_failure else _coverage(coverage_file)
+    if coverage is None and not preflight_failure:
         coverage = _coverage(report_dir / "coverage-summary.json")
     lint_findings = _count_list_report(ruff_file)
     if eslint_file.exists():
@@ -428,7 +455,7 @@ def main() -> int:
             )
         )
 
-    if args.profile != "static":
+    if args.profile != "static" and not preflight_failure:
         if coverage is None:
             checks[1]["status"] = "FAILED"
             checks[1]["blocking_findings"] = max(1, checks[1]["blocking_findings"])
@@ -446,22 +473,32 @@ def main() -> int:
             event_path = os.environ.get("GITHUB_EVENT_PATH")
             event = json.loads(Path(event_path).read_text()) if event_path else {}
             base = resolve_base(cwd, args.commit_sha, event, args.base_sha)
-            differential_fields = differential(
-                cwd, report_dir, args.profile, base, args.commit_sha
-            )
-            percent = differential_fields["differential_coverage"]
-            status = (
-                "SKIPPED"
-                if percent is None
-                else "PASSED"
-                if percent >= 80
-                else "FAILED"
-            )
-            detail = (
-                "No modified executable lines"
-                if percent is None
-                else f"Changed-line coverage: {percent:.2f}% (minimum 80%)"
-            )
+            if preflight_failure:
+                differential_fields.update(
+                    base_sha=base,
+                    changed_lines=None,
+                    covered_changed_lines=None,
+                    differential_coverage=None,
+                    differential_threshold=80,
+                )
+                status, detail = "SKIPPED", preflight_failure
+            else:
+                differential_fields = differential(
+                    cwd, report_dir, args.profile, base, args.commit_sha
+                )
+                percent = differential_fields["differential_coverage"]
+                status = (
+                    "SKIPPED"
+                    if percent is None
+                    else "PASSED"
+                    if percent >= 80
+                    else "FAILED"
+                )
+                detail = (
+                    "No modified executable lines"
+                    if percent is None
+                    else f"Changed-line coverage: {percent:.2f}% (minimum 80%)"
+                )
         except (
             ValueError,
             OSError,
