@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import stat
 import sys
 
 import pytest
@@ -300,6 +301,28 @@ def test_successful_validation_preserves_seal_and_scanner_exit(
     assert list(staging.iterdir()) == []
 
 
+@pytest.mark.parametrize(
+    ("index", "unsafe_value"),
+    [
+        (0, stat.S_IFREG | 0o777),
+        (0, stat.S_IFREG | 0o444),
+        (0, stat.S_IFDIR | 0o555),
+        (3, 2),
+        (4, 1),
+        (5, 1),
+    ],
+)
+def test_unsafe_binary_metadata_still_blocks(scanner, monkeypatch, index, unsafe_value):
+    fields = [stat.S_IFREG | 0o555, 0, 0, 1, 0, 0, 0, 0, 0, 0]
+    monkeypatch.setattr(Path, "stat", lambda *args, **kwargs: os.stat_result(fields))
+    assert scanner._trusted_binary("semgrep") == Path("/usr/local/bin/semgrep")
+    fields[index] = unsafe_value
+    with pytest.raises(
+        scanner.TrustedScannerError, match="binary permissions are unsafe"
+    ):
+        scanner._trusted_binary("semgrep")
+
+
 def test_real_cli_transports_safe_summary_to_normalized_detail(
     monkeypatch, tmp_path, capsys
 ):
@@ -334,7 +357,7 @@ def test_real_cli_transports_safe_summary_to_normalized_detail(
         )
     )
     cli = tmp_path / "synthetic_cli.py"
-    cli.write_text("""import os, runpy, sys, time
+    cli.write_text("""import os, runpy, stat, sys, time
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, sys.argv[1])
@@ -344,8 +367,7 @@ real_stat = Path.stat
 
 def owned_stat(path, *args, **kwargs):
     if str(path) == "/usr/local/bin/semgrep":
-        fields = list(real_stat(Path(sys.executable), follow_symlinks=True))
-        fields[3] = 1
+        fields = [stat.S_IFREG | 0o555, 0, 0, 1, 0, 0, 0, 0, 0, 0]
     else:
         fields = list(real_stat(path, *args, **kwargs))
     fields[4] = fields[5] = 0
