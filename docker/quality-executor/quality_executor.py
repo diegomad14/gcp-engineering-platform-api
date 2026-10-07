@@ -107,6 +107,7 @@ def _json_request(
     *,
     data: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
+    timeout: float = 30,
 ) -> dict[str, Any]:
     body = (
         json.dumps(data, separators=(",", ":")).encode() if data is not None else None
@@ -117,14 +118,14 @@ def _json_request(
         headers={"Content-Type": "application/json", **(headers or {})},
         method="POST" if data is not None else "GET",
     )
-    with urllib.request.urlopen(request, timeout=30) as response:  # nosec B310
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310
         value = json.load(response)
     if not isinstance(value, dict):
         raise QualityExecutorError("Control-plane response was not an object")
     return value
 
 
-def _identity_token(audience: str) -> str:
+def _identity_token(audience: str, *, timeout: float | None = None) -> str:
     actions_url = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", "")
     actions_token = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
     if actions_url and actions_token:
@@ -135,7 +136,11 @@ def _identity_token(audience: str) -> str:
                 {"audience": "engineering-platform-release-orchestrator"}
             )
         )
-        value = _json_request(url, headers={"Authorization": f"Bearer {actions_token}"})
+        value = _json_request(
+            url,
+            headers={"Authorization": f"Bearer {actions_token}"},
+            **({"timeout": timeout} if timeout is not None else {}),
+        )
         token = value.get("value")
         if not isinstance(token, str) or not token:
             raise QualityExecutorError("GitHub did not issue a workflow identity")
@@ -146,7 +151,9 @@ def _identity_token(audience: str) -> str:
         + urllib.parse.urlencode({"audience": audience})
     )
     request = urllib.request.Request(url, headers={"Metadata-Flavor": "Google"})
-    with urllib.request.urlopen(request, timeout=10) as response:  # nosec B310
+    with urllib.request.urlopen(
+        request, timeout=timeout if timeout is not None else 10
+    ) as response:  # nosec B310
         return response.read().decode()
 
 
@@ -733,7 +740,7 @@ def _validate_report(
     return _report_hash(normalized)
 
 
-def _write_json(path: Path, value: dict[str, Any]) -> None:
+def _write_json(path: Path, value: dict[str, Any], *, compact: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", dir=path.parent
@@ -741,7 +748,14 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
     temporary = Path(temporary_name)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(value, handle, ensure_ascii=False, sort_keys=True, indent=2)
+            json.dump(
+                value,
+                handle,
+                ensure_ascii=True if compact else False,
+                sort_keys=True,
+                indent=None if compact else 2,
+                separators=(",", ":") if compact else None,
+            )
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -949,6 +963,119 @@ def _timeout_report(
     }
 
 
+def _observation_materials(
+    checkout: Path, git_directory: Path, head_sha: str
+) -> dict[str, Any]:
+    """Hash allowlisted tracked configuration/fixtures, never export their text."""
+    from quality_evidence import EvidenceError, canonical
+
+    # Never rediscover repository-owned .git after commands have run. The
+    # isolated checkout's verified Git directory remains owned by the engine.
+    git_args = [f"--git-dir={git_directory}", f"--work-tree={checkout}"]
+    git_environment = {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+        "LC_ALL": "C.UTF-8",
+    }
+    tree = _git(
+        checkout, *git_args, "rev-parse", f"{head_sha}^{{tree}}", env=git_environment
+    )
+    listing = _git(
+        checkout,
+        *git_args,
+        "ls-tree",
+        "-r",
+        "--full-tree",
+        "-z",
+        head_sha,
+        env=git_environment,
+    )
+    if len(listing) > 8_000_000:
+        raise EvidenceError("Source manifest exceeds limit")
+    tracked = set()
+    configurations = []
+    fixtures = []
+    config_names = {
+        "pyproject.toml",
+        "pytest.ini",
+        "setup.cfg",
+        ".coveragerc",
+        "uv.lock",
+        "poetry.lock",
+    }
+    for entry in listing.split("\0"):
+        if not entry:
+            continue
+        metadata, path = entry.split("\t", 1)
+        mode, kind, blob = metadata.split()
+        if kind != "blob" or mode == "120000":
+            continue
+        tracked.add(path)
+        name = Path(path).name
+        if name in config_names or name.startswith("requirements"):
+            configurations.append([path, blob])
+        if name == "conftest.py" or any(
+            part in {"fixtures", "testdata", "snapshots"} for part in Path(path).parts
+        ):
+            fixtures.append([path, blob])
+    return {
+        "tracked_paths": tracked,
+        "source_tree": tree,
+        "config_sha256": hashlib.sha256(canonical(sorted(configurations))).hexdigest(),
+        "fixture_sha256": hashlib.sha256(canonical(sorted(fixtures))).hexdigest(),
+    }
+
+
+def _export_test_observation(
+    output_dir: Path,
+    checkout: Path,
+    git_directory: Path,
+    cwd: Path,
+    report_directory: Path,
+    identity: dict[str, str],
+    profile: dict[str, Any],
+    report_hash: str,
+) -> None:
+    # The independent artifact cannot affect canonical quality or its report hash.
+    try:
+        # A failed export must never leave observations from a previous run.
+        (output_dir / "quality-test-observation.json").unlink(missing_ok=True)
+        from export_evidence import export_observation
+        from quality_evidence import canonical
+
+        materials = _observation_materials(
+            checkout, git_directory, identity["head_sha"]
+        )
+        observation = export_observation(
+            root=checkout,
+            working_directory=cwd,
+            report_directory=report_directory,
+            runtime=profile["runtime"],
+            command=profile["commands"]["tests"],
+            **materials,
+        )
+        _write_json(
+            output_dir / "quality-test-observation.json",
+            {
+                "schema_version": 1,
+                "execution_id": identity["execution_id"],
+                "fingerprint": identity["fingerprint"],
+                "provider_run_id": identity["provider_run_id"],
+                "report_sha256": report_hash,
+                "observation": observation,
+            },
+            compact=True,
+        )
+        print(
+            f"Test observations: state={observation['state']} bytes={len(canonical(observation))} measurement_ms={observation.get('measurement_ms', 0)} reuse_allowed=false"
+        )
+    except Exception:
+        # Fixed diagnostic only: exceptions can contain repository-supplied paths.
+        print("Test observations: export_failed reuse_allowed=false", flush=True)
+
+
 def _run_quality(
     service: str,
     source: Path,
@@ -985,6 +1112,20 @@ def _run_quality(
     trusted_runtime.mkdir(parents=True, mode=0o700)
     environment_path = trusted_runtime / "untrusted-environment.json"
     _write_private_json(environment_path, environment)
+    test_environment_path = environment_path
+    if profile["runtime"] == "python":
+        test_environment_path = trusted_runtime / "test-environment.json"
+        _write_private_json(
+            test_environment_path,
+            {
+                **environment,
+                "PYTHONPATH": "/opt/eng-platform",
+                "PYTEST_PLUGINS": "pytest_evidence",
+                "ENG_PLATFORM_TEST_MANIFEST": str(
+                    report_directory / "test-manifest.json"
+                ),
+            },
+        )
     report_path = trusted_runtime / "quality-report.json"
     scanner_staging = trusted_runtime / "scanner-staging"
     scanner_staging.mkdir(mode=0o700)
@@ -1033,7 +1174,7 @@ def _run_quality(
         "--test-command",
         _supervised_command(
             commands["tests"],
-            environment_path,
+            test_environment_path,
             report_directory,
             repository_deadline,
         ),
@@ -1138,6 +1279,16 @@ def _run_quality(
         "report": _normalize_report(report),
     }
     _write_json(output_dir / _RESULT_NAME, manifest)
+    _export_test_observation(
+        output_dir,
+        checkout,
+        git_directory,
+        cwd,
+        report_directory,
+        identity,
+        profile,
+        report_hash,
+    )
     print(f"Quality manifest: {output_dir / _RESULT_NAME}")
     # A quality failure is reported by the credentialed publisher. Returning zero
     # here ensures GitHub/Cloud Build do not skip that trusted final step.
@@ -1185,6 +1336,60 @@ def _read_manifest(path: Path, service: str) -> tuple[dict[str, Any], str]:
     return manifest, status
 
 
+def _publish_test_observation(
+    manifest: dict[str, Any], manifest_path: Path, control_dir: Path
+) -> None:
+    # One bounded best-effort request, after the canonical callback. No retries,
+    # report changes, event sequencing changes or influence on release planning.
+    try:
+        from export_evidence import read_json_file
+        from quality_evidence import MAX_BYTES, validate_observation
+
+        artifact = read_json_file(
+            manifest_path.parent / "quality-test-observation.json", MAX_BYTES + 4096
+        )
+        identity = _identity()
+        if (
+            not isinstance(artifact, dict)
+            or set(artifact)
+            != {
+                "schema_version",
+                "execution_id",
+                "fingerprint",
+                "provider_run_id",
+                "report_sha256",
+                "observation",
+            }
+            or type(artifact["schema_version"]) is not int
+            or artifact["schema_version"] != 1
+            or artifact["execution_id"] != identity["execution_id"]
+            or artifact["fingerprint"] != identity["fingerprint"]
+            or artifact["provider_run_id"] != identity["provider_run_id"]
+            or artifact["report_sha256"] != manifest["report_hash"]
+        ):
+            raise QualityExecutorError("Observation artifact binding mismatch")
+        observation = validate_observation(artifact["observation"])
+        api = _required("ENG_PLATFORM_API_URL").rstrip("/")
+        token = _identity_token(api, timeout=5)
+        _json_request(
+            f"{api}/api/internal/release-executions/{identity['execution_id']}/test-observations",
+            data={
+                "fingerprint": identity["fingerprint"],
+                "provider_run_id": identity["provider_run_id"],
+                "report_hash": manifest["report_hash"],
+                "observation": observation,
+            },
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Eng-Platform-Event-Token": _read_event_token(control_dir),
+            },
+            timeout=5,
+        )
+        print("Test observations: receipt_accepted reuse_allowed=false", flush=True)
+    except Exception:
+        print("Test observations: publish_unavailable reuse_allowed=false", flush=True)
+
+
 def _publish(service: str, manifest_path: Path, control_dir: Path) -> int:
     try:
         manifest, status = _read_manifest(manifest_path, service)
@@ -1200,6 +1405,7 @@ def _publish(service: str, manifest_path: Path, control_dir: Path) -> int:
         report=manifest["report"],
         report_hash=manifest["report_hash"],
     )
+    _publish_test_observation(manifest, manifest_path, control_dir)
     return int(status == "quality_failed")
 
 
