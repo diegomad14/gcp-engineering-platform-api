@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import re
 import secrets
 from typing import Any
@@ -13,9 +14,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..config import config
 from ..models import ReleaseExecutionEvent
+from ..quality_evidence import EvidenceError, validate_observation
 from ..services import (
     github_release_control,
     quality_store,
+    quality_observation_store,
     release_cloud_build,
     release_executions,
     release_reconciler,
@@ -364,6 +367,100 @@ def _accept_event(
         "accepted": accepted,
         "event_sequence": updated.get("event_sequence", payload.sequence),
         "status": updated.get("status"),
+    }
+
+
+class ObservationRequest(BaseModel):
+    """A separate additive channel; no QualityReport/event v2 schema change."""
+
+    model_config = ConfigDict(extra="forbid")
+    fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    provider_run_id: str = Field(min_length=1, max_length=128)
+    report_hash: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    observation: dict[str, Any]
+
+
+@router.post("/{execution_id}/test-observations", include_in_schema=False)
+async def record_test_observations(
+    execution_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_eng_platform_event_token: str | None = Header(default=None),
+):
+    # Bound the body *before* JSON/Pydantic parsing, including chunked requests.
+    # Do not increase the existing canonical callback's 1 MB limit.
+    from pydantic import ValidationError
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > 1_000_000:
+            raise HTTPException(status_code=413, detail="Observation exceeds 1 MB")
+        body.extend(chunk)
+    try:
+        payload = ObservationRequest.model_validate(json.loads(body))
+        validate_observation(payload.observation)
+    except (ValueError, TypeError, RecursionError, ValidationError) as exc:
+        # Never echo submitted paths, environment data or parser snippets.
+        raise HTTPException(status_code=422, detail="Invalid test observation") from exc
+    from starlette.concurrency import run_in_threadpool
+
+    return await run_in_threadpool(
+        _accept_test_observation,
+        execution_id,
+        payload,
+        authorization,
+        x_eng_platform_event_token,
+    )
+
+
+def _accept_test_observation(
+    execution_id: str,
+    payload: ObservationRequest,
+    authorization: str | None,
+    event_token: str | None,
+):
+    execution = release_executions.get(execution_id)
+    if execution is None or execution.get("execution_id") != execution_id:
+        raise HTTPException(status_code=404, detail="Unknown release execution")
+    if payload.fingerprint != execution.get("fingerprint"):
+        raise HTTPException(status_code=403, detail="Execution fingerprint mismatch")
+    # Observation requests can only read an already authenticated/bound run.
+    # The shared Cloud Build verifier may bind an unbound canonical callback;
+    # preconditions below make that lifecycle side effect unreachable here.
+    _verify_event_token(execution, event_token)
+    if payload.provider_run_id != execution.get("provider_run_id"):
+        raise HTTPException(status_code=403, detail="Observation run mismatch")
+    if payload.report_hash != execution.get("pending_report_hash"):
+        raise HTTPException(
+            status_code=422, detail="Observation report is not accepted"
+        )
+    if (
+        execution.get("provider") == "cloud_build"
+        and execution.get("build_id") != payload.provider_run_id
+    ):
+        raise HTTPException(status_code=403, detail="Observation build is not bound")
+    # Retain exactly the canonical provider/run/source identity verification.
+    _verify_provider(execution, payload.provider_run_id, authorization)
+    try:
+        receipt = quality_observation_store.save_observation(
+            payload.observation,
+            execution,
+            payload.report_hash,
+        )
+    except EvidenceError as exc:
+        raise HTTPException(
+            status_code=422, detail="Invalid test observation binding"
+        ) from exc
+    except quality_store.QualityEvidenceConflict as exc:
+        raise HTTPException(
+            status_code=409, detail="Test observation conflicts"
+        ) from exc
+    # No save/reconcile/status/planner call belongs on this observational route.
+    return {
+        "accepted": True,
+        "observation_sha256": receipt["observation_sha256"],
+        "mode": "shadow",
+        "reuse_allowed": False,
     }
 
 
