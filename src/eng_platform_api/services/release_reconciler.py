@@ -9,7 +9,6 @@ from typing import Any
 from ..config import config
 from . import (
     catalog,
-    executor_circuits,
     github_release_control,
     quality_store,
     release_cloud_build,
@@ -515,26 +514,17 @@ def reconcile(execution_id: str) -> dict[str, Any]:
     if execution.get("status") in {"received", "waiting_github"} and (
         execution.get("provider") == "github_actions"
     ):
-        # A private repository whose Actions run never starts must not wait
-        # forever: after the timeout the same immutable execution moves to the
-        # Cloud Build plane instead of blocking the release indefinitely.
+        # A missing run is not evidence of billing rejection. Preserve GitHub
+        # ownership and allow a delayed callback to finish this exact execution.
         if _age_seconds(str(execution.get("created_at", ""))) >= (
             config.release_orchestrator.release_dispatch_timeout_seconds
         ):
-            owner = (
-                config.github.billing_owner
-                or str(execution.get("repository", "")).split("/", 1)[0]
+            diagnostic = (
+                "GitHub workflow has not appeared before the dispatch timeout; "
+                "billing rejection is unconfirmed. Automatic fallback was not started."
             )
-            executor_circuits.open_circuit(
-                owner,
-                reason="github_dispatch_without_run",
-                repository=str(execution.get("repository", "")),
-                evidence=f"execution={execution_id} waited_seconds="
-                f"{config.release_orchestrator.release_dispatch_timeout_seconds}",
-            )
-            execution, _moved = release_executions.transition_to_cloud_build(
-                execution_id, reason="github_dispatch_timeout"
-            )
+            if execution.get("error") != diagnostic:
+                execution = release_executions.save(execution_id, error=diagnostic)
     if execution.get("status") in {
         "quality_failed",
         "no_release",

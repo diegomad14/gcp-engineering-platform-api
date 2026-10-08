@@ -8,6 +8,7 @@ from unittest import mock
 import pytest
 
 from eng_platform_api.models import QualityCheck, QualityReportCreate
+from eng_platform_api.services import executor_circuits
 from eng_platform_api.services import release_executions as execution_store
 from eng_platform_api.services import release_reconciler as reconciler
 
@@ -394,7 +395,7 @@ def test_legacy_execution_timing_does_not_emit_partial_project_alerts(
     )
     claim = mock.Mock(side_effect=lambda owner, **kwargs: kwargs["threshold"] == 2250)
     warning = mock.Mock()
-    monkeypatch.setattr(reconciler.executor_circuits, "claim_usage_alert", claim)
+    monkeypatch.setattr(executor_circuits, "claim_usage_alert", claim)
     monkeypatch.setattr(reconciler.logger, "warning", warning)
 
     reconciler._record_build_timing("execution-1", _build())

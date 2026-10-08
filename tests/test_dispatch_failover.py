@@ -71,60 +71,34 @@ def _execution_for(item: DeploymentItem) -> None:
     )
 
 
-def test_stalled_dispatch_falls_back_to_cloud_build(monkeypatch):
+@pytest.mark.parametrize("fallback_enabled", [True, False])
+def test_stalled_dispatch_preserves_github_without_billing_evidence(
+    monkeypatch, fallback_enabled
+):
     item = _stalled()
     deployment_store.save(item, "failover-key")
     _execution_for(item)
-    monkeypatch.setattr(config.cloud_build, "enabled", True)
+    monkeypatch.setattr(config.cloud_build, "enabled", fallback_enabled)
     monkeypatch.setattr(config.cloud_build, "mode", "auto")
     monkeypatch.setattr(config.cloud_build, "enabled_services", ("cgm-artemis-web",))
-    monkeypatch.setattr(
-        config.cloud_build, "cloud_build_only_services", ("cgm-artemis-web",)
-    )
-    submitted = item.model_copy(
-        update={"status": "QUEUED", "current_stage": "queued", "error": ""}
-    )
-    with (
-        mock.patch.object(github_deployments, "refresh", return_value=item),
-        mock.patch.object(
-            deployment_commands.github_release_control,
-            "repository_is_private",
-            return_value=True,
-        ),
-        mock.patch.object(
-            deployment_commands.github_release_control,
-            "set_repository_execution_mode",
-        ),
-        mock.patch.object(deployment_commands, "_require_release_quality"),
-        mock.patch.object(deployment_commands, "_require_orchestrated_release"),
-        mock.patch.object(cloud_build, "submit", return_value=submitted) as submit,
-        mock.patch.object(github_deployments, "set_managed_status"),
-    ):
-        result = deployment_commands.reconcile_stalled_dispatches()
-
-    assert result["reconciled"] == 1
-    assert result["items"][0]["result"] == "cloud_build_fallback"
-    submit.assert_called_once()
-    assert executor_circuits.is_open("diegomad14") is True
-    assert deployment_store.idempotency_key_for(item.id) == "failover-key"
-
-
-def test_stalled_dispatch_without_fallback_is_surfaced(monkeypatch):
-    item = _stalled("43")
-    deployment_store.save(item, "no-fallback-key")
-    _execution_for(item)
-    monkeypatch.setattr(config.cloud_build, "enabled", True)
-    monkeypatch.setattr(config.cloud_build, "mode", "auto")
-    monkeypatch.setattr(config.cloud_build, "enabled_services", ("other-service",))
     with (
         mock.patch.object(github_deployments, "refresh", return_value=item),
         mock.patch.object(cloud_build, "submit") as submit,
+        mock.patch.object(github_deployments, "retry_dispatch") as retry,
     ):
         result = deployment_commands.reconcile_stalled_dispatches()
 
-    assert result["items"][0]["result"] == "no_fallback_configured"
+    assert result["items"] == [
+        {"deployment_id": item.id, "result": "awaiting_github_evidence"}
+    ]
     submit.assert_not_called()
-    assert deployment_store.get(item.id).status == "FAILED"
+    retry.assert_not_called()
+    assert executor_circuits.is_open("diegomad14") is False
+    assert deployment_executions.get(item.id)["provider"] == "github_actions"
+    assert deployment_store.idempotency_key_for(item.id) == "failover-key"
+    pending = deployment_store.get(item.id)
+    assert pending.status == "QUEUED"
+    assert "billing rejection is unconfirmed" in pending.error
 
 
 def test_recent_dispatch_is_left_alone(monkeypatch):
@@ -171,15 +145,16 @@ def _waiting_execution() -> dict:
     return release_executions.save(execution["execution_id"], created_at=stale)
 
 
-def test_waiting_release_times_out_to_cloud_build():
+def test_waiting_release_timeout_preserves_github_without_billing_evidence():
     execution = _waiting_execution()
-    moved = dict(execution, provider="cloud_build", status="running_quality")
-    with mock.patch.object(release_cloud_build, "submit", return_value=moved) as submit:
+    with mock.patch.object(release_cloud_build, "submit") as submit:
         result = release_reconciler.reconcile(execution["execution_id"])
 
-    submit.assert_called_once()
-    assert result["provider"] == "cloud_build"
-    assert executor_circuits.is_open("diegomad14") is True
+    submit.assert_not_called()
+    assert result["provider"] == "github_actions"
+    assert result["status"] == execution["status"]
+    assert "billing rejection is unconfirmed" in result["error"]
+    assert executor_circuits.is_open("diegomad14") is False
 
 
 def test_monthly_usage_counts_deployment_minutes():

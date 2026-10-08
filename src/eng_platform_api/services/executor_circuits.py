@@ -74,6 +74,27 @@ def is_open(owner: str) -> bool:
     return get(owner).get("state") == "open"
 
 
+class CircuitRecoveryRequired(ValueError):
+    """A historical non-rejection circuit cannot authorize automatic fallback."""
+
+
+def require_billing_rejection(circuit: dict[str, Any]) -> None:
+    """Preserve legacy circuits, but require verified billing before using them.
+
+    Do not silently reset a historical usage/timeout circuit: repository hints
+    may still suppress GitHub jobs. An explicit successful health probe repairs
+    both hints and state through the existing recovery procedure.
+    """
+    if circuit.get("state") == "open" and circuit.get("reason") != (
+        "github_actions_billing_rejection"
+    ):
+        raise CircuitRecoveryRequired(
+            "GitHub Actions circuit lacks a verified billing rejection; "
+            "explicit verified health recovery is required before automatic "
+            "execution can resume"
+        )
+
+
 def open_circuit(
     owner: str,
     *,

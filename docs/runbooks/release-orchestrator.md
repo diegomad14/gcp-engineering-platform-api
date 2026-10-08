@@ -71,25 +71,39 @@ The circuit is scoped to `ENG_PLATFORM_GITHUB_BILLING_OWNER`, stored in the
 catalog repositories. It survives API restarts and UTC month changes. Public
 repositories always stay on GitHub Actions.
 
-It opens only when evidence is conclusive:
+In automatic mode, GitHub Actions is attempted first while the persisted
+circuit is closed. It opens only from an explicit rejection:
 
-- the GitHub billing API result, cached for five minutes within the current UTC
-  month and summed only for private Linux repositories, is at or above
-  `ENG_PLATFORM_GITHUB_INCLUDED_PRIVATE_MINUTES`;
-- a matching workflow dispatch returns an explicit Billing, quota, included
-  minutes, payment-required or spending-limit error; or
-- a matching completed workflow has only zero-step Billing annotations, or is
-  `startup_failure` with no jobs and a fresh quota lookup confirms exhaustion.
+- a matching workflow dispatch response explicitly rejects execution because
+  account payments failed, a spending limit was reached, included Actions
+  minutes were exhausted, or payment is required; or
+- a matching failed workflow has no executed steps and a GitHub check
+  annotation contains that explicit billing or Actions-minute rejection.
 
-Tests, configuration errors, permissions, normal timeouts, cancellation and
-generic GitHub unavailability do not open it. When open, the API writes the
-server-owned repository variable (by default `ENG_PLATFORM_CI_EXECUTOR`) as
-`cloud_build` for private repositories. Normal workflows inspect that variable
-before requesting a runner. The health workflow is intentionally exempt.
-Firestore is authoritative if a variable update is temporarily incomplete.
-If the billing lookup is missing or fails, the selector attempts GitHub and
-waits for the strict reactive evidence above; an API error alone never opens
-the circuit.
+Usage at or above `ENG_PLATFORM_GITHUB_INCLUDED_PRIVATE_MINUTES` is advisory:
+paid usage may still be available. It does not open the circuit. This policy
+is not a spending cap: GitHub can charge for usage beyond the included minutes
+when the account permits it. Review the account budget before activation; do
+not change billing settings as part of a code-only preparation. A zero-job
+`startup_failure`, generic mention of billing, artifact/API quota error,
+permissions/configuration error, cancellation, or dispatch timeout does not
+prove a billing rejection and never triggers automatic fallback. A missing
+run retains its original GitHub executor and pending status, with a diagnostic
+for investigation, so a delayed run cannot compete with a second executor.
+Deployment fallback also requires enrollment and an enabled fallback feature;
+an explicit `github_actions` deployment pin disables reactive fallback.
+
+When open, the API writes the server-owned repository variable (by default
+`ENG_PLATFORM_CI_EXECUTOR`) as `cloud_build` for private repositories. Normal
+workflows inspect that variable before requesting a runner. The health
+workflow is intentionally exempt. Firestore is authoritative if a variable
+update is temporarily incomplete. Existing open circuits are not silently
+reset or reclassified by a code upgrade. Automatic selectors only honor the
+recorded reason `github_actions_billing_rejection`. A legacy usage/timeout
+reason, unknown reason, or missing reason fails closed with a recovery-required
+diagnostic: neither executor is selected and repository hints remain untouched.
+Review the recorded evidence and use the verified recovery procedure below. Deployment profiles with mandatory Cloud Build runners
+remain exceptions until they have tested GitHub contract/runtime parity.
 
 The circuit never closes because time passed or a new billing month began. A
 deployer must request a real, minimal GitHub Actions health probe. See

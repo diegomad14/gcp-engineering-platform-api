@@ -53,7 +53,7 @@ def test_public_repository_never_uses_cloud_build(monkeypatch):
     assert quota.should_use_cloud_build("public", "owner/public") is False
 
 
-def test_private_repository_uses_cloud_build_at_included_limit(monkeypatch):
+def test_included_limit_alone_keeps_private_repository_on_github(monkeypatch):
     monkeypatch.setattr(quota.config.cloud_build, "enabled", True)
     monkeypatch.setattr(quota.config.cloud_build, "enabled_services", ("private",))
     repo = mock.MagicMock(private=True)
@@ -65,7 +65,7 @@ def test_private_repository_uses_cloud_build_at_included_limit(monkeypatch):
         "current_usage",
         lambda **_: quota.Usage(2000, datetime.now(timezone.utc)),
     )
-    assert quota.should_use_cloud_build("private", "owner/private") is True
+    assert quota.should_use_cloud_build("private", "owner/private") is False
 
 
 def test_unknown_billing_keeps_github_as_the_conservative_choice(monkeypatch):
@@ -85,7 +85,7 @@ def test_service_must_be_explicitly_enabled(monkeypatch):
     assert quota.should_use_cloud_build("private", "owner/private") is False
 
 
-def test_reactive_fallback_requires_exact_no_job_startup_failure(monkeypatch):
+def test_startup_failure_without_billing_evidence_never_falls_back(monkeypatch):
     monkeypatch.setattr(quota.config.cloud_build, "enabled", True)
     monkeypatch.setattr(quota.config.cloud_build, "enabled_services", ("private",))
     item = mock.MagicMock(
@@ -103,7 +103,7 @@ def test_reactive_fallback_requires_exact_no_job_startup_failure(monkeypatch):
         "current_usage",
         lambda **_: quota.Usage(2000, datetime.now(timezone.utc)),
     )
-    assert quota.is_reactive_quota_failure(run, item) is True
+    assert quota.is_reactive_quota_failure(run, item) is False
     run.conclusion = "failure"
     assert quota.is_reactive_quota_failure(run, item) is False
 

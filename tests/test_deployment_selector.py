@@ -10,7 +10,18 @@ from eng_platform_api.services import catalog, cloud_build, github_deployments
 
 
 @pytest.fixture
-def service():
+def service(monkeypatch):
+    monkeypatch.setattr(
+        deployments.github_actions_quota.config.cloud_build, "enabled", True
+    )
+    monkeypatch.setattr(
+        deployments.github_actions_quota.config.cloud_build,
+        "enabled_services",
+        ("eng-platform-api",),
+    )
+    monkeypatch.setattr(
+        deployments.github_actions_quota.config.cloud_build, "mode", "auto"
+    )
     value = catalog.get_service("eng-platform-api")
     assert value is not None
     return value

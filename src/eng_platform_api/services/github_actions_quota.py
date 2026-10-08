@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
+import re
 from threading import Lock
 from time import monotonic
 from typing import Any
@@ -12,21 +13,28 @@ from typing import Any
 import httpx
 
 from ..config import config
-from . import catalog
+from . import catalog, executor_circuits
 from .github_deployments import github_client
 
 _CACHE_SECONDS = 300
 _cache: tuple[float, int, int, "Usage | None"] | None = None
 _cache_lock = Lock()
 logger = logging.getLogger(__name__)
-_QUOTA_MARKERS = (
-    "billing",
-    "spending limit",
-    "included minutes",
-    "minute quota",
-    "quota exceeded",
-    "payment required",
-    "included usage",
+# Match rejections, not incidental mentions of billing or unrelated API quotas.
+# GitHub's canonical no-runner annotation is deliberately supported verbatim.
+_QUOTA_REJECTIONS = (
+    re.compile(r"\b(?:recent )?account payments? (?:have |has )?failed\b"),
+    re.compile(
+        r"\bspending limit (?:needs? to be increased|"
+        r"(?:(?:has been|was|is) )?(?:reached|exceeded))\b"
+    ),
+    re.compile(
+        r"\b(?:included (?:actions )?minutes|(?:actions )?minute quota) "
+        r"(?:(?:have been|has been|is|was|has|have) )?"
+        r"(?:(?:quota|limit) )?(?:exceeded|exhausted|reached)\b"
+    ),
+    re.compile(r"\b(?:github )?actions (?:usage )?quota (?:exceeded|exhausted)\b"),
+    re.compile(r"\bpayment required\b"),
 )
 
 
@@ -119,6 +127,15 @@ def current_usage(*, force: bool = False) -> Usage | None:
         return usage
 
 
+def deployment_fallback_enabled(service_name: str) -> bool:
+    """Reactive fallback must honor deployment enrollment and explicit pins."""
+    return (
+        config.cloud_build.enabled
+        and service_name in config.cloud_build.enabled_services
+        and config.cloud_build.mode != "github_actions"
+    )
+
+
 def should_use_cloud_build(service_name: str, repository: str) -> bool:
     """Choose the managed fallback only when quota evidence is conclusive."""
     service = catalog.get_service(service_name)
@@ -139,22 +156,23 @@ def should_use_cloud_build(service_name: str, repository: str) -> bool:
     try:
         if not bool(getattr(github_client().get_repo(repository), "private", False)):
             return False
-    except Exception:
+    except Exception as exc:
+        owner = config.github.billing_owner or repository.split("/", 1)[0]
+        if executor_circuits.is_open(owner):
+            raise executor_circuits.CircuitRecoveryRequired(
+                "Cannot verify repository visibility while the GitHub Actions "
+                "circuit is open; automatic execution is paused"
+            ) from exc
         return False
-    from . import executor_circuits
 
     owner = config.github.billing_owner or repository.split("/", 1)[0]
-    if executor_circuits.is_open(owner):
+    circuit = executor_circuits.get(owner)
+    if circuit.get("state") == "open":
+        executor_circuits.require_billing_rejection(circuit)
         return True
-    usage = current_usage()
-    if usage and usage.exhausted:
-        executor_circuits.open_circuit(
-            owner,
-            reason="included_private_minutes_exhausted",
-            repository=repository,
-            evidence=f"private_linux_minutes={usage.private_linux_minutes}",
-        )
-        return True
+    # Usage is advisory: exceeding included minutes can still be billable and
+    # does not prove GitHub rejected execution. Only a persisted rejection
+    # circuit may bypass the first GitHub attempt in automatic mode.
     return False
 
 
@@ -183,7 +201,7 @@ def is_quota_error(error: BaseException | str) -> bool:
                 if part
             )
     text = text.lower()
-    return any(marker in text for marker in _QUOTA_MARKERS)
+    return any(pattern.search(text) for pattern in _QUOTA_REJECTIONS)
 
 
 def _job_annotations_are_quota_failure(repository: str, jobs: list[Any]) -> bool:
@@ -204,10 +222,10 @@ def _job_annotations_are_quota_failure(repository: str, jobs: list[Any]) -> bool
 
 
 def is_reactive_quota_failure(run: Any, item: Any) -> bool:
-    """Only accept the GitHub no-job startup failure caused by exhaustion."""
-    if not config.cloud_build.enabled:
+    """Require a failed, zero-step run with an explicit GitHub billing rejection."""
+    if not deployment_fallback_enabled(item.service_name):
         return False
-    if item.service_name not in config.cloud_build.enabled_services:
+    if getattr(run, "conclusion", "") not in {"failure", "startup_failure"}:
         return False
     if item.kind != "rollback" and getattr(run, "head_sha", "") != item.sha:
         return False
@@ -221,16 +239,13 @@ def is_reactive_quota_failure(run: Any, item: Any) -> bool:
         item.candidate_revision or item.production_revision
     ):
         return False
-    if _job_annotations_are_quota_failure(item.repository, jobs):
-        return True
-    if getattr(run, "conclusion", "") != "startup_failure" or jobs:
-        return False
-    usage = current_usage(force=True)
-    return bool(usage and usage.exhausted)
+    return _job_annotations_are_quota_failure(item.repository, jobs)
 
 
 def is_release_quota_failure(run: Any, *, repository: str, expected_sha: str) -> bool:
     """Classify PR/push startup rejection without treating code failures as quota."""
+    if getattr(run, "conclusion", "") not in {"failure", "startup_failure"}:
+        return False
     event = getattr(run, "event", "")
     if event == "pull_request_target":
         if getattr(run, "display_title", "") != f"eng-platform-quality-{expected_sha}":
@@ -243,9 +258,4 @@ def is_release_quota_failure(run: Any, *, repository: str, expected_sha: str) ->
         jobs = list(run.jobs())
     except Exception:
         return False
-    if _job_annotations_are_quota_failure(repository, jobs):
-        return True
-    if getattr(run, "conclusion", "") != "startup_failure" or jobs:
-        return False
-    usage = current_usage(force=True)
-    return bool(usage and usage.exhausted)
+    return _job_annotations_are_quota_failure(repository, jobs)

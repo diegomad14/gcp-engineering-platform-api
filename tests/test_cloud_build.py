@@ -818,7 +818,11 @@ def test_thin_workflow_authenticates_before_pulling_private_executor(workflow_na
     ).read_text()
 
     assert workflow.index("gcloud auth configure-docker") < workflow.index(
-        '"${{ vars.ENG_PLATFORM_RELEASE_EXECUTOR_IMAGE }}"'
+        '"$RELEASE_EXECUTOR_IMAGE" --service'
+    )
+    assert (
+        "RELEASE_EXECUTOR_IMAGE: ${{ vars.ENG_PLATFORM_RELEASE_EXECUTOR_IMAGE }}"
+        in workflow
     )
     assert (
         '--env CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="/workspace/$credential_file"'

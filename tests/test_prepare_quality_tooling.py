@@ -404,9 +404,9 @@ def test_workflow_only_prepares_after_existing_authorization_and_quality_gates()
         "Mark deployment in progress",
     ]:
         assert workflow.index(earlier) < preparation
-    assert preparation < workflow.index(
-        '"${{ vars.ENG_PLATFORM_RELEASE_EXECUTOR_IMAGE }}"'
-    )
+    # The engine digest is validated before any cloud authentication and passed
+    # through an environment variable instead of shell expression interpolation.
+    assert preparation < workflow.index('"$RELEASE_EXECUTOR_IMAGE" --service')
     assert 'if [ "$CGM_SERVICE" = eng-platform-api ]; then' in workflow
     for name, value in {
         "CGM_REPOSITORY": "diegomad14/gcp-engineering-platform-api",

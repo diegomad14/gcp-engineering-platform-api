@@ -199,7 +199,10 @@ def _dispatch_deploy(service, tag: ReleaseTag, requested_by: str) -> DeploymentI
             service=service, tag=tag, requested_by=requested_by
         )
     except github_deployments.GitHubDispatchError as exc:
-        if not github_actions_quota.is_quota_error(exc):
+        if not (
+            github_actions_quota.deployment_fallback_enabled(service.service_name)
+            and github_actions_quota.is_quota_error(exc)
+        ):
             raise
         _open_billing_circuit(
             service,
@@ -235,7 +238,10 @@ def _dispatch_rollback(
             service=service, target=target, requested_by=requested_by
         )
     except github_deployments.GitHubDispatchError as exc:
-        if not github_actions_quota.is_quota_error(exc):
+        if not (
+            github_actions_quota.deployment_fallback_enabled(service.service_name)
+            and github_actions_quota.is_quota_error(exc)
+        ):
             raise
         _open_billing_circuit(
             service,
@@ -277,7 +283,9 @@ def _retry_failed_dispatch(
                 service=service, item=existing, target_revision=target_revision
             )
     except github_deployments.GitHubDispatchError as exc:
-        if github_actions_quota.is_quota_error(exc):
+        if github_actions_quota.deployment_fallback_enabled(
+            service.service_name
+        ) and github_actions_quota.is_quota_error(exc):
             _open_billing_circuit(
                 service,
                 reason="github_actions_billing_rejection",
@@ -287,20 +295,19 @@ def _retry_failed_dispatch(
             return deployment_store.save(retried, key)
         deployment_store.save(exc.item, key)
         raise HTTPException(status_code=502, detail=detail) from exc
+    except executor_circuits.CircuitRecoveryRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=_GITHUB_UNAVAILABLE) from exc
     return deployment_store.save(retried, key)
 
 
 def reconcile_stalled_dispatches(*, limit: int = 50) -> dict[str, Any]:
-    """Fail over deployments GitHub accepted but never started.
+    """Surface missing GitHub runs without inferring a billing rejection.
 
-    A workflow dispatch can be accepted with HTTP 204 and still create no run
-    when the account cannot allocate a runner for a private repository.  The
-    request then stays queued forever and blocks the service, so this sweep
-    re-reads GitHub, and once the configured timeout elapses it opens the
-    billing circuit and hands the exact same request to the Cloud Build
-    executor using the original idempotency key.
+    A timeout may be a delivery delay or configuration error. Keep the original
+    executor and idempotency key while waiting for a real run or investigation;
+    a second executor would risk duplicate deployment and unintended spending.
     """
     timeout = config.cloud_build.deploy_dispatch_timeout_seconds
     results: list[dict[str, Any]] = []
@@ -325,55 +332,17 @@ def reconcile_stalled_dispatches(*, limit: int = 50) -> dict[str, Any]:
             continue
         if _age_seconds(refreshed.created_at) < timeout:
             continue
-        service = catalog.get_service(refreshed.service_name)
-        if service is None:
-            continue
-        service = require_managed(service)
-        _open_billing_circuit(
-            service,
-            reason="github_dispatch_without_run",
-            evidence=f"deployment={refreshed.id} waited_seconds={timeout}",
+        diagnostic = (
+            "GitHub workflow has not appeared before the dispatch timeout; "
+            "billing rejection is unconfirmed. Automatic fallback was not started."
         )
-        failed = refreshed.model_copy(
-            update={
-                "status": "FAILED",
-                "current_stage": "dispatch",
-                "error": github_deployments.GITHUB_WORKFLOW_DISPATCH_FAILED,
-                "updated_at": _iso_now(),
-            }
-        )
-        deployment_store.save(failed, key)
-        if not github_actions_quota.should_use_cloud_build(
-            service.service_name, service.repository
-        ):
-            # No fallback is configured for this service: surface it instead of
-            # dispatching a second request that GitHub would silently drop.
-            results.append(
-                {"deployment_id": refreshed.id, "result": "no_fallback_configured"}
+        if refreshed.error != diagnostic:
+            refreshed = refreshed.model_copy(
+                update={"error": diagnostic, "updated_at": _iso_now()}
             )
-            continue
-        try:
-            retried = _retry_failed_dispatch(
-                service,
-                failed,
-                key,
-                github_deployments.GITHUB_WORKFLOW_DISPATCH_FAILED,
-            )
-        except Exception as exc:
-            results.append(
-                {
-                    "deployment_id": refreshed.id,
-                    "result": "retry_failed",
-                    "error": str(exc)[:200],
-                }
-            )
-            continue
+            deployment_store.save(refreshed, key)
         results.append(
-            {
-                "deployment_id": refreshed.id,
-                "result": "cloud_build_fallback",
-                "status": retried.status,
-            }
+            {"deployment_id": refreshed.id, "result": "awaiting_github_evidence"}
         )
     return {"reconciled": len(results), "items": results}
 
@@ -428,6 +397,8 @@ def start_deployment(
         raise HTTPException(
             status_code=502, detail=github_deployments.GITHUB_WORKFLOW_DISPATCH_FAILED
         ) from exc
+    except executor_circuits.CircuitRecoveryRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=_GITHUB_UNAVAILABLE) from exc
 
@@ -487,5 +458,7 @@ def start_rollback(
             status_code=502,
             detail=github_deployments.GITHUB_ROLLBACK_WORKFLOW_DISPATCH_FAILED,
         ) from exc
+    except executor_circuits.CircuitRecoveryRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=_GITHUB_UNAVAILABLE) from exc

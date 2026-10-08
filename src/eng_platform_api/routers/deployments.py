@@ -100,7 +100,10 @@ def _dispatch_deploy(service, tag, requested_by: str) -> DeploymentItem:
             service=service, tag=tag, requested_by=requested_by
         )
     except github_deployments.GitHubDispatchError as exc:
-        if not github_actions_quota.is_quota_error(exc):
+        if not (
+            github_actions_quota.deployment_fallback_enabled(service.service_name)
+            and github_actions_quota.is_quota_error(exc)
+        ):
             raise
         return _start_cloud_build(service, exc.item, reason="github_quota_dispatch")
 
@@ -124,7 +127,10 @@ def _dispatch_rollback(
             service=service, target=target, requested_by=requested_by
         )
     except github_deployments.GitHubDispatchError as exc:
-        if not github_actions_quota.is_quota_error(exc):
+        if not (
+            github_actions_quota.deployment_fallback_enabled(service.service_name)
+            and github_actions_quota.is_quota_error(exc)
+        ):
             raise
         return _start_cloud_build(service, exc.item, reason="github_quota_dispatch")
 
