@@ -1,4 +1,4 @@
-"""Coordinate the central controller's quality pins in its authorized workflow."""
+"""Coordinate reviewed quality pins and private deployment routing."""
 
 import copy
 import json
@@ -62,7 +62,7 @@ def _environment(data: dict) -> dict[str, dict]:
 
 
 def _configuration(data: dict) -> dict:
-    """Compare all workload fields and operational metadata, except two pins."""
+    """Compare all config except the two pins and the fixed routing field."""
     if data["metadata"]["name"] != SERVICE:
         raise ValueError("wrong service")
     env = _environment(data)
@@ -86,7 +86,9 @@ def _configuration(data: dict) -> dict:
     if not labels:
         template_meta.pop("labels", None)
     spec["template"]["spec"]["containers"][0]["env"] = {
-        name: row for name, row in env.items() if name not in candidate.IMAGE_NAMES
+        name: row
+        for name, row in env.items()
+        if name not in {*candidate.IMAGE_NAMES, candidate.CLOUD_BUILD_ONLY_ENV}
     }
     metadata = data["metadata"]
     annotations = copy.deepcopy(metadata.get("annotations", {}))
@@ -141,24 +143,43 @@ def _traffic(data: dict) -> tuple[dict[str, int], dict[str, str]]:
 
 
 def prepare() -> bool:
-    """Only two literal reviewed pins may change; never print provider data."""
+    """Only reviewed pins and fixed routing may change; never print cloud data."""
     try:
         images = candidate._tooling_images()
         before = _cloud(["describe"])
         configuration = _configuration(before)
         traffic = _traffic(before)
-        desired = {
-            name: {"name": name, "value": value} for name, value in images.items()
+        environment = _environment(before)
+        routing = candidate._cloud_build_only_services(
+            environment.get(candidate.CLOUD_BUILD_ONLY_ENV)
+        )
+        if routing not in (
+            frozenset(candidate.BASELINE_CLOUD_BUILD_ONLY_SERVICES),
+            frozenset(candidate.CLOUD_BUILD_ONLY_SERVICES),
+        ):
+            return False
+        values = {
+            **images,
+            candidate.CLOUD_BUILD_ONLY_ENV: (
+                environment[candidate.CLOUD_BUILD_ONLY_ENV]["value"]
+                if routing == set(candidate.CLOUD_BUILD_ONLY_SERVICES)
+                else ",".join(candidate.CLOUD_BUILD_ONLY_SERVICES)
+            ),
         }
-        if all(_environment(before).get(name) == row for name, row in desired.items()):
+        desired = {
+            name: {"name": name, "value": value} for name, value in values.items()
+        }
+        if all(environment.get(name) == row for name, row in desired.items()):
             return True
         _cloud(
             [
                 "update",
                 "--no-traffic",
                 "--quiet",
-                "--update-env-vars="
-                + ",".join(f"{name}={value}" for name, value in images.items()),
+                # These reviewed values cannot contain '|'. Gcloud's alternate
+                # delimiter keeps the comma-separated service list one value.
+                "--update-env-vars=^|^"
+                + "|".join(f"{name}={value}" for name, value in values.items()),
             ],
             timeout=600,
         )

@@ -1,4 +1,4 @@
-"""Read-only check of the exact API candidate's writer and quality bundle."""
+"""Read-only check of the API candidate's writer, quality bundle and routing."""
 
 import argparse
 import hashlib
@@ -19,9 +19,49 @@ IMAGE_NAMES = {
     "ENG_PLATFORM_QUALITY_NODE_IMAGE": "quality-node",
     "ENG_PLATFORM_QUALITY_PYTHON_IMAGE": "quality-python",
 }
+CLOUD_BUILD_ONLY_ENV = "ENG_PLATFORM_CLOUD_BUILD_ONLY_SERVICES"
+BASELINE_CLOUD_BUILD_ONLY_SERVICES = (
+    "cgm-artemis-api",
+    "cgm-artemis-job-dispatcher",
+    "cgm-artemis-job-worker",
+    "cgm-artemis-sync-worker",
+    "cgm-artemis-clock-sync-worker",
+    "cgm-artemis-data-recovery-worker",
+    "cgm-artemis-fnd-ip-sync-worker",
+    "cgm-artemis-fnd-observation-worker",
+    "cgm-artemis-readings-export-worker",
+    "cgm-artemis-smarti-prevention-worker",
+    "cgm-artemis-wm-sweep-worker",
+    "cgm-artemis-web",
+    "cgm-artemis-mcp-worker",
+)
+CLOUD_BUILD_ONLY_SERVICES = BASELINE_CLOUD_BUILD_ONLY_SERVICES + (
+    "cgm-bot-api",
+    "communications-ms",
+    "eng-platform-web",
+    "cgm-sanplat-api",
+    "cgm-sanplat-web",
+)
 PROFILE_VALIDATOR_PATH = (
     Path(__file__).resolve().parents[2] / "docker/quality-executor/quality_profiles.py"
 )
+
+
+def _cloud_build_only_services(row: object) -> frozenset[str]:
+    """Require one literal, unambiguous list; callers check the fixed set."""
+    if (
+        not isinstance(row, dict)
+        or set(row) != {"name", "value"}
+        or row["name"] != CLOUD_BUILD_ONLY_ENV
+        or not isinstance(row["value"], str)
+    ):
+        raise ValueError("invalid private deployment routing")
+    services = row["value"].split(",")
+    if len(services) != len(set(services)) or any(
+        not re.fullmatch(r"[a-z][a-z0-9-]*", name) for name in services
+    ):
+        raise ValueError("ambiguous private deployment routing")
+    return frozenset(services)
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -129,7 +169,10 @@ def verify(project: str, region: str, revision: str) -> bool:
             matches = [item for item in env if item.get("name") == name]
             if len(matches) != 1 or matches[0] != {"name": name, "value": value}:
                 return False
-        return True
+        routing = [item for item in env if item.get("name") == CLOUD_BUILD_ONLY_ENV]
+        return len(routing) == 1 and _cloud_build_only_services(routing[0]) == set(
+            CLOUD_BUILD_ONLY_SERVICES
+        )
     except (
         OSError,
         subprocess.SubprocessError,

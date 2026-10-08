@@ -192,8 +192,9 @@ def test_platform_profile_hashes_stay_compatible_with_the_live_executor(engine):
 
 
 @pytest.mark.parametrize("correct_pins", [False, True])
+@pytest.mark.parametrize("correct_routing", [False, True])
 def test_platform_exact_candidate_guard_precedes_promotion(
-    engine, monkeypatch, correct_pins
+    engine, monkeypatch, correct_pins, correct_routing
 ):
     actual_hooks = engine.run_hooks
     events, traffic = _setup_deploy(engine, monkeypatch, profile="eng-platform-api")
@@ -204,6 +205,14 @@ def test_platform_exact_candidate_guard_precedes_promotion(
             {"name": name, "value": value}
             for name, value in candidate_check._tooling_images().items()
         ],
+        {
+            "name": candidate_check.CLOUD_BUILD_ONLY_ENV,
+            "value": ",".join(
+                candidate_check.CLOUD_BUILD_ONLY_SERVICES
+                if correct_routing
+                else candidate_check.BASELINE_CLOUD_BUILD_ONLY_SERVICES
+            ),
+        },
     ]
     if not correct_pins:
         rows[1]["value"] = "PRIVATE-stale-pin"
@@ -235,7 +244,7 @@ def test_platform_exact_candidate_guard_precedes_promotion(
 
     monkeypatch.setattr(engine, "run", invoke_guard)
     image = "repo/image@sha256:" + "a" * 64
-    if correct_pins:
+    if correct_pins and correct_routing:
         result = engine.deploy(image)
         assert result["production_revision"] == "new-revision"
         assert traffic == {"new-revision": 100}
