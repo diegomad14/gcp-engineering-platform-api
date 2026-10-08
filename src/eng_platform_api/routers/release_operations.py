@@ -125,11 +125,7 @@ def request_probe(identity: str = Depends(require_deployer)):
         circuit = release_orchestrator.request_health_probe(requested_by=identity)
     except (ValueError, release_orchestrator.ReleaseOrchestratorError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return {
-        "accepted": True,
-        "state": circuit.get("state"),
-        "repository": circuit.get("probe", {}).get("repository"),
-    }
+    return circuit
 
 
 @router.post("/reconcile-github-run", include_in_schema=False)

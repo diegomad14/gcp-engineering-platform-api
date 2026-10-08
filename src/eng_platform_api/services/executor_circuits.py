@@ -7,7 +7,9 @@ the circuit: a real, started health probe is required.
 
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
+import json
 import math
 import secrets
 import time
@@ -25,6 +27,8 @@ _lock = RLock()
 _MODE_PROPAGATION_LEASE_SECONDS = 300
 _MODE_PROPAGATION_RETRY_SECONDS = 60
 _MODE_PROPAGATION_REFRESH_SECONDS = 600
+# Never evict a key and silently permit a previously dispatched request to run again.
+_PROBE_REQUEST_LIMIT = 128
 
 
 def _now() -> str:
@@ -122,6 +126,9 @@ def open_circuit(
             current = _memory.get(circuit_id)
             if current and current.get("state") == "open":
                 return dict(current), False
+            value["probe_requests"] = deepcopy(
+                (current or {}).get("probe_requests", {})
+            )
             _memory[circuit_id] = value
             return dict(value), True
 
@@ -136,6 +143,8 @@ def open_circuit(
             current = snapshot.to_dict()
             if current.get("state") == "open":
                 return current, False
+        if snapshot.exists:
+            value["probe_requests"] = snapshot.to_dict().get("probe_requests", {})
         txn.set(document, value)
         return value, True
 
@@ -250,45 +259,201 @@ def finish_mode_propagation(owner: str, *, token: str, succeeded: bool) -> None:
     write(transaction)
 
 
-def request_probe(
-    owner: str, *, repository: str, workflow: str, requested_by: str
-) -> dict[str, Any]:
-    """Bind a future health result before dispatching the probe workflow."""
-    circuit = get(owner)
-    if circuit.get("state") != "open":
-        raise ValueError("GitHub Actions circuit is not open")
-    changes = {
-        "probe": {
-            "status": "requested",
-            "nonce": secrets.token_urlsafe(24),
-            "repository": repository,
-            "workflow": workflow,
-            "requested_by": requested_by,
-            "requested_at": _now(),
+def public_probe_status(circuit: dict[str, Any]) -> dict[str, Any]:
+    """Explicit allowlist: circuit evidence, nonces and request hashes stay private."""
+    probe = circuit.get("probe", {})
+    return {
+        "accepted": True,
+        "state": circuit.get("state"),
+        **{
+            key: probe[key]
+            for key in (
+                "repository",
+                "workflow",
+                "status",
+                "dispatch_status",
+                "requested_at",
+                "completed_at",
+                "run_id",
+                "conclusion",
+                "jobs_started",
+            )
+            if key in probe
         },
-        "updated_at": _now(),
     }
-    circuit_id = _id(owner)
+
+
+def _probe_history(current: dict[str, Any]) -> dict[str, Any]:
+    history = deepcopy(current.get("probe_requests", {}))
+    probe = current.get("probe", {})
+    key = probe.get("request_key")
+    if key and key in history:
+        result = public_probe_status(current)
+        history[key]["circuit"] = {
+            "state": result.pop("state"),
+            "probe": {
+                name: value for name, value in result.items() if name != "accepted"
+            },
+        }
+    return history
+
+
+class ProbeRequestConflict(ValueError):
+    """A controlled validation/conflict message safe for public probe clients."""
+
+
+def reserve_probe(
+    owner: str,
+    *,
+    repository: str,
+    workflow: str,
+    requested_by: str,
+    reason: str,
+    idempotency_key: str,
+) -> tuple[dict[str, Any], bool]:
+    """Reserve once in the circuit transaction, before any external dispatch.
+
+    Pending (including uncertain) requests never expire or get overwritten.
+    A bounded durable history also prevents replay after callback/reopening.
+    """
+    if not reason.strip() or len(reason) > 500:
+        raise ProbeRequestConflict("reason must contain 1 to 500 characters")
+    if not idempotency_key.strip() or len(idempotency_key) > 128:
+        raise ProbeRequestConflict("idempotency_key must contain 1 to 128 characters")
+    key = hashlib.sha256(idempotency_key.encode()).hexdigest()
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            [repository, workflow, requested_by.lower(), reason],
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    probe = {
+        "status": "requested",
+        "dispatch_status": "reserved",
+        "nonce": secrets.token_urlsafe(24),
+        "repository": repository,
+        "workflow": workflow,
+        "requested_by": requested_by,
+        "requested_at": _now(),
+        "request_key": key,
+    }
+
+    def reserve(current):
+        history = deepcopy(current.get("probe_requests", {}))
+        if key in history:
+            previous = history[key]
+            if previous.get("fingerprint") != fingerprint:
+                raise ProbeRequestConflict(
+                    "idempotency_key is already bound to another request"
+                )
+            return deepcopy(previous["circuit"]), False
+        if current.get("state") != "open":
+            raise ProbeRequestConflict("GitHub Actions circuit is not open")
+        if current.get("probe", {}).get("status") == "requested":
+            raise ProbeRequestConflict(
+                "A health probe is already pending; verify its outcome first"
+            )
+        if len(history) >= _PROBE_REQUEST_LIMIT:
+            raise ProbeRequestConflict(
+                "Health probe request history is full; operator review is required"
+            )
+        current.update({"probe": probe, "updated_at": _now()})
+        history[key] = {"fingerprint": fingerprint}
+        current["probe_requests"] = history
+        current["probe_requests"] = _probe_history(current)
+        return current, True
+
     collection = _collection()
     if collection is None:
+        if not config.mock_mode:
+            raise RuntimeError(
+                "Persistent circuit storage is required for health probes"
+            )
         with _lock:
-            current = _memory.get(circuit_id)
-            if current is None or current.get("state") != "open":
-                raise ValueError("GitHub Actions circuit is not open")
-            current.update(changes)
-            return dict(current)
-    document = collection.document(circuit_id)
+            current = deepcopy(_memory.get(_id(owner), {}))
+            result, created = reserve(current)
+            if created:
+                _memory[_id(owner)] = current
+            return deepcopy(result), created
+    document = collection.document(_id(owner))
     transaction = document._client.transaction()
     from google.cloud.firestore import transactional
 
     @transactional
     def write(txn):
         snapshot = document.get(transaction=txn)
-        if not snapshot.exists or snapshot.to_dict().get("state") != "open":
-            raise ValueError("GitHub Actions circuit is not open")
-        txn.update(document, changes)
-        current = snapshot.to_dict()
-        current.update(changes)
+        current, created = reserve(snapshot.to_dict() if snapshot.exists else {})
+        if created:
+            txn.update(
+                document,
+                {
+                    name: current[name]
+                    for name in ("probe", "probe_requests", "updated_at")
+                },
+            )
+        return current, created
+
+    return write(transaction)
+
+
+def request_probe(
+    owner: str,
+    *,
+    repository: str,
+    workflow: str,
+    requested_by: str,
+) -> dict[str, Any]:
+    """Compatibility for internal callers; pending probes cannot be replaced."""
+    circuit, _ = reserve_probe(
+        owner,
+        repository=repository,
+        workflow=workflow,
+        requested_by=requested_by,
+        reason="Explicit health probe",
+        idempotency_key=secrets.token_hex(24),
+    )
+    return circuit
+
+
+def finish_probe_dispatch(
+    owner: str,
+    *,
+    nonce: str,
+    dispatch_status: str,
+) -> dict[str, Any]:
+    """Persist delivery outcome without overwriting a concurrent verified callback."""
+    if dispatch_status not in {"dispatched", "uncertain", "not_dispatched"}:
+        raise ValueError("Invalid health probe dispatch status")
+
+    def changes(current):
+        probe = current.get("probe", {})
+        if probe.get("nonce") != nonce:
+            raise ValueError("Health probe reservation changed")
+        current["probe"] = {**probe, "dispatch_status": dispatch_status}
+        if dispatch_status == "not_dispatched" and probe.get("status") == "requested":
+            current["probe"]["status"] = "cancelled"
+        current["updated_at"] = _now()
+        current["probe_requests"] = _probe_history(current)
+        return {
+            name: current[name] for name in ("probe", "probe_requests", "updated_at")
+        }
+
+    collection = _collection()
+    if collection is None:
+        with _lock:
+            current = _memory.get(_id(owner), {})
+            current.update(changes(deepcopy(current)))
+            return deepcopy(current)
+    document = collection.document(_id(owner))
+    transaction = document._client.transaction()
+    from google.cloud.firestore import transactional
+
+    @transactional
+    def write(txn):
+        snapshot = document.get(transaction=txn)
+        current = snapshot.to_dict() if snapshot.exists else {}
+        update = changes(current)
+        txn.update(document, update)
         return current
 
     return write(transaction)
@@ -302,6 +467,7 @@ def record_probe(
     run_id: str,
     conclusion: str,
     jobs_started: int,
+    nonce: str | None = None,
 ) -> dict[str, Any]:
     circuit = get(owner)
     requested = circuit.get("probe", {})
@@ -310,9 +476,10 @@ def record_probe(
         or requested.get("status") != "requested"
         or requested.get("repository") != repository
         or requested.get("workflow") != workflow
+        or (nonce is not None and requested.get("nonce") != nonce)
     ):
         raise ValueError("Health probe does not match a requested open-circuit probe")
-    changes = {
+    changes: dict[str, Any] = {
         "probe": {
             **requested,
             "status": "verified",
@@ -332,8 +499,22 @@ def record_probe(
             current = _memory.get(circuit_id)
             if current is None or current.get("state") != "open":
                 raise ValueError("GitHub Actions circuit is not open")
+            expected = current.get("probe", {})
+            if (
+                expected.get("status") != "requested"
+                or expected.get("repository") != repository
+                or expected.get("workflow") != workflow
+                or expected.get("nonce") != requested.get("nonce")
+            ):
+                raise ValueError(
+                    "Health probe does not match a requested open-circuit probe"
+                )
+            changes["probe"]["dispatch_status"] = expected.get(
+                "dispatch_status", "reserved"
+            )
             current.update(changes)
-            return dict(current)
+            current["probe_requests"] = _probe_history(current)
+            return deepcopy(current)
     document = collection.document(circuit_id)
     transaction = document._client.transaction()
     from google.cloud.firestore import transactional
@@ -350,12 +531,18 @@ def record_probe(
             or expected.get("status") != "requested"
             or expected.get("repository") != repository
             or expected.get("workflow") != workflow
+            or expected.get("nonce") != requested.get("nonce")
         ):
             raise ValueError(
                 "Health probe does not match a requested open-circuit probe"
             )
-        txn.update(document, changes)
+        changes["probe"]["dispatch_status"] = expected.get(
+            "dispatch_status", "reserved"
+        )
         current.update(changes)
+        changes["probe_requests"] = _probe_history(current)
+        current.update(changes)
+        txn.update(document, changes)
         return current
 
     return write(transaction)
@@ -388,7 +575,8 @@ def close_after_successful_probe(owner: str, *, run_id: str) -> dict[str, Any]:
                     "close_reason": "successful_health_probe",
                 }
             )
-            return dict(current)
+            current["probe_requests"] = _probe_history(current)
+            return deepcopy(current)
 
     document = collection.document(circuit_id)
     transaction = document._client.transaction()
@@ -415,8 +603,10 @@ def close_after_successful_probe(owner: str, *, run_id: str) -> dict[str, Any]:
             "updated_at": now,
             "close_reason": "successful_health_probe",
         }
-        txn.update(document, changes)
         current.update(changes)
+        changes["probe_requests"] = _probe_history(current)
+        current.update(changes)
+        txn.update(document, changes)
         return current
 
     return write(transaction)

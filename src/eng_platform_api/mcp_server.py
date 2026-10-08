@@ -26,8 +26,10 @@ from .services import (
     catalog,
     deployment_commands,
     deployment_store,
+    executor_circuits,
     github_deployments,
     mcp_store,
+    release_orchestrator,
 )
 from .services.mcp_auth import _SCOPES, provider
 from .services import mcp_grants, log_catalog
@@ -337,6 +339,50 @@ def start_deployment(
             requested_by=subject,
             idempotency_key=idempotency_key,
         ),
+    )
+
+
+@mcp.tool()
+def request_github_actions_health_probe(
+    reason: str, idempotency_key: str
+) -> dict[str, Any]:
+    """Request the configured Actions health probe as an allowlisted deployer.
+
+    Reuse the same key and reason to read its sanitized status without dispatching
+    again. Pending/uncertain dispatches require verified completion or operator
+    investigation. Repository, workflow and executor are server-owned.
+    """
+    if (
+        not reason.strip()
+        or len(reason) > 500
+        or not idempotency_key.strip()
+        or len(idempotency_key) > 128
+    ):
+        raise HTTPException(
+            422, "reason (1-500) and idempotency_key (1-128) are required"
+        )
+
+    def action(subject):
+        try:
+            return release_orchestrator.request_health_probe(
+                requested_by=subject,
+                reason=reason,
+                idempotency_key=idempotency_key,
+            )
+        except executor_circuits.ProbeRequestConflict as exc:
+            raise HTTPException(409, str(exc)) from None
+        except release_orchestrator.ReleaseOrchestratorError as exc:
+            raise HTTPException(503, str(exc)) from None
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(503, "Health probe control is unavailable") from None
+
+    return _mutate(
+        "request_github_actions_health_probe",
+        {"reason": reason, "idempotency_key": idempotency_key},
+        mcp_grants.SCOPE,
+        action,
     )
 
 
