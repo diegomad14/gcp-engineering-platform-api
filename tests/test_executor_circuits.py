@@ -139,6 +139,8 @@ def test_request_probe_binds_repository_workflow_and_requester(monkeypatch):
     assert circuit["state"] == "open"
     assert circuit["probe"] == {
         "status": "requested",
+        "dispatch_status": "reserved",
+        "request_key": circuit["probe"]["request_key"],
         "nonce": "nonce",
         "repository": "diegomad14/private-repo",
         "workflow": "eng-platform-actions-health.yml",
@@ -147,20 +149,18 @@ def test_request_probe_binds_repository_workflow_and_requester(monkeypatch):
     }
 
 
-def test_a_new_probe_request_replaces_an_unverified_probe(monkeypatch):
+def test_a_new_probe_request_cannot_replace_an_unverified_probe(monkeypatch):
     _open()
-    nonces = iter(("first", "second"))
-    monkeypatch.setattr(circuits.secrets, "token_urlsafe", lambda size: next(nonces))
-
+    monkeypatch.setattr(circuits.secrets, "token_urlsafe", lambda size: "first")
     circuits.request_probe(
         OWNER, repository="owner/one", workflow="health.yml", requested_by="admin"
     )
-    updated = circuits.request_probe(
-        OWNER, repository="owner/two", workflow="health.yml", requested_by="admin"
-    )
-
-    assert updated["probe"]["nonce"] == "second"
-    assert updated["probe"]["repository"] == "owner/two"
+    with pytest.raises(ValueError, match="already pending"):
+        circuits.request_probe(
+            OWNER, repository="owner/two", workflow="health.yml", requested_by="admin"
+        )
+    assert circuits.get(OWNER)["probe"]["nonce"] == "first"
+    assert circuits.get(OWNER)["probe"]["repository"] == "owner/one"
 
 
 @pytest.mark.parametrize(

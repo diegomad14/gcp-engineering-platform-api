@@ -446,3 +446,44 @@ For a missed, already completed GitHub run, use the authenticated
 `UNKNOWN` execution, preserve its Firestore record and build/run IDs, pause new
 work for that service, and let the scheduler or an operator reconcile existing
 effects before considering another submission.
+
+### Authenticated MCP health-probe control
+
+`request_github_actions_health_probe(reason, idempotency_key)` uses the existing
+`eng-platform.access` OAuth authority, live revocation checks, mutation audit and
+hourly limit. The authenticated login must also be in the existing deployment
+allowlist (`config.auth.allowed_logins`). It does not grant permissions or allow
+callers to select the owner, repository, workflow, executor, or callback audience.
+The backend uses the already configured health repository/workflow and existing
+GitHub App dispatch path. A reason is required (maximum 500 characters); the
+idempotency key is required (maximum 128 characters).
+
+Reuse the exact key and reason to get the same request's current sanitized
+status, including after callback completion. After a later circuit reopen, an old
+key returns the archived request snapshot: its `state` is not the current account
+routing state. A changed reason, requester, or
+configured target under the same key is rejected. The response allowlists
+repository, workflow, circuit/probe/dispatch status, timestamps, verified run ID,
+conclusion and started-job count. It never includes the callback nonce, raw
+idempotency key, OAuth material, circuit evidence or provider exception text.
+
+Reservation and history updates use the existing circuit document transaction.
+Only the transaction winner may dispatch. The body-less web endpoint remains
+supported and shares the same reservation fence. A pending probe (including a
+legacy pending probe) blocks another key. An uncertain dispatch or lost storage
+acknowledgement must not be retried automatically: the reservation does not
+expire. `reserved` can mean a crash before dispatch or an unrecorded dispatch
+outcome; `uncertain` means the dispatch call raised without proving rejection.
+Await the existing verified workflow callback or investigate the exact GitHub
+run using the persisted nonce and workflow identity. Do not clear a reservation
+or invent a new key to work around uncertainty. If no verifiable callback can be
+established, operator-reviewed recovery remains required; this control does not
+introduce an unsafe reset/cleanup endpoint. Circuit closure still requires the
+existing verified nonce, run, started jobs, success, and repository-mode repair.
+
+Hashed request history survives circuit reopen and is capped at 128 records per
+billing owner. It is never evicted automatically, because reusing an evicted key
+could duplicate a dispatch. At capacity, new requests fail closed for operator
+review; retained keys still return their status. Production fails closed when
+persistent circuit storage is unavailable. No new OAuth grants/scopes, IAM,
+workflow permissions, runner rules, or private-deployment exceptions are added.

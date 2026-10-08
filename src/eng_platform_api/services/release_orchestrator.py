@@ -6,7 +6,10 @@ import hashlib
 import json
 import logging
 import re
+import secrets
 from typing import Any
+
+from fastapi import HTTPException
 
 from ..config import config
 from ..models import CatalogService
@@ -18,6 +21,7 @@ from . import (
     executor_circuits,
     github_actions_quota,
     github_release_control,
+    mcp_grants,
     release_cloud_build,
     release_executions,
     release_reconciler,
@@ -467,6 +471,7 @@ def _close_circuit_from_probe(repository: str, payload_run: dict[str, Any]) -> b
         run_id=str(run_id),
         conclusion=str(getattr(run, "conclusion", "")),
         jobs_started=started,
+        nonce=nonce,
     )
     if getattr(run, "conclusion", "") == "success" and started:
         updated: list[str] = []
@@ -685,21 +690,85 @@ def handle_workflow_run(payload: dict[str, Any], *, delivery_id: str) -> list[di
     return results
 
 
-def request_health_probe(*, requested_by: str) -> dict[str, Any]:
+def request_health_probe(
+    *,
+    requested_by: str,
+    reason: str = "Explicit health probe",
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    """Request the configured health workflow once; never retry uncertain dispatch."""
+
+    def authorize():
+        if (
+            not config.auth.allowed_logins
+            or requested_by.lower() not in config.auth.allowed_logins
+        ):
+            raise HTTPException(403, "You are not allowed to request a health probe")
+        # No-op for the web session; validates the live grant in MCP authority context.
+        mcp_grants.release_claims(requested_by)
+
+    authorize()
     settings = config.release_orchestrator
     repository = settings.github_health_repository
-    if not repository:
-        raise ReleaseOrchestratorError("Health probe repository is not configured")
-    circuit = executor_circuits.request_probe(
-        _owner(repository),
-        repository=repository,
-        workflow=settings.github_health_workflow,
-        requested_by=requested_by,
-    )
-    github_release_control.dispatch_health_probe(
-        repository, nonce=str(circuit["probe"]["nonce"])
-    )
-    return circuit
+    if not repository or not settings.github_health_workflow:
+        raise ReleaseOrchestratorError(
+            "Health probe repository/workflow is not configured"
+        )
+    owner = _owner(repository)
+    try:
+        circuit, created = executor_circuits.reserve_probe(
+            owner,
+            repository=repository,
+            workflow=settings.github_health_workflow,
+            requested_by=requested_by,
+            reason=reason,
+            idempotency_key=idempotency_key
+            if idempotency_key is not None
+            else secrets.token_hex(24),
+        )
+    except executor_circuits.ProbeRequestConflict:
+        raise
+    except Exception:
+        raise ReleaseOrchestratorError(
+            "Health probe reservation is unavailable"
+        ) from None
+    if not created:
+        return executor_circuits.public_probe_status(circuit)
+    nonce = str(circuit["probe"]["nonce"])
+    try:
+        authorize()
+    except Exception:
+        # We know dispatch has not been attempted. Keep this key terminal.
+        try:
+            executor_circuits.finish_probe_dispatch(
+                owner, nonce=nonce, dispatch_status="not_dispatched"
+            )
+        except Exception:
+            raise ReleaseOrchestratorError(
+                "Health probe authorization changed; reservation remains fenced"
+            ) from None
+        raise
+    try:
+        github_release_control.dispatch_health_probe(repository, nonce=nonce)
+    except Exception:
+        # A network error does not prove GitHub rejected the request. Preserve
+        # the nonce for a verified callback and require operator investigation.
+        dispatch_status = "uncertain"
+    else:
+        dispatch_status = "dispatched"
+    try:
+        circuit = executor_circuits.finish_probe_dispatch(
+            owner,
+            nonce=nonce,
+            dispatch_status=dispatch_status,
+        )
+    except Exception:
+        # The committed reservation remains a no-redispatch fence even if the
+        # post-dispatch write failed or its acknowledgement was lost.
+        raise ReleaseOrchestratorError(
+            "Health probe outcome could not be saved; do not dispatch another probe"
+        ) from None
+    return executor_circuits.public_probe_status(circuit)
 
 
 def approve_canary(execution_id: str, *, approved_by: str) -> dict[str, Any]:
