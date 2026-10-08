@@ -1,4 +1,4 @@
-"""The official workflow changes only both reviewed pins, never live traffic."""
+"""The official workflow changes only reviewed pins and fixed private routing."""
 
 import copy
 import json
@@ -15,7 +15,7 @@ OLD = subject.SERVICE + "-old"
 OTHER = subject.SERVICE + "-other"
 
 
-def service(new_pins=False):
+def service(new_pins=False, new_routing=False):
     images = candidate._tooling_images()
     if not new_pins:
         images = {
@@ -75,6 +75,14 @@ def service(new_pins=False):
                                     {"name": name, "value": value}
                                     for name, value in images.items()
                                 ],
+                                {
+                                    "name": candidate.CLOUD_BUILD_ONLY_ENV,
+                                    "value": ",".join(
+                                        candidate.CLOUD_BUILD_ONLY_SERVICES
+                                        if new_routing
+                                        else candidate.BASELINE_CLOUD_BUILD_ONLY_SERVICES
+                                    ),
+                                },
                             ],
                         }
                     ],
@@ -94,7 +102,7 @@ def service(new_pins=False):
 
 
 def staged():
-    data = service(new_pins=True)
+    data = service(new_pins=True, new_routing=True)
     data["metadata"]["generation"] = 8
     data["status"]["observedGeneration"] = 8
     data["status"]["latestReadyRevisionName"] = subject.SERVICE + "-staging"
@@ -115,26 +123,160 @@ def run_preparation(after):
     return result, cloud
 
 
-def test_updates_both_pins_once_without_other_mutation_flags():
+def test_updates_both_pins_and_fixed_routing_once_without_other_mutation_flags():
     passed, cloud = run_preparation(staged())
     assert passed
     assert cloud.call_args_list[0] == mock.call(["describe"])
     arguments = cloud.call_args_list[1].args[0]
     assert arguments[:3] == ["update", "--no-traffic", "--quiet"]
     assert len(arguments) == 4
-    assert arguments[3] == "--update-env-vars=" + ",".join(
-        f"{name}={value}" for name, value in candidate._tooling_images().items()
+    values = {
+        **candidate._tooling_images(),
+        candidate.CLOUD_BUILD_ONLY_ENV: ",".join(candidate.CLOUD_BUILD_ONLY_SERVICES),
+    }
+    assert arguments[3] == "--update-env-vars=^|^" + "|".join(
+        f"{name}={value}" for name, value in values.items()
     )
+    # Gcloud's alternate delimiter parses three fields, preserving all commas.
+    encoded = arguments[3].removeprefix("--update-env-vars=")
+    _, delimiter, assignments = encoded.split("^", 2)
+    assert dict(item.split("=", 1) for item in assignments.split(delimiter)) == values
     assert cloud.call_args_list[1].kwargs == {"timeout": 600}
     assert cloud.call_args_list[2] == mock.call(["describe"])
 
 
-def test_already_coordinated_pins_do_not_create_another_revision():
+def test_already_coordinated_pins_and_routing_do_not_create_another_revision():
     with mock.patch.object(
-        subject, "_cloud", return_value=service(new_pins=True)
+        subject, "_cloud", return_value=service(new_pins=True, new_routing=True)
     ) as cloud:
         assert subject.prepare()
     cloud.assert_called_once_with(["describe"])
+
+
+def routing_row(data):
+    return next(
+        item
+        for item in data["spec"]["template"]["spec"]["containers"][0]["env"]
+        if item["name"] == candidate.CLOUD_BUILD_ONLY_ENV
+    )
+
+
+@pytest.mark.parametrize("new_pins", [False, True])
+@pytest.mark.parametrize("new_routing", [False, True])
+def test_preserves_every_other_field_across_known_transitions(new_pins, new_routing):
+    before = service(new_pins=new_pins, new_routing=new_routing)
+    after = staged()
+    original_before = copy.deepcopy(before)
+    original_after = copy.deepcopy(after)
+    responses = [before] if new_pins and new_routing else [before, {}, after]
+    with mock.patch.object(subject, "_cloud", side_effect=responses) as cloud:
+        assert subject.prepare()
+    assert cloud.call_count == len(responses)
+    assert before == original_before
+    assert after == original_after
+    assert subject._configuration(before) == subject._configuration(after)
+    assert subject._traffic(before) == subject._traffic(after)
+
+
+@pytest.mark.parametrize("new_pins", [False, True])
+def test_already_complete_reordered_routing_is_preserved(new_pins):
+    before = service(new_pins=new_pins, new_routing=True)
+    routing_row(before)["value"] = ",".join(
+        reversed(candidate.CLOUD_BUILD_ONLY_SERVICES)
+    )
+    after = staged()
+    routing_row(after)["value"] = routing_row(before)["value"]
+    responses = [before] if new_pins else [before, {}, after]
+    with mock.patch.object(subject, "_cloud", side_effect=responses) as cloud:
+        assert subject.prepare()
+    assert cloud.call_count == len(responses)
+
+
+def test_reordered_known_baseline_preserves_all_thirteen_services():
+    before = service()
+    routing_row(before)["value"] = ",".join(
+        reversed(candidate.BASELINE_CLOUD_BUILD_ONLY_SERVICES)
+    )
+    with mock.patch.object(subject, "_cloud", side_effect=[before, {}, staged()]):
+        assert subject.prepare()
+
+
+def test_routing_update_cannot_be_overridden_by_process_environment(monkeypatch):
+    monkeypatch.setenv(candidate.CLOUD_BUILD_ONLY_ENV, "arbitrary-service")
+    assert run_preparation(staged())[0]
+
+
+def test_updated_pins_with_unchanged_thirteen_service_routing_block_engine():
+    after = staged()
+    routing_row(after)["value"] = ",".join(candidate.BASELINE_CLOUD_BUILD_ONLY_SERVICES)
+    assert not run_preparation(after)[0]
+
+
+@pytest.mark.parametrize("phase", ["before", "after"])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "missing",
+        "duplicate_field",
+        "empty",
+        "null",
+        "nonstring",
+        "reference",
+        "value_and_reference",
+        "extra_field",
+        "missing_service",
+        "extra_service",
+        "duplicate_service",
+        "replaced_service",
+        "whitespace",
+        "trailing_comma",
+        "delimiter",
+        "partial_transition",
+    ],
+)
+def test_invalid_routing_fails_closed_before_mutation_or_promotion(phase, kind, capsys):
+    data = service(new_pins=True) if phase == "before" else staged()
+    env = data["spec"]["template"]["spec"]["containers"][0]["env"]
+    row = routing_row(data)
+    if kind == "missing":
+        env.remove(row)
+    elif kind == "duplicate_field":
+        env.append(copy.deepcopy(row))
+    elif kind == "empty":
+        row["value"] = ""
+    elif kind == "null":
+        row["value"] = None
+    elif kind == "nonstring":
+        row["value"] = list(candidate.CLOUD_BUILD_ONLY_SERVICES)
+    elif kind in {"reference", "value_and_reference"}:
+        if kind == "reference":
+            row.pop("value")
+        row["valueFrom"] = {"secretKeyRef": {"name": "PRIVATE", "key": "latest"}}
+    elif kind == "extra_field":
+        row["extra"] = "PRIVATE"
+    elif kind == "missing_service":
+        row["value"] = row["value"].split(",", 1)[1]
+    elif kind == "extra_service":
+        row["value"] += ",unknown-service"
+    elif kind == "duplicate_service":
+        row["value"] += ",cgm-artemis-api"
+    elif kind == "replaced_service":
+        row["value"] = row["value"].replace("cgm-artemis-api", "unknown-service")
+    elif kind == "whitespace":
+        row["value"] += " "
+    elif kind == "trailing_comma":
+        row["value"] += ","
+    elif kind == "delimiter":
+        row["value"] += "|ARBITRARY=PRIVATE"
+    else:
+        row["value"] = ",".join(
+            (*candidate.BASELINE_CLOUD_BUILD_ONLY_SERVICES, "cgm-bot-api")
+        )
+    responses = [data] if phase == "before" else [service(), {}, data]
+    with mock.patch.object(subject, "_cloud", side_effect=responses) as cloud:
+        assert not subject.prepare()
+    assert cloud.call_count == len(responses)
+    assert not capsys.readouterr().out + capsys.readouterr().err
 
 
 @pytest.mark.parametrize("transition", ["added", "changed", "removed"])
@@ -199,8 +341,13 @@ def test_nonce_only_added_label_preserves_absent_or_empty_business_labels(
         "startupProbe",
         "service_account",
         "timeout",
+        "concurrency",
+        "scaling",
         "volumes",
         "env",
+        "writer",
+        "extra_env",
+        "removed_env",
         "ingress",
         "vpc",
         "labels",
@@ -217,16 +364,27 @@ def test_any_operational_drift_or_partial_update_blocks_engine(field):
     container = spec["containers"][0]
     if field in {"image", "resources", "startupProbe"}:
         container[field] = "changed"
-    elif field in {"service_account", "timeout", "volumes"}:
+    elif field in {"service_account", "timeout", "concurrency", "volumes"}:
         spec[
             {
                 "service_account": "serviceAccountName",
                 "timeout": "timeoutSeconds",
+                "concurrency": "containerConcurrency",
                 "volumes": "volumes",
             }[field]
         ] = "changed"
+    elif field == "scaling":
+        after["spec"]["template"]["metadata"]["annotations"][
+            "autoscaling.knative.dev/maxScale"
+        ] = "1"
     elif field == "env":
         container["env"][1]["valueFrom"]["secretKeyRef"]["key"] = "changed"
+    elif field == "writer":
+        container["env"][0]["value"] = "changed"
+    elif field == "extra_env":
+        container["env"].append({"name": "ARBITRARY_ALLOWLIST", "value": "changed"})
+    elif field == "removed_env":
+        container["env"].pop(1)
     elif field == "ingress":
         after["metadata"]["annotations"]["run.googleapis.com/ingress"] = "all"
     elif field == "vpc":

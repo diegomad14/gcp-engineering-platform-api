@@ -31,8 +31,17 @@ def pins():
     ]
 
 
+def routing():
+    return {
+        "name": check.CLOUD_BUILD_ONLY_ENV,
+        "value": ",".join(check.CLOUD_BUILD_ONLY_SERVICES),
+    }
+
+
 def test_queries_exact_revision_and_accepts_expected_writer():
-    data = response([writer(), *pins(), {"name": "UNRELATED", "value": "PRIVATE"}])
+    data = response(
+        [writer(), *pins(), routing(), {"name": "UNRELATED", "value": "PRIVATE"}]
+    )
     with mock.patch.object(check.subprocess, "run") as run:
         run.return_value.stdout = json.dumps(data)
         assert check.verify("project", "region", REVISION)
@@ -54,17 +63,124 @@ def test_queries_exact_revision_and_accepts_expected_writer():
     }
 
 
+def test_routing_contract_is_exactly_thirteen_artemis_plus_five_private_services():
+    baseline = {
+        "cgm-artemis-api",
+        "cgm-artemis-job-dispatcher",
+        "cgm-artemis-job-worker",
+        "cgm-artemis-sync-worker",
+        "cgm-artemis-clock-sync-worker",
+        "cgm-artemis-data-recovery-worker",
+        "cgm-artemis-fnd-ip-sync-worker",
+        "cgm-artemis-fnd-observation-worker",
+        "cgm-artemis-readings-export-worker",
+        "cgm-artemis-smarti-prevention-worker",
+        "cgm-artemis-wm-sweep-worker",
+        "cgm-artemis-web",
+        "cgm-artemis-mcp-worker",
+    }
+    additions = {
+        "cgm-bot-api",
+        "communications-ms",
+        "eng-platform-web",
+        "cgm-sanplat-api",
+        "cgm-sanplat-web",
+    }
+    assert len(check.BASELINE_CLOUD_BUILD_ONLY_SERVICES) == 13
+    assert set(check.BASELINE_CLOUD_BUILD_ONLY_SERVICES) == baseline
+    assert len(check.CLOUD_BUILD_ONLY_SERVICES) == 18
+    assert set(check.CLOUD_BUILD_ONLY_SERVICES) == baseline | additions
+    assert "eng-platform-api" not in check.CLOUD_BUILD_ONLY_SERVICES
+
+
+def test_reordered_exact_routing_is_valid_and_not_overridden_by_environment(
+    monkeypatch,
+):
+    monkeypatch.setenv(check.CLOUD_BUILD_ONLY_ENV, "arbitrary-service")
+    row = routing()
+    row["value"] = ",".join(reversed(check.CLOUD_BUILD_ONLY_SERVICES))
+    with mock.patch.object(check.subprocess, "run") as run:
+        run.return_value.stdout = json.dumps(response([writer(), *pins(), row]))
+        assert check.verify("project", "region", REVISION)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "missing",
+        "duplicate_field",
+        "baseline",
+        "missing_service",
+        "extra_service",
+        "duplicate_service",
+        "replaced_service",
+        "empty",
+        "null",
+        "nonstring",
+        "reference",
+        "value_and_reference",
+        "extra_field",
+        "whitespace",
+        "trailing_comma",
+        "delimiter",
+    ],
+)
+def test_candidate_requires_exact_literal_eighteen_service_routing(kind, capsys):
+    row = routing()
+    env = [writer(), *pins(), row]
+    if kind == "missing":
+        env.remove(row)
+    elif kind == "duplicate_field":
+        env.append(dict(row))
+    elif kind == "baseline":
+        row["value"] = ",".join(check.BASELINE_CLOUD_BUILD_ONLY_SERVICES)
+    elif kind == "missing_service":
+        row["value"] = row["value"].split(",", 1)[1]
+    elif kind == "extra_service":
+        row["value"] += ",unknown-service"
+    elif kind == "duplicate_service":
+        row["value"] += ",cgm-artemis-api"
+    elif kind == "replaced_service":
+        row["value"] = row["value"].replace("cgm-artemis-api", "unknown-service")
+    elif kind == "empty":
+        row["value"] = ""
+    elif kind == "null":
+        row["value"] = None
+    elif kind == "nonstring":
+        row["value"] = list(check.CLOUD_BUILD_ONLY_SERVICES)
+    elif kind in {"reference", "value_and_reference"}:
+        if kind == "reference":
+            row.pop("value")
+        row["valueFrom"] = {"secretKeyRef": {"name": "PRIVATE", "key": "latest"}}
+    elif kind == "extra_field":
+        row["extra"] = "PRIVATE"
+    elif kind == "whitespace":
+        row["value"] += " "
+    elif kind == "trailing_comma":
+        row["value"] += ","
+    else:
+        row["value"] += "|ARBITRARY=PRIVATE"
+    with mock.patch.object(check.subprocess, "run") as run:
+        run.return_value.stdout = json.dumps(response(env))
+        assert not check.verify("project", "region", REVISION)
+    assert not capsys.readouterr().out + capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "data",
     [
         response(pins()),
-        response([writer(""), *pins()]),
-        response([writer("other@example.com"), *pins()]),
+        response([writer(""), *pins(), routing()]),
+        response([writer("other@example.com"), *pins(), routing()]),
         response(
-            [{"name": check.WRITER_ENV, "valueFrom": {"secretKeyRef": {}}}, *pins()]
+            [
+                {"name": check.WRITER_ENV, "valueFrom": {"secretKeyRef": {}}},
+                *pins(),
+                routing(),
+            ]
         ),
-        response([writer(), writer(), *pins()]),
-        response([writer(), *pins()], revision="another-revision"),
+        response([writer(), writer(), *pins(), routing()]),
+        response([writer(), *pins(), routing()], revision="another-revision"),
         {},
         None,
         [],
@@ -137,7 +253,7 @@ def test_cli_reports_only_fixed_result(passed, exit_code, message, capsys):
 @pytest.mark.parametrize("name", list(check.IMAGE_NAMES))
 @pytest.mark.parametrize("kind", ["missing", "old", "duplicate", "secret", "extra"])
 def test_rejects_missing_stale_duplicate_or_nonliteral_pin(name, kind, capsys):
-    env = [writer(), *pins()]
+    env = [writer(), *pins(), routing()]
     row = next(item for item in env if item["name"] == name)
     if kind == "missing":
         env.remove(row)
@@ -158,7 +274,7 @@ def test_rejects_missing_stale_duplicate_or_nonliteral_pin(name, kind, capsys):
 
 
 def test_correct_pins_do_not_relax_writer_check():
-    data = response([writer("other@example.com"), *pins()])
+    data = response([writer("other@example.com"), *pins(), routing()])
     with mock.patch.object(check.subprocess, "run") as run:
         run.return_value.stdout = json.dumps(data)
         assert not check.verify("project", "region", REVISION)
@@ -270,7 +386,7 @@ def test_bundle_identifies_tooling_source_not_next_release_sha(
     assert data["tooling_source_sha"] != "b" * 40
     assert hashlib.sha256(manifest.read_bytes()).hexdigest() == data["manifest_sha256"]
     with mock.patch.object(check.subprocess, "run") as run:
-        run.return_value.stdout = json.dumps(response([writer(), *pins()]))
+        run.return_value.stdout = json.dumps(response([writer(), *pins(), routing()]))
         assert check.verify("project", "region", REVISION)
 
 
@@ -304,7 +420,11 @@ def test_ambiguous_json_keys_are_rejected(bundle_files, scope):
         bundle["manifest_sha256"] = hashlib.sha256(manifest.read_bytes()).hexdigest()
         path.write_text(json.dumps(bundle))
     with mock.patch.object(check.subprocess, "run") as run:
-        data = json.dumps(response([writer(), *pins()])) if scope == "provider" else ""
+        data = (
+            json.dumps(response([writer(), *pins(), routing()]))
+            if scope == "provider"
+            else ""
+        )
         if scope == "provider":
             data = data.replace(
                 '"name": "' + REVISION + '"',
