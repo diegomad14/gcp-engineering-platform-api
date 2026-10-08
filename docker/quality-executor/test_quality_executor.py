@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -248,6 +249,141 @@ class MandatorySmartiEvidenceTest(unittest.TestCase):
 
 
 class QualityIsolationTest(unittest.TestCase):
+    def _check_isolated_checkout_ownership(self, *, different_uid: bool) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            home = root / "home"
+            home.mkdir()
+            global_config = home / ".gitconfig"
+            global_config.write_text("[user]\n\tname = Quality Test\n")
+            environment = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": str(home),
+                "GIT_CONFIG_GLOBAL": str(global_config),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GITHUB_TOKEN": "must-not-leak",
+            }
+            original_git = quality_executor._git
+            with mock.patch.dict(os.environ, environment, clear=True):
+                original_git(source, "init", "-q")
+                original_git(source, "config", "user.email", "quality@example.test")
+                (source / "source.txt").write_text("base\n")
+                original_git(source, "add", "source.txt")
+                original_git(source, "commit", "-qm", "base")
+                base_sha = original_git(source, "rev-parse", "HEAD")
+                (source / "source.txt").write_text("head\n")
+                original_git(source, "commit", "-qam", "head")
+                identity = {
+                    "head_sha": original_git(source, "rev-parse", "HEAD"),
+                    "base_sha": base_sha,
+                }
+                original_git(
+                    source, "config", "http.extraHeader", "Authorization: must-not-leak"
+                )
+                if different_uid:
+                    quality_executor._chown_tree(source, 1000, 1000)
+
+                def snapshot() -> dict[Path, tuple[bytes, int, int, int, int]]:
+                    return {
+                        path.relative_to(source): (
+                            path.read_bytes(),
+                            path.stat().st_mode,
+                            path.stat().st_uid,
+                            path.stat().st_gid,
+                            path.stat().st_mtime_ns,
+                        )
+                        for path in source.rglob("*")
+                        if path.is_file()
+                    }
+
+                before = snapshot()
+                scratch = root / "scratch"
+                for name in ("runtime", "trusted"):
+                    stale = scratch / name / "stale"
+                    stale.parent.mkdir(parents=True)
+                    stale.write_text("must be removed\n")
+
+                def different_owner_git(
+                    cwd: Path, *args: str, env: dict[str, str] | None = None
+                ) -> str:
+                    # Simulate only the foreign source; the newly created clone
+                    # belongs to the executor and must pass its normal checks.
+                    if not different_uid and (cwd == source or "clone" in args):
+                        env = {**os.environ, "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1"}
+                    return original_git(cwd, *args, env=env)
+
+                ownership = (
+                    nullcontext()
+                    if os.geteuid() == 0
+                    else mock.patch.object(quality_executor.os, "chown")
+                )
+                with (
+                    ownership as chown,
+                    mock.patch.object(
+                        quality_executor, "_git", side_effect=different_owner_git
+                    ),
+                ):
+                    checkout, git_directory, runtime = (
+                        quality_executor._isolated_checkout(source, scratch, identity)
+                    )
+                if chown is not None:
+                    self.assertTrue(chown.call_args_list)
+                    for call in chown.call_args_list:
+                        self.assertEqual((0, 0), call.args[1:])
+                        self.assertEqual({"follow_symlinks": False}, call.kwargs)
+                self.assertEqual(
+                    identity["head_sha"], original_git(checkout, "rev-parse", "HEAD")
+                )
+                self.assertEqual(
+                    base_sha,
+                    original_git(checkout, "rev-parse", f"{base_sha}^{{commit}}"),
+                )
+                self.assertEqual("head\n", (checkout / "source.txt").read_text())
+                self.assertEqual(
+                    str(git_directory),
+                    original_git(checkout, "rev-parse", "--absolute-git-dir"),
+                )
+                self.assertFalse(git_directory.is_relative_to(runtime))
+                self.assertEqual("", original_git(checkout, "remote"))
+                self.assertEqual(
+                    "/dev/null", original_git(checkout, "config", "core.hooksPath")
+                )
+                config = (git_directory / "config").read_text()
+                self.assertNotIn("must-not-leak", config)
+                self.assertNotIn("safe.directory", config)
+                self.assertFalse((git_directory / "objects/info/alternates").exists())
+                for path in (source / ".git/objects").rglob("*"):
+                    if path.is_file():
+                        copied = git_directory / path.relative_to(source / ".git")
+                        self.assertFalse(os.path.samestat(path.stat(), copied.stat()))
+                for path in [git_directory, *git_directory.rglob("*")]:
+                    self.assertEqual(0, path.stat().st_mode & 0o022)
+                    if os.geteuid() == 0:
+                        self.assertEqual(
+                            (0, 0), (path.stat().st_uid, path.stat().st_gid)
+                        )
+                child = quality_executor._child_environment(
+                    runtime, identity, {"runtime": "node"}, checkout, git_directory
+                )
+                self.assertNotIn("GITHUB_TOKEN", child)
+                self.assertNotIn("GIT_TEST_ASSUME_DIFFERENT_OWNER", child)
+                self.assertEqual("/dev/null", child["GIT_CONFIG_GLOBAL"])
+                self.assertEqual(before, snapshot())
+                self.assertEqual(
+                    "[user]\n\tname = Quality Test\n", global_config.read_text()
+                )
+                for name in ("runtime", "trusted"):
+                    self.assertFalse((scratch / name / "stale").exists())
+
+    def test_isolated_checkout_with_simulated_different_owner(self) -> None:
+        self._check_isolated_checkout_ownership(different_uid=False)
+
+    @unittest.skipUnless(os.geteuid() == 0, "requires the root executor image")
+    def test_isolated_checkout_with_different_uid_in_executor_image(self) -> None:
+        self._check_isolated_checkout_ownership(different_uid=True)
+
     def _identity_environment(self) -> dict[str, str]:
         return {
             "ENG_PLATFORM_RELEASE_EXECUTION_ID": "execution-1",
