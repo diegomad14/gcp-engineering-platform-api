@@ -27,6 +27,26 @@ jobs:
     # Always GitHub-hosted. Cloud Build selection is private to the API.
     runs-on: ubuntu-latest
     steps:
+      - name: Validate release executor configuration
+        env:
+          RELEASE_EXECUTOR_IMAGE: ${{ vars.ENG_PLATFORM_RELEASE_EXECUTOR_IMAGE }}
+          PLATFORM_API_URL: ${{ vars.ENG_PLATFORM_API_URL }}
+          RELEASE_SIGNING_PUBLIC_KEY: ${{ vars.ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY }}
+          RELEASE_WIF_PROVIDER: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
+          RELEASE_SERVICE_ACCOUNT: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_EXECUTOR_IMAGE" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || {
+            echo 'Release executor must be pinned by a complete SHA-256 digest' >&2
+            exit 1
+          }
+          [[ "$PLATFORM_API_URL" == https://* ]] || {
+            echo 'Engineering Platform API URL must use HTTPS' >&2
+            exit 1
+          }
+          for name in RELEASE_SIGNING_PUBLIC_KEY RELEASE_WIF_PROVIDER RELEASE_SERVICE_ACCOUNT; do
+            test -n "${!name}" || { echo "Required release configuration is missing: $name" >&2; exit 1; }
+          done
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ inputs.tag }}
@@ -77,6 +97,7 @@ jobs:
             -f description='Central release engine started' >/dev/null
       - name: Execute the pinned central engine
         env:
+          RELEASE_EXECUTOR_IMAGE: ${{ vars.ENG_PLATFORM_RELEASE_EXECUTOR_IMAGE }}
           CGM_SERVICE: ${{ inputs.service_name }}
           CGM_RELEASE_TAG: ${{ inputs.tag }}
           CGM_RELEASE_SHA: ${{ steps.release.outputs.sha }}
@@ -120,7 +141,7 @@ jobs:
             --env CGM_REQUEST_FINGERPRINT --env CGM_PROFILE --env CGM_PROFILE_SHA256 \
             --env CGM_PLATFORM_API_URL \
             --env CGM_IMAGE \
-            "${{ vars.ENG_PLATFORM_RELEASE_EXECUTOR_IMAGE }}" --service "$CGM_SERVICE"
+            "$RELEASE_EXECUTOR_IMAGE" --service "$CGM_SERVICE"
       - name: Publish deployment result
         if: always()
         env:

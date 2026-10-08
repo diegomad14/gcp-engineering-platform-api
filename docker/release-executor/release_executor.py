@@ -607,7 +607,7 @@ def image_for_tag() -> str:
         "-t",
         image,
     ]
-    if env("CGM_PROFILE") == "eng-platform-web":
+    if env("CGM_PROFILE") in {"eng-platform-web", "cgm-artemis-web"}:
         args.extend(["--build-arg", f"APP_VERSION={env('CGM_RELEASE_TAG')}"])
     cache = os.getenv("CGM_CACHE_IMAGE", "").strip()
     if not cache:

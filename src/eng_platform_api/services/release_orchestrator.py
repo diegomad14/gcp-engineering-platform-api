@@ -24,7 +24,7 @@ from . import (
     release_workflow_identity,
 )
 from .quality_profiles import executor_image, planner_hash, profile_for
-from .repository_identity import repository_id
+from .repository_identity import repository_id, same_repository
 
 from .resource_access import require_managed, require_managed_service_name
 
@@ -161,24 +161,26 @@ def _provider(service: CatalogService) -> str:
     service = require_managed(service)
     try:
         private = github_release_control.repository_is_private(service.repository)
-    except Exception:
+    except Exception as exc:
+        if executor_circuits.is_open(_owner(service.repository)):
+            raise ReleaseOrchestratorError(
+                "Cannot verify repository visibility while the GitHub Actions "
+                "circuit is open; automatic execution is paused"
+            ) from exc
         return "github_actions"
     if not private:
         return "github_actions"
     owner = _owner(service.repository)
     circuit = executor_circuits.get(owner)
     if circuit.get("state") == "open":
+        try:
+            executor_circuits.require_billing_rejection(circuit)
+        except executor_circuits.CircuitRecoveryRequired as exc:
+            raise ReleaseOrchestratorError(str(exc)) from exc
         _propagate_open_circuit(owner, circuit)
         return "cloud_build"
-    usage = github_actions_quota.current_usage()
-    if usage and usage.exhausted:
-        _open_circuit(
-            repository=service.repository,
-            run_id="",
-            reason="included_private_minutes_exhausted",
-            evidence=f"private_linux_minutes={usage.private_linux_minutes}",
-        )
-        return "cloud_build"
+    # Included usage does not prove that GitHub will reject a runner. The
+    # durable rejection circuit, not a usage estimate, controls auto fallback.
     return "github_actions"
 
 
@@ -441,7 +443,7 @@ def _close_circuit_from_probe(repository: str, payload_run: dict[str, Any]) -> b
     if (
         circuit.get("state") != "open"
         or expected.get("status") != "requested"
-        or expected.get("repository") != repository
+        or not same_repository(str(expected.get("repository", "")), repository)
         or expected.get("workflow") != settings.github_health_workflow
     ):
         return True
@@ -459,7 +461,8 @@ def _close_circuit_from_probe(repository: str, payload_run: dict[str, Any]) -> b
     started = sum(1 for job in jobs if getattr(job, "started_at", None))
     executor_circuits.record_probe(
         owner,
-        repository=repository,
+        # Preserve the requested identity spelling after a verified rename.
+        repository=str(expected["repository"]),
         workflow=settings.github_health_workflow,
         run_id=str(run_id),
         conclusion=str(getattr(run, "conclusion", "")),

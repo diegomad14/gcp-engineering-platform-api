@@ -14,7 +14,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..config import config
 from ..models import ReleaseExecutionEvent
 from ..services import (
+    catalog,
     github_release_control,
+    quality_profiles,
     quality_store,
     release_cloud_build,
     release_executions,
@@ -407,6 +409,16 @@ def resolve_execution(
         raise HTTPException(
             status_code=409, detail="Release execution already has a run"
         )
+    service = catalog.get_service(str(execution["service_name"]))
+    if service is None:
+        raise HTTPException(status_code=503, detail="Execution service is unavailable")
+    postgres_image = ""
+    if quality_profiles.profile_for(service).spec.get("postgres"):
+        postgres_image = config.release_orchestrator.postgres_image
+        if not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", postgres_image):
+            raise HTTPException(
+                status_code=503, detail="PostgreSQL image must be pinned by digest"
+            )
     execution = release_executions.save(
         str(execution["execution_id"]),
         provider_run_id=claims["run_id"],
@@ -418,6 +430,7 @@ def resolve_execution(
         "base_sha": execution["base_sha"],
         "profile_hash": execution["profile_hash"],
         "executor_image": execution["executor_digest"],
+        "postgres_image": postgres_image,
         "planner_image": (
             config.release_orchestrator.release_planner_image
             if execution["operation"] == "main_release"

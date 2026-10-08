@@ -223,3 +223,33 @@ def test_bot_catalog_builds_with_repository_relative_dockerfile(
     assert len(builds) == 1
     assert builds[0][builds[0].index("--file") + 1] == str(dockerfile)
     assert builds[0][-1] == str(dockerfile.parent)
+
+
+@pytest.mark.parametrize("service", ["eng-platform-web", "cgm-artemis-web"])
+def test_web_images_receive_the_profile_release_version(
+    engine, monkeypatch, tmp_path, service
+):
+    _environment(monkeypatch, service)
+    monkeypatch.setenv("CGM_IMAGE", "registry.example/web:v1.2.3")
+    monkeypatch.setenv("CGM_REPOSITORY", "owner/web")
+    monkeypatch.setenv("CGM_RELEASE_TAG", "v1.2.3")
+    monkeypatch.setenv("CGM_BUILD_CONTEXT", ".")
+    monkeypatch.setenv("CGM_DOCKERFILE_PATH", "Dockerfile")
+    monkeypatch.delenv("CGM_CACHE_IMAGE", raising=False)
+    monkeypatch.setattr(engine, "ROOT", tmp_path)
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+    commands = []
+
+    def run(*args, **_kwargs):
+        commands.append(args)
+        if args[:2] == ("docker", "pull"):
+            raise subprocess.CalledProcessError(1, args)
+        if args[:4] == ("gcloud", "artifacts", "docker", "images"):
+            return "sha256:" + "b" * 64
+        return ""
+
+    monkeypatch.setattr(engine, "run", run)
+    engine.image_for_tag()
+    build = next(cmd for cmd in commands if cmd[:2] == ("docker", "build"))
+    assert build[build.index("--build-arg") + 1] == "APP_VERSION=v1.2.3"
+    assert engine.PROFILE_SPECS[service]["build_args"] == [["APP_VERSION", "{tag}"]]

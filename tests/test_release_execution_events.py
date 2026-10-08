@@ -1629,3 +1629,92 @@ def test_event_token_provider_failure_prevents_generation_and_claim(monkeypatch)
     assert error.value.status_code == 401
     token_urlsafe.assert_not_called()
     claim.assert_not_called()
+
+
+@pytest.mark.parametrize("operation", ["pr_quality", "main_release"])
+def test_resolve_postgres_profile_returns_server_owned_pinned_image(
+    monkeypatch, operation
+):
+    execution = _execution(
+        provider="github_actions", service_name="cgm-artemis-api", operation=operation
+    )
+    monkeypatch.setattr(events.release_executions, "find", lambda *_: execution)
+    monkeypatch.setattr(
+        events.release_workflow_identity, "verify", lambda *_: {"run_id": "42"}
+    )
+    monkeypatch.setattr(
+        events.github_release_control,
+        "workflow_run",
+        lambda *_: _pr_workflow_run(execution),
+    )
+    image = "postgres@sha256:" + "e" * 64
+    monkeypatch.setattr(events.config.release_orchestrator, "postgres_image", image)
+    save = mock.Mock(return_value=execution)
+    monkeypatch.setattr(events.release_executions, "save", save)
+    result = events.resolve_execution(
+        events.ResolveExecutionRequest(
+            repository=execution["repository"], head_sha=HEAD, operation=operation
+        ),
+        authorization="Bearer token",
+    )
+    assert result["postgres_image"] == image
+    save.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        "",
+        "postgres:16",
+        "postgres@sha256:bad",
+        "postgres@sha256:" + "e" * 64 + " extra",
+    ],
+)
+def test_resolve_postgres_profile_rejects_unpinned_image_before_binding(
+    monkeypatch, image
+):
+    execution = _execution(
+        provider="github_actions",
+        service_name="cgm-artemis-api",
+        operation="main_release",
+    )
+    monkeypatch.setattr(events.release_executions, "find", lambda *_: execution)
+    monkeypatch.setattr(
+        events.release_workflow_identity, "verify", lambda *_: {"run_id": "42"}
+    )
+    monkeypatch.setattr(events.config.release_orchestrator, "postgres_image", image)
+    save = mock.Mock()
+    monkeypatch.setattr(events.release_executions, "save", save)
+    with pytest.raises(HTTPException) as error:
+        events.resolve_execution(
+            events.ResolveExecutionRequest(
+                repository=execution["repository"],
+                head_sha=HEAD,
+                operation="main_release",
+            ),
+            authorization="Bearer token",
+        )
+    assert error.value.status_code == 503
+    save.assert_not_called()
+
+
+def test_resolve_rejects_missing_catalog_service_before_binding(monkeypatch):
+    execution = _execution(provider="github_actions", operation="main_release")
+    monkeypatch.setattr(events.release_executions, "find", lambda *_: execution)
+    monkeypatch.setattr(
+        events.release_workflow_identity, "verify", lambda *_: {"run_id": "42"}
+    )
+    monkeypatch.setattr(events.catalog, "get_service", lambda _: None)
+    save = mock.Mock()
+    monkeypatch.setattr(events.release_executions, "save", save)
+    with pytest.raises(HTTPException) as error:
+        events.resolve_execution(
+            events.ResolveExecutionRequest(
+                repository=execution["repository"],
+                head_sha=HEAD,
+                operation="main_release",
+            ),
+            authorization="Bearer token",
+        )
+    assert error.value.status_code == 503
+    save.assert_not_called()

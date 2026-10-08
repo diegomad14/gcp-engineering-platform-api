@@ -50,7 +50,10 @@ def propagation(monkeypatch):
 
 def _open():
     orchestrator._open_circuit(
-        repository=REPOSITORY, run_id="42", reason="billing", evidence="quota"
+        repository=REPOSITORY,
+        run_id="42",
+        reason="github_actions_billing_rejection",
+        evidence="quota",
     )
 
 
@@ -89,7 +92,7 @@ def test_partial_failure_is_retried_without_blocking_provider(propagation):
 
 
 def test_concurrent_provider_calls_do_not_wait_for_or_duplicate_sweep(propagation):
-    circuits.open_circuit("owner", reason="billing")
+    circuits.open_circuit("owner", reason="github_actions_billing_rejection")
     entered = Event()
     release = Event()
 
@@ -115,7 +118,7 @@ def test_concurrent_provider_calls_do_not_wait_for_or_duplicate_sweep(propagatio
 
 
 def test_stale_open_snapshot_cannot_reopen_closed_circuit(propagation):
-    stale, _ = circuits.open_circuit("owner", reason="billing")
+    stale, _ = circuits.open_circuit("owner", reason="github_actions_billing_rejection")
     circuits.request_probe(
         "owner", repository=REPOSITORY, workflow="health.yml", requested_by="admin"
     )
@@ -159,7 +162,7 @@ def test_circuit_read_failure_does_not_select_github(monkeypatch, propagation):
 def test_hint_infrastructure_failures_preserve_open_provider_and_retry(
     monkeypatch, propagation, failure
 ):
-    circuits.open_circuit("owner", reason="billing")
+    circuits.open_circuit("owner", reason="github_actions_billing_rejection")
     with monkeypatch.context() as patch:
         if failure == "catalog":
             patch.setattr(
@@ -199,7 +202,7 @@ def test_hint_infrastructure_failures_preserve_open_provider_and_retry(
 def test_malformed_propagation_metadata_is_repaired_without_changing_provider(
     propagation, metadata
 ):
-    circuits.open_circuit("owner", reason="billing")
+    circuits.open_circuit("owner", reason="github_actions_billing_rejection")
     circuits._memory[circuits._id("owner")]["mode_propagation"] = metadata
     assert orchestrator._provider(propagation.service) == "cloud_build"
     assert propagation.catalog.call_count == 1
