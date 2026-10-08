@@ -18,6 +18,7 @@ TOOLING_REGISTRY = "us-central1-docker.pkg.dev/cgm-assistant-prod/cgm-sanplat-re
 IMAGE_NAMES = {
     "ENG_PLATFORM_QUALITY_NODE_IMAGE": "quality-node",
     "ENG_PLATFORM_QUALITY_PYTHON_IMAGE": "quality-python",
+    "ENG_PLATFORM_RELEASE_PLANNER_IMAGE": "release-planner",
 }
 CLOUD_BUILD_ONLY_ENV = "ENG_PLATFORM_CLOUD_BUILD_ONLY_SERVICES"
 BASELINE_CLOUD_BUILD_ONLY_SERVICES = (
@@ -98,6 +99,12 @@ def _validate_manifest(raw: object) -> None:
         validator._validate_profile(name, profile)
 
 
+def _validate_tooling_image(name: str, value: object) -> None:
+    prefix = re.escape(f"{TOOLING_REGISTRY}/{IMAGE_NAMES[name]}@sha256:")
+    if not isinstance(value, str) or not re.fullmatch(prefix + r"[0-9a-f]{64}", value):
+        raise ValueError("tooling image must be a reviewed immutable digest")
+
+
 def _tooling_images() -> dict[str, str]:
     """Load the reviewed source bundle, not settings from the running API."""
     bundle = json.loads(
@@ -127,13 +134,8 @@ def _tooling_images() -> dict[str, str]:
     images = bundle["images"]
     if not isinstance(images, dict) or set(images) != set(IMAGE_NAMES):
         raise ValueError("invalid tooling images")
-    for name, image in IMAGE_NAMES.items():
-        value = images[name]
-        prefix = re.escape(f"{TOOLING_REGISTRY}/{image}@sha256:")
-        if not isinstance(value, str) or not re.fullmatch(
-            prefix + r"[0-9a-f]{64}", value
-        ):
-            raise ValueError("tooling image must be a reviewed immutable digest")
+    for name in IMAGE_NAMES:
+        _validate_tooling_image(name, images[name])
     return {name: images[name] for name in IMAGE_NAMES}
 
 

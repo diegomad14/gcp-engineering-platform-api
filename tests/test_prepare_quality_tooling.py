@@ -123,7 +123,7 @@ def run_preparation(after):
     return result, cloud
 
 
-def test_updates_both_pins_and_fixed_routing_once_without_other_mutation_flags():
+def test_updates_three_pins_and_fixed_routing_once_without_other_mutation_flags():
     passed, cloud = run_preparation(staged())
     assert passed
     assert cloud.call_args_list[0] == mock.call(["describe"])
@@ -137,7 +137,7 @@ def test_updates_both_pins_and_fixed_routing_once_without_other_mutation_flags()
     assert arguments[3] == "--update-env-vars=^|^" + "|".join(
         f"{name}={value}" for name, value in values.items()
     )
-    # Gcloud's alternate delimiter parses three fields, preserving all commas.
+    # Gcloud's alternate delimiter parses four fields, preserving all commas.
     encoded = arguments[3].removeprefix("--update-env-vars=")
     _, delimiter, assignments = encoded.split("^", 2)
     assert dict(item.split("=", 1) for item in assignments.split(delimiter)) == values
@@ -176,6 +176,89 @@ def test_preserves_every_other_field_across_known_transitions(new_pins, new_rout
     assert after == original_after
     assert subject._configuration(before) == subject._configuration(after)
     assert subject._traffic(before) == subject._traffic(after)
+
+
+@pytest.mark.parametrize(
+    "changed_pins",
+    [
+        ["ENG_PLATFORM_RELEASE_PLANNER_IMAGE"],
+        ["ENG_PLATFORM_QUALITY_PYTHON_IMAGE", "ENG_PLATFORM_RELEASE_PLANNER_IMAGE"],
+    ],
+)
+def test_planner_activation_preserves_node_and_complete_private_routing(changed_pins):
+    before = service(new_pins=True, new_routing=True)
+    for name in changed_pins:
+        row = subject._environment(before)[name]
+        row["value"] = row["value"].split("@sha256:")[0] + "@sha256:" + "a" * 64
+    original = copy.deepcopy(before)
+    after = staged()
+    with mock.patch.object(subject, "_cloud", side_effect=[before, {}, after]) as cloud:
+        assert subject.prepare()
+    assert cloud.call_count == 3
+    assert before == original
+    before_env = subject._environment(before)
+    after_env = subject._environment(after)
+    assert {name for name in before_env if before_env[name] != after_env[name]} == set(
+        changed_pins
+    )
+    assert subject._configuration(before) == subject._configuration(after)
+    assert subject._traffic(before) == subject._traffic(after)
+
+
+@pytest.mark.parametrize("phase", ["before", "after"])
+@pytest.mark.parametrize("name", list(candidate.IMAGE_NAMES))
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "missing",
+        "duplicate",
+        "secret",
+        "value_and_reference",
+        "extra_field",
+        "null",
+        "nonstring",
+        "tag",
+        "wrong_family",
+        "wrong_registry",
+        "short_digest",
+        "delimiter",
+    ],
+)
+def test_nonliteral_or_invalid_pin_never_mutates_or_promotes(phase, name, kind, capsys):
+    data = service() if phase == "before" else staged()
+    env = data["spec"]["template"]["spec"]["containers"][0]["env"]
+    row = next(item for item in env if item["name"] == name)
+    if kind == "missing":
+        env.remove(row)
+    elif kind == "duplicate":
+        env.append(copy.deepcopy(row))
+    elif kind in {"secret", "value_and_reference"}:
+        if kind == "secret":
+            row.pop("value")
+        row["valueFrom"] = {"secretKeyRef": {"name": "PRIVATE", "key": "latest"}}
+    elif kind == "extra_field":
+        row["extra"] = "PRIVATE"
+    elif kind == "null":
+        row["value"] = None
+    elif kind == "nonstring":
+        row["value"] = [row["value"]]
+    elif kind == "tag":
+        row["value"] = row["value"].split("@sha256:")[0] + ":latest"
+    elif kind == "wrong_family":
+        row["value"] = row["value"].replace(
+            candidate.IMAGE_NAMES[name] + "@", "arbitrary-image@"
+        )
+    elif kind == "wrong_registry":
+        row["value"] = row["value"].replace("cgm-sanplat-repo", "other")
+    elif kind == "short_digest":
+        row["value"] = row["value"][:-1]
+    else:
+        row["value"] += "|ARBITRARY=PRIVATE"
+    responses = [data] if phase == "before" else [service(), {}, data]
+    with mock.patch.object(subject, "_cloud", side_effect=responses) as cloud:
+        assert not subject.prepare()
+    assert cloud.call_count == len(responses)
+    assert not capsys.readouterr().out + capsys.readouterr().err
 
 
 @pytest.mark.parametrize("new_pins", [False, True])
@@ -509,6 +592,32 @@ def test_invalid_bundle_never_queries_cloud():
         ),
         mock.patch.object(subject, "_cloud") as cloud,
     ):
+        assert not subject.prepare()
+    cloud.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "kind", ["missing", "secret", "duplicate", "extra_image", "extra_key"]
+)
+def test_invalid_planner_bundle_never_queries_cloud(kind, monkeypatch, tmp_path):
+    path = tmp_path / "bundle.json"
+    data = json.loads(candidate.BUNDLE_PATH.read_text())
+    planner = "ENG_PLATFORM_RELEASE_PLANNER_IMAGE"
+    if kind == "missing":
+        data["images"].pop(planner)
+    elif kind == "secret":
+        data["images"][planner] = {"valueFrom": {"secretKeyRef": {"name": "PRIVATE"}}}
+    elif kind == "extra_image":
+        data["images"]["ARBITRARY"] = data["images"][planner]
+    elif kind == "extra_key":
+        data["arbitrary"] = "PRIVATE"
+    raw = json.dumps(data)
+    if kind == "duplicate":
+        encoded = json.dumps(planner) + ": " + json.dumps(data["images"][planner])
+        raw = raw.replace(encoded, encoded + ", " + encoded)
+    path.write_text(raw)
+    monkeypatch.setattr(candidate, "BUNDLE_PATH", path)
+    with mock.patch.object(subject, "_cloud") as cloud:
         assert not subject.prepare()
     cloud.assert_not_called()
 

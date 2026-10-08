@@ -31,6 +31,16 @@ def pins():
     ]
 
 
+def test_reviewed_bundle_is_closed_to_two_quality_images_and_release_planner():
+    expected = {
+        "ENG_PLATFORM_QUALITY_NODE_IMAGE": "quality-node",
+        "ENG_PLATFORM_QUALITY_PYTHON_IMAGE": "quality-python",
+        "ENG_PLATFORM_RELEASE_PLANNER_IMAGE": "release-planner",
+    }
+    assert check.IMAGE_NAMES == expected
+    assert set(check._tooling_images()) == set(expected)
+
+
 def routing():
     return {
         "name": check.CLOUD_BUILD_ONLY_ENV,
@@ -319,15 +329,16 @@ def bundle_files(tmp_path, monkeypatch):
         "missing_image",
         "extra_image",
         "image_type",
+        "image_secret",
         "tag",
         "wrong_family",
         "wrong_registry",
     ],
 )
-def test_invalid_bundle_fails_before_any_cloud_query(bundle_files, kind, capsys):
+@pytest.mark.parametrize("name", list(check.IMAGE_NAMES))
+def test_invalid_bundle_fails_before_any_cloud_query(bundle_files, kind, name, capsys):
     path, manifest = bundle_files
     data = json.loads(path.read_text())
-    node = "ENG_PLATFORM_QUALITY_NODE_IMAGE"
     if kind == "missing_bundle":
         path.unlink()
     elif kind == "missing_manifest":
@@ -356,17 +367,23 @@ def test_invalid_bundle_fails_before_any_cloud_query(bundle_files, kind, capsys)
         elif kind == "images_type":
             data["images"] = []
         elif kind == "missing_image":
-            data["images"].pop(node)
+            data["images"].pop(name)
         elif kind == "extra_image":
             data["images"]["ARBITRARY"] = "PRIVATE"
         elif kind == "image_type":
-            data["images"][node] = 1
+            data["images"][name] = 1
+        elif kind == "image_secret":
+            data["images"][name] = {"valueFrom": {"secretKeyRef": {"name": "PRIVATE"}}}
         elif kind == "tag":
-            data["images"][node] = f"{check.TOOLING_REGISTRY}/quality-node:latest"
+            data["images"][name] = (
+                f"{check.TOOLING_REGISTRY}/{check.IMAGE_NAMES[name]}:latest"
+            )
         elif kind == "wrong_family":
-            data["images"][node] = data["images"]["ENG_PLATFORM_QUALITY_PYTHON_IMAGE"]
+            data["images"][name] = data["images"][name].replace(
+                check.IMAGE_NAMES[name] + "@", "arbitrary-image@"
+            )
         else:
-            data["images"][node] = data["images"][node].replace(
+            data["images"][name] = data["images"][name].replace(
                 "cgm-sanplat-repo", "other"
             )
         path.write_text(json.dumps(data))
@@ -397,7 +414,9 @@ def test_bundle_is_packaged_without_changing_dockerfile():
     assert "COPY src/ src/" in (root / "Dockerfile").read_text()
 
 
-@pytest.mark.parametrize("scope", ["bundle", "images", "manifest", "provider"])
+@pytest.mark.parametrize(
+    "scope", ["bundle", *check.IMAGE_NAMES, "manifest", "provider"]
+)
 def test_ambiguous_json_keys_are_rejected(bundle_files, scope):
     path, manifest = bundle_files
     bundle = json.loads(path.read_text())
@@ -407,8 +426,8 @@ def test_ambiguous_json_keys_are_rejected(bundle_files, scope):
                 '"schema_version": 1', '"schema_version": 2, "schema_version": 1'
             )
         )
-    elif scope == "images":
-        key = "ENG_PLATFORM_QUALITY_NODE_IMAGE"
+    elif scope in check.IMAGE_NAMES:
+        key = scope
         encoded = json.dumps(key) + ": " + json.dumps(bundle["images"][key])
         path.write_text(path.read_text().replace(encoded, encoded + ", " + encoded))
     elif scope == "manifest":

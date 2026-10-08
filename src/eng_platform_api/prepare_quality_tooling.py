@@ -62,7 +62,7 @@ def _environment(data: dict) -> dict[str, dict]:
 
 
 def _configuration(data: dict) -> dict:
-    """Compare all config except the two pins and the fixed routing field."""
+    """Compare all config except the three pins and the fixed routing field."""
     if data["metadata"]["name"] != SERVICE:
         raise ValueError("wrong service")
     env = _environment(data)
@@ -72,6 +72,11 @@ def _configuration(data: dict) -> dict:
         "value": candidate.EXPECTED_WRITER,
     }:
         raise ValueError("unexpected writer")
+    for name in candidate.IMAGE_NAMES:
+        row = env.get(name)
+        if not isinstance(row, dict) or set(row) != {"name", "value"}:
+            raise ValueError("tooling pin must be literal")
+        candidate._validate_tooling_image(name, row["value"])
     spec = copy.deepcopy(data["spec"])
     spec.pop("traffic", None)
     template_meta = spec["template"].setdefault("metadata", {})
