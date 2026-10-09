@@ -1090,7 +1090,7 @@ def _run_quality(
     profile = verify_profile_hash(service, identity["profile_hash"])
     temporary = (
         _prepare_go_temporary_directory(output_dir)
-        if profile["runtime"] == "go"
+        if profile.get("runtime") == "go"
         else None
     )
     try:
