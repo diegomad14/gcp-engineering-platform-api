@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "tooling_source_sha": "4e84ada4ec80ece80249c316a15191d47439eb8d",
+  "tooling_source_sha": "8f795f31f54b034a9a5144f9f5b373dd729cb058",
   "manifest_sha256": "18b2e1ad243fd511443dbb82df72fa3e5bf2a5a3ecbb472667337ca228dd33dc",
   "images": {
     "ENG_PLATFORM_QUALITY_NODE_IMAGE": "us-central1-docker.pkg.dev/cgm-assistant-prod/cgm-sanplat-repo/quality-node@sha256:eb3c93788d10fc23f08fc15b68f81d5802c3829da4cc40838f4c8d9353caea65",
-    "ENG_PLATFORM_QUALITY_PYTHON_IMAGE": "us-central1-docker.pkg.dev/cgm-assistant-prod/cgm-sanplat-repo/quality-python@sha256:39a38f97b945393b7e53dc93e747fe4e8388ef10d6e017380828bcb1863064ca",
-    "ENG_PLATFORM_RELEASE_PLANNER_IMAGE": "us-central1-docker.pkg.dev/cgm-assistant-prod/cgm-sanplat-repo/release-planner@sha256:d21fe67aafee65eb416c80aa074970654dfaad03679f5cf3de9575d29d5a8226"
+    "ENG_PLATFORM_QUALITY_PYTHON_IMAGE": "us-central1-docker.pkg.dev/cgm-assistant-prod/cgm-sanplat-repo/quality-python@sha256:1e5121ba9ebeb640d5da512e92f44507184d911cd0b81e2daf97e3519cbc682e",
+    "ENG_PLATFORM_RELEASE_PLANNER_IMAGE": "us-central1-docker.pkg.dev/cgm-assistant-prod/cgm-sanplat-repo/release-planner@sha256:90b1d6dcea6eb10eff09c9385b6f114457e8bb054b0db20eb507b57ece25c54b"
   }
 }
