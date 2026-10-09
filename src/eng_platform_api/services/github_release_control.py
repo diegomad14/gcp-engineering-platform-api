@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 from typing import Any
 
 from github import GithubIntegration
@@ -23,6 +24,114 @@ CHECK_NAMES = {
 
 class GitHubReleaseConflict(RuntimeError):
     pass
+
+
+def verify_quality_bootstrap_preconditions(
+    *,
+    repository: str,
+    repository_id: int,
+    pull_request_number: int,
+    head_sha: str,
+    base_sha: str,
+    workflow_id: int | None = None,
+) -> dict[str, Any]:
+    """Read the exact disabled canonical workflow and all of its runs.
+
+    pull_request_target runs can expose the base SHA as head_sha. Never use
+    GitHub's head_sha filter to prove absence of a run for a PR revision.
+    """
+    repo = github_client().get_repo(repository)
+    if int(repo.id) != repository_id or not bool(repo.private):
+        raise GitHubReleaseConflict("Bootstrap repository identity changed")
+    requester = repo._requester  # type: ignore[attr-defined]
+    _, pr = requester.requestJsonAndCheck(
+        "GET", f"/repos/{repository}/pulls/{pull_request_number}"
+    )
+    if (
+        pr.get("state") != "open"
+        or int(pr.get("number", 0)) != pull_request_number
+        or pr.get("head", {}).get("sha") != head_sha
+        or pr.get("base", {}).get("sha") != base_sha
+        or pr.get("base", {}).get("ref") != "main"
+        or int(pr.get("head", {}).get("repo", {}).get("id", 0)) != repository_id
+        or int(pr.get("base", {}).get("repo", {}).get("id", 0)) != repository_id
+    ):
+        raise GitHubReleaseConflict("Bootstrap pull request identity changed")
+    _, workflow = requester.requestJsonAndCheck(
+        "GET", f"/repos/{repository}/actions/workflows/eng-platform-quality.yml"
+    )
+    current_id = int(workflow.get("id", 0))
+    expected_path = ".github/workflows/eng-platform-quality.yml"
+    if (
+        not current_id
+        or workflow.get("path") != expected_path
+        or workflow.get("state") != "disabled_manually"
+        or (workflow_id is not None and current_id != workflow_id)
+    ):
+        raise GitHubReleaseConflict(
+            "Canonical quality workflow must be disabled manually"
+        )
+    page = 1
+    while True:
+        _, payload = requester.requestJsonAndCheck(
+            "GET",
+            f"/repos/{repository}/actions/workflows/{current_id}/runs",
+            parameters={"per_page": 100, "page": page},
+        )
+        runs = payload.get("workflow_runs")
+        if not isinstance(runs, list):
+            raise GitHubReleaseConflict("Canonical workflow runs are unverifiable")
+        for run in runs:
+            if (
+                int(run.get("workflow_id", 0)) != current_id
+                or str(run.get("path", "")).split("@", 1)[0] != expected_path
+                or run.get("event") != "pull_request_target"
+            ):
+                raise GitHubReleaseConflict("Canonical workflow run identity changed")
+            if run.get("status") != "completed":
+                raise GitHubReleaseConflict(
+                    "Canonical quality workflow has active runs"
+                )
+            prs = run.get("pull_requests", [])
+            if not isinstance(prs, list):
+                raise GitHubReleaseConflict(
+                    "Canonical workflow PR metadata is unverifiable"
+                )
+            if not re.fullmatch(
+                r"eng-platform-quality-[0-9a-f]{40}", str(run.get("display_title", ""))
+            ) and not any(
+                isinstance(item, dict)
+                and int(item.get("number", 0)) > 0
+                and re.fullmatch(
+                    r"[0-9a-f]{40}", str(item.get("head", {}).get("sha", ""))
+                )
+                for item in prs
+            ):
+                raise GitHubReleaseConflict(
+                    "Canonical workflow head identity is unverifiable"
+                )
+            matching_pr = any(
+                int(item.get("number", 0)) == pull_request_number
+                and item.get("head", {}).get("sha") == head_sha
+                for item in prs
+            )
+            matching_title = (
+                run.get("display_title") == f"eng-platform-quality-{head_sha}"
+            )
+            if matching_title or matching_pr or run.get("head_sha") == head_sha:
+                # A matching title is sufficient to reject even if GitHub
+                # omits PR metadata for pull_request_target.
+                raise GitHubReleaseConflict(
+                    "Canonical quality run already exists for this head"
+                )
+        if len(runs) < 100:
+            break
+        page += 1
+        if page > 1000:
+            raise GitHubReleaseConflict(
+                "Canonical workflow run pagination is incomplete"
+            )
+    return {"workflow_id": current_id, "workflow_path": expected_path}
 
 
 def repository_is_private(repository: str) -> bool:

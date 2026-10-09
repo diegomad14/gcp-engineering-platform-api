@@ -74,6 +74,27 @@ def _payload(conclusion: str = "failure") -> dict:
 
 
 def _prepare_github_failure(monkeypatch, state: dict) -> None:
+    # Provider-terminal unit tests use a synthetic state store. Transactional
+    # admission and stale-provider races are covered by bootstrap store tests.
+    monkeypatch.setattr(
+        orchestrator.release_executions,
+        "admit_github_run",
+        lambda execution_id, *, provider_run_id, **changes: (
+            orchestrator.release_executions.save(
+                execution_id,
+                provider_run_id=provider_run_id,
+                github_run_id=int(provider_run_id),
+                **changes,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator.release_executions,
+        "save_for_provider",
+        lambda execution_id, *, expected_provider, expected_run_id, **changes: (
+            orchestrator.release_executions.save(execution_id, **changes)
+        ),
+    )
     monkeypatch.setattr(orchestrator, "_close_circuit_from_probe", lambda *_: False)
     monkeypatch.setattr(orchestrator, "_handle_deployment_workflow_run", lambda *_: [])
     monkeypatch.setattr(

@@ -95,6 +95,42 @@ def _verify_cloud_build(execution: dict, provider_run_id: str) -> dict:
         raise HTTPException(
             status_code=502, detail="Unable to verify Cloud Build"
         ) from exc
+    if str(build.get("id", "")) != provider_run_id:
+        raise HTTPException(status_code=403, detail="Cloud Build identity mismatch")
+    if execution.get("bootstrap_ticket_id"):
+        try:
+            if not bound_build_id:
+                execution = release_cloud_build.reconcile_quality_bootstrap(
+                    execution, expected_build_id=provider_run_id
+                )
+                if str(execution.get("build_id", "")) != provider_run_id:
+                    raise ValueError(
+                        "Bootstrap recovery did not verify this build uniquely"
+                    )
+            release_cloud_build.verify_quality_bootstrap_build(
+                execution, build, expected_build_id=provider_run_id
+            )
+            release_executions.update_quality_bootstrap(
+                str(execution["execution_id"]),
+                attempt_nonce=str(execution["bootstrap_nonce"]),
+                changes={
+                    "build_id": provider_run_id,
+                    "provider_run_id": provider_run_id,
+                    "bootstrap_build_verified": True,
+                    "bootstrap_verified_request_hash": execution[
+                        "bootstrap_build_request_hash"
+                    ],
+                },
+            )
+        except (
+            ValueError,
+            KeyError,
+            release_cloud_build.ReleaseCloudBuildError,
+        ) as exc:
+            raise HTTPException(
+                status_code=403, detail="Cloud Build bootstrap identity mismatch"
+            ) from exc
+        return build
     substitutions = build.get("substitutions", {})
     source = build.get("source", {}).get("connectedRepository", {})
     expected_repository = config.cloud_build.repositories.get(
@@ -299,6 +335,17 @@ def _accept_event(
             "event_sequence": execution.get("event_sequence", 0),
             "status": execution.get("status"),
         }
+    try:
+        execution = release_executions.admit_event_provider(
+            execution_id,
+            expected_provider=str(execution["provider"]),
+            expected_run_id=payload.provider_run_id,
+            expected_token_hash=str(execution.get("event_token_hash", "")),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409, detail="Release execution admission changed"
+        ) from exc
     quality_result = payload.status in {"quality_passed", "quality_failed"}
     release_result = payload.status in {"release_planned", "no_release"}
     if quality_result != (payload.report is not None):
@@ -351,7 +398,12 @@ def _accept_event(
         changes["status"] = "running_quality"
     try:
         updated, accepted = release_executions.accept_event(
-            execution_id, payload.sequence, **changes
+            execution_id,
+            payload.sequence,
+            expected_provider=str(execution["provider"]),
+            expected_run_id=payload.provider_run_id,
+            expected_token_hash=str(execution.get("event_token_hash", "")),
+            **changes,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -419,11 +471,15 @@ def resolve_execution(
             raise HTTPException(
                 status_code=503, detail="PostgreSQL image must be pinned by digest"
             )
-    execution = release_executions.save(
-        str(execution["execution_id"]),
-        provider_run_id=claims["run_id"],
-        github_run_id=int(claims["run_id"]),
-    )
+    try:
+        execution = release_executions.admit_github_run(
+            str(execution["execution_id"]),
+            provider_run_id=claims["run_id"],
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409, detail="Release execution admission changed"
+        ) from exc
     return {
         "execution_id": execution["execution_id"],
         "fingerprint": execution["fingerprint"],

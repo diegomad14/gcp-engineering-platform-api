@@ -30,6 +30,7 @@ from .services import (
     github_deployments,
     mcp_store,
     release_orchestrator,
+    release_quality_bootstrap,
 )
 from .services.mcp_auth import _SCOPES, provider
 from .services import mcp_grants, log_catalog
@@ -381,6 +382,65 @@ def request_github_actions_health_probe(
     return _mutate(
         "request_github_actions_health_probe",
         {"reason": reason, "idempotency_key": idempotency_key},
+        mcp_grants.SCOPE,
+        action,
+    )
+
+
+@mcp.tool()
+def request_quality_bootstrap(
+    execution_id: str, idempotency_key: str
+) -> dict[str, Any]:
+    """Request the fixed, single Artemis PR 172 quality bootstrap.
+
+    Reusing its key only returns public status. The server fixes the target,
+    budget and executor; uncertain submissions consume the sole attempt.
+    """
+    if (
+        len(execution_id) != 64
+        or any(char not in "0123456789abcdef" for char in execution_id)
+        or not idempotency_key.strip()
+        or len(idempotency_key) > 128
+    ):
+        raise HTTPException(422, "Execution ID and idempotency key are invalid")
+
+    def action(subject):
+        original = _principal()
+
+        def reauthorize():
+            current = _principal()
+            mcp_grants.require(original)
+            if current != original or current.login != subject.lower():
+                raise HTTPException(403, "Bootstrap operator changed")
+            if (
+                not config.auth.allowed_logins
+                or current.login not in config.auth.allowed_logins
+            ):
+                raise HTTPException(403, "You are not allowed to request a bootstrap")
+
+        reauthorize()
+
+        try:
+            return release_quality_bootstrap.request_quality_bootstrap(
+                execution_id,
+                idempotency_key=idempotency_key,
+                actor=subject,
+                reauthorize=reauthorize,
+            )
+        except release_quality_bootstrap.QualityBootstrapError:
+            raise HTTPException(
+                409, "Quality bootstrap is unavailable or conflicts"
+            ) from None
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                503, "Quality bootstrap control is unavailable"
+            ) from None
+
+    return _mutate(
+        "request_quality_bootstrap",
+        {"execution_id": execution_id, "idempotency_key": idempotency_key},
         mcp_grants.SCOPE,
         action,
     )

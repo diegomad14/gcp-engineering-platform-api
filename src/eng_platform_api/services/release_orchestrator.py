@@ -311,6 +311,9 @@ def _start_checks(execution: dict[str, Any], *, pr_title: str = "") -> None:
 
 def _submit_if_managed(execution: dict[str, Any], service: CatalogService) -> dict:
     service = require_managed(service)
+    if execution.get("bootstrap_ticket_id"):
+        # Only the transaction that consumed the global ticket may submit it.
+        return release_executions.get(execution["execution_id"]) or execution
     if execution.get("provider") != "cloud_build":
         return execution
     try:
@@ -622,14 +625,17 @@ def handle_workflow_run(payload: dict[str, Any], *, delivery_id: str) -> list[di
             )
         ):
             continue
-        execution = release_executions.save(
-            execution["execution_id"],
-            github_run_id=run_id,
-            provider_run_id=str(run_id),
-            github_run_url=str(run_payload.get("html_url", "")),
-            provider_conclusion=str(run_payload.get("conclusion", "")),
-            workflow_delivery_id=delivery_id,
-        )
+        try:
+            execution = release_executions.admit_github_run(
+                execution["execution_id"],
+                provider_run_id=str(run_id),
+                github_run_url=str(run_payload.get("html_url", "")),
+                provider_conclusion=str(run_payload.get("conclusion", "")),
+                workflow_delivery_id=delivery_id,
+            )
+        except ValueError:
+            # Provider/run admission won on another replica after our read.
+            continue
         if github_actions_quota.is_release_quota_failure(
             run, repository=repository, expected_sha=head_sha
         ):
@@ -651,8 +657,11 @@ def handle_workflow_run(payload: dict[str, Any], *, delivery_id: str) -> list[di
             continue
         conclusion = str(run_payload.get("conclusion", ""))
         if conclusion == "success":
-            release_executions.save(
-                execution["execution_id"], provider_terminal_success=True
+            release_executions.save_for_provider(
+                execution["execution_id"],
+                expected_provider="github_actions",
+                expected_run_id=str(run_id),
+                provider_terminal_success=True,
             )
             results.append(release_reconciler.reconcile(execution["execution_id"]))
         elif (
@@ -677,12 +686,19 @@ def handle_workflow_run(payload: dict[str, Any], *, delivery_id: str) -> list[di
                         ),
                     }
                 )
-            release_executions.save(execution["execution_id"], **changes)
+            release_executions.save_for_provider(
+                execution["execution_id"],
+                expected_provider="github_actions",
+                expected_run_id=str(run_id),
+                **changes,
+            )
             results.append(release_reconciler.reconcile(execution["execution_id"]))
         else:
             results.append(
-                release_executions.save(
+                release_executions.save_for_provider(
                     execution["execution_id"],
+                    expected_provider="github_actions",
+                    expected_run_id=str(run_id),
                     status="failed",
                     error=f"GitHub workflow concluded {conclusion or 'unknown'}",
                 )
@@ -916,9 +932,8 @@ def reconcile_verified_github_run(
     )
     if created:
         _start_checks(execution)
-    execution = release_executions.save(
+    execution = release_executions.admit_github_run(
         execution["execution_id"],
-        github_run_id=run_id,
         provider_run_id=str(run_id),
         github_run_url=str(getattr(run, "html_url", "")),
         recovery_requested_by=requested_by,
@@ -937,7 +952,10 @@ def reconcile_verified_github_run(
         )
         return _submit_if_managed(execution, service) if changed else execution
     if getattr(run, "conclusion", "") == "success":
-        return release_executions.save(
-            execution["execution_id"], provider_terminal_success=True
+        return release_executions.save_for_provider(
+            execution["execution_id"],
+            expected_provider="github_actions",
+            expected_run_id=str(run_id),
+            provider_terminal_success=True,
         )
     raise ReleaseOrchestratorError("GitHub run was not a Billing rejection")

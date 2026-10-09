@@ -22,6 +22,127 @@ def _repository(monkeypatch, repo):
     return client
 
 
+def _bootstrap_guard_fixture(
+    monkeypatch, *, runs=None, pr_changes=None, workflow_changes=None
+):
+    repository = "diegomad14/cgm-artemis-api"
+    pr = {
+        "state": "open",
+        "number": 172,
+        "head": {"sha": HEAD, "repo": {"id": 1306114845}},
+        "base": {"sha": "b" * 40, "ref": "main", "repo": {"id": 1306114845}},
+    }
+    pr.update(pr_changes or {})
+    workflow = {
+        "id": 123,
+        "state": "disabled_manually",
+        "path": ".github/workflows/eng-platform-quality.yml",
+    }
+    workflow.update(workflow_changes or {})
+    requester = mock.Mock()
+    pages = runs if runs is not None else [[]]
+    requester.requestJsonAndCheck.side_effect = [
+        ({}, pr),
+        ({}, workflow),
+        *[({}, {"workflow_runs": page}) for page in pages],
+    ]
+    _repository(
+        monkeypatch, SimpleNamespace(id=1306114845, private=True, _requester=requester)
+    )
+    args = {
+        "repository": repository,
+        "repository_id": 1306114845,
+        "pull_request_number": 172,
+        "head_sha": HEAD,
+        "base_sha": "b" * 40,
+    }
+    return requester, args
+
+
+def _canonical_run(**changes):
+    return {
+        "id": 1,
+        "workflow_id": 123,
+        "path": ".github/workflows/eng-platform-quality.yml",
+        "event": "pull_request_target",
+        "status": "completed",
+        "head_sha": "b" * 40,
+        "display_title": "eng-platform-quality-" + "c" * 40,
+        "pull_requests": [],
+        **changes,
+    }
+
+
+def test_bootstrap_guard_requires_disabled_exact_workflow_and_current_pr(monkeypatch):
+    requester, args = _bootstrap_guard_fixture(monkeypatch)
+    assert control.verify_quality_bootstrap_preconditions(**args) == {
+        "workflow_id": 123,
+        "workflow_path": ".github/workflows/eng-platform-quality.yml",
+    }
+    assert requester.requestJsonAndCheck.call_args.kwargs["parameters"] == {
+        "per_page": 100,
+        "page": 1,
+    }
+
+
+@pytest.mark.parametrize("state", ["active", "disabled_inactivity", "deleted"])
+def test_bootstrap_guard_rejects_active_or_unexpected_disabled_state(
+    monkeypatch, state
+):
+    _, args = _bootstrap_guard_fixture(monkeypatch, workflow_changes={"state": state})
+    with pytest.raises(control.GitHubReleaseConflict, match="disabled manually"):
+        control.verify_quality_bootstrap_preconditions(**args)
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        _canonical_run(status="queued"),
+        _canonical_run(status="in_progress"),
+        _canonical_run(display_title=f"eng-platform-quality-{HEAD}"),
+        _canonical_run(pull_requests=[{"number": 172, "head": {"sha": HEAD}}]),
+        _canonical_run(display_title="unverifiable base-sha run"),
+        _canonical_run(event="workflow_dispatch"),
+        _canonical_run(path=".github/workflows/other.yml"),
+    ],
+)
+def test_bootstrap_guard_rejects_active_existing_or_unverifiable_runs(monkeypatch, run):
+    _, args = _bootstrap_guard_fixture(monkeypatch, runs=[[run]])
+    with pytest.raises(control.GitHubReleaseConflict):
+        control.verify_quality_bootstrap_preconditions(**args)
+
+
+def test_bootstrap_guard_paginates_without_head_sha_filter(monkeypatch):
+    requester, args = _bootstrap_guard_fixture(
+        monkeypatch,
+        runs=[
+            [_canonical_run(id=index) for index in range(100)],
+            [_canonical_run(display_title=f"eng-platform-quality-{HEAD}")],
+        ],
+    )
+    with pytest.raises(control.GitHubReleaseConflict, match="already exists"):
+        control.verify_quality_bootstrap_preconditions(**args)
+    assert requester.requestJsonAndCheck.call_args.kwargs["parameters"] == {
+        "per_page": 100,
+        "page": 2,
+    }
+    assert all(
+        "head_sha" not in call.kwargs.get("parameters", {})
+        for call in requester.requestJsonAndCheck.call_args_list
+    )
+
+
+def test_bootstrap_guard_rejects_live_pr_drift_and_workflow_id_drift(monkeypatch):
+    _, args = _bootstrap_guard_fixture(
+        monkeypatch, pr_changes={"head": {"sha": "d" * 40, "repo": {"id": 1306114845}}}
+    )
+    with pytest.raises(control.GitHubReleaseConflict, match="pull request"):
+        control.verify_quality_bootstrap_preconditions(**args)
+    _, args = _bootstrap_guard_fixture(monkeypatch)
+    with pytest.raises(control.GitHubReleaseConflict, match="disabled manually"):
+        control.verify_quality_bootstrap_preconditions(**args, workflow_id=124)
+
+
 def test_execution_variable_is_private_only_and_recovers_missing_variable(monkeypatch):
     requester = mock.Mock()
     repo = SimpleNamespace(private=True, _requester=requester)

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..config import config
@@ -12,6 +14,7 @@ from ..services import (
     deployment_commands,
     release_executions,
     release_orchestrator,
+    release_quality_bootstrap,
     release_reconciler,
 )
 from .release_execution_events import _bearer, _verify_google
@@ -34,6 +37,42 @@ class SupersedeExecutionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: str = Field(min_length=3, max_length=500)
+
+
+class QualityBootstrapRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(min_length=1, max_length=128, pattern=r"\S")
+
+
+@router.post("/executions/{execution_id}/quality-bootstrap", include_in_schema=False)
+def request_quality_bootstrap(
+    execution_id: Annotated[str, Path(pattern=r"^[0-9a-f]{64}$")],
+    payload: QualityBootstrapRequest,
+    request: Request,
+    identity: str = Depends(require_deployer),
+):
+    """Consume the fixed Artemis quality bootstrap as an allowlisted deployer."""
+
+    def reauthorize():
+        if require_deployer(request) != identity:
+            raise HTTPException(403, "Bootstrap operator changed")
+
+    try:
+        return release_quality_bootstrap.request_quality_bootstrap(
+            execution_id,
+            idempotency_key=payload.idempotency_key,
+            actor=identity,
+            reauthorize=reauthorize,
+        )
+    except release_quality_bootstrap.QualityBootstrapError:
+        raise HTTPException(
+            409, "Quality bootstrap is unavailable or conflicts"
+        ) from None
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(503, "Quality bootstrap control is unavailable") from None
 
 
 @router.post("/reconcile", include_in_schema=False)
@@ -61,7 +100,13 @@ def reconcile_due(authorization: str | None = Header(default=None)):
         except Exception as exc:
             try:
                 updated = release_executions.save(
-                    execution_id, status="unknown", error=str(exc)[:1000]
+                    execution_id,
+                    status="unknown",
+                    error=(
+                        "Bootstrap recovery is unverified; attempt remains consumed"
+                        if execution.get("bootstrap_ticket_id")
+                        else str(exc)[:1000]
+                    ),
                 )
                 results.append(
                     {"execution_id": execution_id, "status": updated["status"]}

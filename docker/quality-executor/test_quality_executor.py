@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -113,17 +114,67 @@ class QualityProfilesTest(unittest.TestCase):
         )
 
     def test_scanner_private_runtime_is_outside_root_only_gate_tmp(self) -> None:
+        parent = Path("/scratch/trusted-scanner-runtime")
+        runtime = parent / "scanner-test"
         with (
             mock.patch.object(
-                trusted_scanner.tempfile, "mkdtemp", return_value="/tmp/scanner-test"
+                trusted_scanner.tempfile, "mkdtemp", return_value=str(runtime)
             ) as make_dir,
+            mock.patch.object(
+                trusted_scanner, "_scanner_runtime_parent", return_value=parent
+            ),
+            mock.patch.object(trusted_scanner, "_uid_processes", return_value=[]),
             mock.patch.object(trusted_scanner.os, "chown"),
             mock.patch.object(trusted_scanner.os, "chmod"),
         ):
             environment = trusted_scanner._runtime_environment()
-        make_dir.assert_called_once_with(prefix="eng-platform-scanner-", dir="/tmp")
-        self.assertEqual("/tmp/scanner-test", environment["HOME"])
-        self.assertEqual("/tmp/scanner-test/.cache", environment["XDG_CACHE_HOME"])
+        make_dir.assert_called_once_with(
+            prefix="eng-platform-scanner-", dir=str(parent)
+        )
+        self.assertEqual(str(runtime), environment["HOME"])
+        self.assertEqual(str(runtime / ".cache"), environment["XDG_CACHE_HOME"])
+        self.assertEqual(str(runtime / ".cache/trivy"), environment["TRIVY_CACHE_DIR"])
+
+    def test_scanner_runtime_permissions_do_not_require_cap_fowner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / "scanner"
+            runtime.mkdir(mode=0o755)
+            real_chmod = os.chmod
+            owned_by_launcher = True
+
+            def chmod_without_cap_fowner(path: Path, mode: int) -> None:
+                if not owned_by_launcher:
+                    raise PermissionError("CAP_FOWNER is unavailable")
+                real_chmod(path, mode)
+
+            def transfer_ownership(*args: object, **kwargs: object) -> None:
+                nonlocal owned_by_launcher
+                owned_by_launcher = False
+
+            with (
+                mock.patch.object(
+                    trusted_scanner,
+                    "_scanner_runtime_parent",
+                    return_value=Path(directory),
+                ),
+                mock.patch.object(trusted_scanner, "_uid_processes", return_value=[]),
+                mock.patch.object(
+                    trusted_scanner.tempfile, "mkdtemp", return_value=str(runtime)
+                ),
+                mock.patch.object(
+                    trusted_scanner.os, "chmod", side_effect=chmod_without_cap_fowner
+                ) as chmod,
+                mock.patch.object(
+                    trusted_scanner.os, "chown", side_effect=transfer_ownership
+                ) as chown,
+            ):
+                environment = trusted_scanner._runtime_environment()
+
+            chmod.assert_called_once_with(runtime, 0o700)
+            chown.assert_called_once_with(runtime, 65532, 65532, follow_symlinks=False)
+            self.assertEqual(0o700, runtime.stat().st_mode & 0o777)
+            self.assertFalse(owned_by_launcher)
+            self.assertEqual(str(runtime), environment["TMPDIR"])
 
     def test_trivy_uses_only_the_pinned_exception_policy(self) -> None:
         self.assertEqual(
@@ -169,6 +220,350 @@ class QualityProfilesTest(unittest.TestCase):
         advisory = {item["name"]: item for item in bot["extra"]}
         self.assertFalse(advisory["Mypy advisory"]["blocking"])
         self.assertFalse(advisory["Dependency audit advisory"]["blocking"])
+
+
+class ScannerScratchContractTest(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="scanner-scratch-contract-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.root.chmod(0o711)
+        self.scratch = self.root / "scratch"
+        self.scratch.mkdir()
+        self.scratch.chmod(0o755)
+        self.owners: dict[Path, tuple[int, int]] = {}
+        real_stat = Path.stat
+
+        def root_owned_stat(
+            path: Path, *args: object, **kwargs: object
+        ) -> os.stat_result:
+            fields = list(real_stat(path, *args, **kwargs))
+            fields[4], fields[5] = self.owners.get(path, (0, 0))
+            return os.stat_result(fields)
+
+        metadata = mock.patch.object(Path, "stat", root_owned_stat)
+        metadata.start()
+        self.addCleanup(metadata.stop)
+
+    def _parent(self) -> Path:
+        return quality_executor._prepare_scanner_runtime_parent(self.scratch)
+
+    def _runtime(self, parent: Path) -> dict[str, str]:
+        real_chmod = os.chmod
+
+        def chmod_without_fowner(path: Path, mode: int) -> None:
+            if self.owners.get(path, (0, 0)) != (0, 0):
+                raise PermissionError("CAP_FOWNER is unavailable")
+            real_chmod(path, mode)
+
+        def transfer_ownership(
+            path: Path, uid: int, gid: int, *, follow_symlinks: bool
+        ) -> None:
+            self.assertFalse(follow_symlinks)
+            self.owners[path] = (uid, gid)
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {trusted_scanner._SCANNER_RUNTIME_PARENT_ENV: str(parent)},
+                clear=True,
+            ),
+            mock.patch.object(
+                trusted_scanner.os, "chmod", side_effect=chmod_without_fowner
+            ),
+            mock.patch.object(
+                trusted_scanner.os, "chown", side_effect=transfer_ownership
+            ),
+        ):
+            return trusted_scanner._runtime_environment()
+
+    def test_motor_parent_ignores_repository_environment_and_rejects_foreign_gate_parent(
+        self,
+    ) -> None:
+        with mock.patch.dict(
+            os.environ, {trusted_scanner._SCANNER_RUNTIME_PARENT_ENV: "/repo/attacker"}
+        ):
+            parent = self._parent()
+        self.assertEqual(self.scratch / "trusted-scanner-runtime", parent)
+        self.assertEqual(0o711, stat.S_IMODE(parent.stat().st_mode))
+        self.assertFalse(parent.is_relative_to(self.scratch / "runtime/repository"))
+        with self.assertRaisesRegex(
+            quality_executor.QualityExecutorError, "derived from motor scratch"
+        ):
+            quality_executor._trusted_gate_environment(
+                self.root / "foreign/trusted-runtime",
+                self.root / "repo",
+                self.root / "git",
+                parent,
+            )
+
+    def test_scanner_cache_exceeds_private_tmp_and_children_remain_private(
+        self,
+    ) -> None:
+        parent = self._parent()
+        with mock.patch.object(trusted_scanner, "_uid_processes", return_value=[]):
+            environment = self._runtime(parent)
+            second = self._runtime(parent)
+        home = Path(environment["HOME"])
+        self.assertEqual(parent, home.parent)
+        self.assertNotEqual(environment["HOME"], second["HOME"])
+        self.assertEqual(0o700, stat.S_IMODE(home.stat().st_mode))
+        self.assertEqual((65532, 65532), self.owners[home])
+        self.assertEqual(str(home), environment["TMPDIR"])
+        cache = Path(environment["TRIVY_CACHE_DIR"])
+        self.assertEqual(home / ".cache/trivy", cache)
+        cache.mkdir(parents=True)
+        fixture = cache / "synthetic-db"
+        with fixture.open("wb") as handle:
+            for _ in range(65):
+                handle.write(bytes(1024 * 1024))
+        self.assertEqual(65 * 1024 * 1024, fixture.stat().st_size)
+        self.assertNotIn(trusted_scanner._SCANNER_RUNTIME_PARENT_ENV, environment)
+
+    def test_missing_relative_noncanonical_and_wrong_name_parent_fail_closed(
+        self,
+    ) -> None:
+        for value in (
+            "",
+            "relative/trusted-scanner-runtime",
+            "/tmp/../tmp/trusted-scanner-runtime",
+            "//tmp/trusted-scanner-runtime",
+            "/tmp/",
+            "/tmp/./trusted-scanner-runtime",
+        ):
+            with (
+                self.subTest(value=value),
+                mock.patch.dict(
+                    os.environ,
+                    {trusted_scanner._SCANNER_RUNTIME_PARENT_ENV: value},
+                    clear=True,
+                ),
+                self.assertRaises(trusted_scanner.TrustedScannerError),
+            ):
+                trusted_scanner._runtime_environment()
+
+    def test_unsafe_preexisting_parent_owner_and_modes_are_not_repaired(self) -> None:
+        parent = self._parent()
+        for owner in ((65532, 0), (0, 65532)):
+            self.owners[parent] = owner
+            with (
+                self.subTest(owner=owner),
+                self.assertRaises(quality_executor.QualityExecutorError),
+            ):
+                self._parent()
+            self.assertEqual(owner, self.owners[parent])
+        self.owners[parent] = (0, 0)
+        for mode in (0o777, 0o1777, 0o775, 0o700, 0o755):
+            parent.chmod(mode)
+            with (
+                self.subTest(mode=mode),
+                self.assertRaises(quality_executor.QualityExecutorError),
+            ):
+                self._parent()
+            self.assertEqual(mode, stat.S_IMODE(parent.stat().st_mode))
+
+    def test_symlink_and_file_parents_and_symlink_ancestors_are_rejected(self) -> None:
+        target = self.root / "target"
+        target.mkdir()
+        parent = self.scratch / "trusted-scanner-runtime"
+        parent.symlink_to(target, target_is_directory=True)
+        with self.assertRaises(quality_executor.QualityExecutorError):
+            self._parent()
+        parent.unlink()
+        parent.write_text("untouched")
+        with self.assertRaises(quality_executor.QualityExecutorError):
+            self._parent()
+        self.assertEqual("untouched", parent.read_text())
+        parent.unlink()
+        link = self.root / "scratch-link"
+        link.symlink_to(self.scratch, target_is_directory=True)
+        with self.assertRaises(quality_executor.QualityExecutorError):
+            quality_executor._prepare_scanner_runtime_parent(link)
+        self.assertFalse(parent.exists())
+
+    def test_writable_ancestor_requires_sticky_and_entire_chain_root_owned(
+        self,
+    ) -> None:
+        self.scratch.chmod(0o777)
+        with self.assertRaises(quality_executor.QualityExecutorError):
+            self._parent()
+        self.scratch.chmod(0o1777)
+        self._parent()
+        self.owners[self.scratch] = (65532, 65532)
+        with self.assertRaises(quality_executor.QualityExecutorError):
+            self._parent()
+
+    def test_motor_parent_inherits_to_wrapper_and_is_absent_from_repository_manifest(
+        self,
+    ) -> None:
+        parent = self._parent()
+        trusted = self.scratch / "trusted-runtime"
+        trusted.mkdir(mode=0o700)
+        runtime = self.scratch / "runtime"
+        runtime.mkdir()
+        checkout = runtime / "repository"
+        checkout.mkdir()
+        git_directory = self.scratch / "trusted/repository.git"
+        with mock.patch.dict(
+            os.environ,
+            {
+                trusted_scanner._SCANNER_RUNTIME_PARENT_ENV: "/repo/attacker",
+                "GITHUB_TOKEN": "synthetic",
+            },
+        ):
+            gate = quality_executor._trusted_gate_environment(
+                trusted, checkout, git_directory, parent
+            )
+            child = quality_executor._child_environment(
+                runtime,
+                {"head_sha": "a" * 40, "base_sha": "b" * 40},
+                {"runtime": "node"},
+            )
+        self.assertEqual(str(parent), gate[trusted_scanner._SCANNER_RUNTIME_PARENT_ENV])
+        self.assertNotIn("GITHUB_TOKEN", gate)
+        self.assertNotIn(trusted_scanner._SCANNER_RUNTIME_PARENT_ENV, child)
+        command = shlex.join(
+            [
+                sys.executable,
+                "-c",
+                "import os; print(os.environ['ENG_PLATFORM_SCANNER_RUNTIME_PARENT'])",
+            ]
+        )
+        with mock.patch.dict(os.environ, gate, clear=True):
+            result = quality_gate._run(command, checkout, trusted / "inheritance.log")
+        self.assertEqual(0, result["returncode"])
+        self.assertEqual(str(parent), result["output"].strip())
+        manifest = trusted / "untrusted-environment.json"
+        quality_executor._write_private_json(manifest, child)
+        self.assertNotIn(
+            trusted_scanner._SCANNER_RUNTIME_PARENT_ENV,
+            untrusted_command._environment(manifest),
+        )
+
+    def test_remaining_repository_processes_block_runtime_and_popen(self) -> None:
+        parent = self._parent()
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    trusted_scanner._SCANNER_RUNTIME_PARENT_ENV: str(parent),
+                    "ENG_PLATFORM_SCANNER_DEADLINE": str(time.monotonic() + 60),
+                },
+                clear=True,
+            ),
+            mock.patch.object(
+                trusted_scanner, "_uid_processes", return_value=[123456789]
+            ),
+            mock.patch.object(trusted_scanner.tempfile, "mkdtemp") as make_dir,
+            mock.patch.object(trusted_scanner.subprocess, "Popen") as process,
+        ):
+            with self.assertRaisesRegex(
+                trusted_scanner.TrustedScannerError, "before scanner phase"
+            ):
+                trusted_scanner._run_process(
+                    Path("/usr/local/bin/semgrep"), ["--version"], None
+                )
+        make_dir.assert_not_called()
+        process.assert_not_called()
+
+    def test_motor_creates_fresh_nested_scratch_with_traversable_root_ancestors(
+        self,
+    ) -> None:
+        scratch = self.scratch / "quality"
+        self.assertFalse(scratch.exists())
+        parent = quality_executor._prepare_scanner_runtime_parent(scratch)
+        self.assertEqual(scratch / "trusted-scanner-runtime", parent)
+        self.assertEqual(0o755, stat.S_IMODE(scratch.stat().st_mode))
+        self.assertEqual(0o711, stat.S_IMODE(parent.stat().st_mode))
+        with mock.patch.object(trusted_scanner, "_uid_processes", return_value=[]):
+            environment = self._runtime(parent)
+        self.assertEqual(parent, Path(environment["HOME"]).parent)
+
+    def test_motor_rejects_untraversable_or_symlink_scratch_without_repair(
+        self,
+    ) -> None:
+        self.scratch.chmod(0o700)
+        with self.assertRaises(quality_executor.QualityExecutorError):
+            quality_executor._prepare_scanner_runtime_parent(self.scratch / "quality")
+        self.assertEqual(0o700, stat.S_IMODE(self.scratch.stat().st_mode))
+        self.assertFalse((self.scratch / "quality").exists())
+        self.scratch.chmod(0o755)
+        link = self.root / "scratch-link"
+        link.symlink_to(self.scratch, target_is_directory=True)
+        with self.assertRaises(quality_executor.QualityExecutorError):
+            quality_executor._prepare_scanner_runtime_parent(link / "quality")
+        self.assertFalse((self.scratch / "quality").exists())
+
+    def test_successful_repository_cleanup_precedes_scanner_runtime(self) -> None:
+        parent = self._parent()
+        with (
+            mock.patch.object(
+                untrusted_command, "_uid_processes", side_effect=[[123456789], []]
+            ),
+            mock.patch.object(untrusted_command.os, "killpg"),
+            mock.patch.object(untrusted_command.os, "kill") as kill,
+            mock.patch.object(untrusted_command.time, "sleep"),
+            mock.patch.object(untrusted_command, "_reap_children"),
+        ):
+            untrusted_command._kill_descendants(123456789)
+        with mock.patch.object(trusted_scanner, "_uid_processes", return_value=[]):
+            environment = self._runtime(parent)
+        kill.assert_called_once_with(123456789, untrusted_command.signal.SIGKILL)
+        self.assertEqual(parent, Path(environment["HOME"]).parent)
+
+    def test_failed_repository_cleanup_blocks_scanner_runtime(self) -> None:
+        parent = self._parent()
+        with (
+            mock.patch.object(
+                untrusted_command, "_uid_processes", return_value=[123456789]
+            ),
+            mock.patch.object(untrusted_command.os, "killpg"),
+            mock.patch.object(untrusted_command.os, "kill"),
+            mock.patch.object(untrusted_command.time, "sleep"),
+            mock.patch.object(untrusted_command, "_reap_children"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Unable to terminate"):
+                untrusted_command._kill_descendants(123456789)
+        with mock.patch.object(
+            trusted_scanner, "_uid_processes", return_value=[123456789]
+        ):
+            with self.assertRaisesRegex(
+                trusted_scanner.TrustedScannerError, "before scanner phase"
+            ):
+                self._runtime(parent)
+        self.assertEqual([], list(parent.iterdir()))
+
+    def test_invalid_gate_parent_does_not_create_trusted_runtime(self) -> None:
+        parent = self._parent()
+        parent.chmod(0o777)
+        trusted_runtime = self.scratch / "trusted-runtime"
+        with self.assertRaisesRegex(quality_executor.QualityExecutorError, "unsafe"):
+            quality_executor._trusted_gate_environment(
+                trusted_runtime, self.root / "repo", self.root / "git", parent
+            )
+        self.assertFalse(trusted_runtime.exists())
+
+    def test_parent_validation_precedes_any_repository_runtime_preparation(
+        self,
+    ) -> None:
+        identity = {"service_name": "eng-platform-api", "profile_hash": "a" * 64}
+        with (
+            mock.patch.object(quality_executor, "_identity", return_value=identity),
+            mock.patch.object(quality_executor, "verify_profile_hash", return_value={}),
+            mock.patch.object(quality_executor, "_isolated_checkout") as checkout,
+        ):
+            self.scratch.chmod(0o777)
+            with self.assertRaisesRegex(
+                quality_executor.QualityExecutorError, "unsafe"
+            ):
+                quality_executor._run_quality(
+                    "eng-platform-api",
+                    self.root / "source",
+                    self.scratch,
+                    self.root / "output",
+                    self.root / "external",
+                )
+        checkout.assert_not_called()
 
 
 class MandatorySmartiEvidenceTest(unittest.TestCase):

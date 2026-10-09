@@ -332,9 +332,14 @@ def test_real_cli_transports_safe_summary_to_normalized_detail(
     executor = _load(
         "diagnostic_executor", ROOT / "docker/quality-executor/quality_executor.py"
     )
-    reports, staging, runtime = [
-        tmp_path / name for name in ("reports", "staging", "runtime")
-    ]
+    reports, staging = [tmp_path / name for name in ("reports", "staging")]
+    scanner_parent = tmp_path / "trusted-scanner-runtime"
+    # Emulate the motor's traversable root-owned scratch ancestor in this
+    # synthetic CLI fixture; root ownership is modeled below.
+    tmp_path.chmod(0o711)
+    scanner_parent.mkdir(mode=0o711)
+    scanner_parent.chmod(0o711)
+    runtime = scanner_parent / "runtime"
     for directory in (reports, staging, runtime):
         directory.mkdir(mode=0o700)
     target = reports / "semgrep.json"
@@ -371,6 +376,10 @@ def owned_stat(path, *args, **kwargs):
     else:
         fields = list(real_stat(path, *args, **kwargs))
     fields[4] = fields[5] = 0
+    if path in root.parents:
+        # Pytest's host-private ancestors model the image's traversable root
+        # scratch mount. This fixture never executes a reduced-UID process.
+        fields[0] |= 0o001
     return os.stat_result(fields)
 
 class SyntheticProcess:
@@ -383,11 +392,12 @@ class SyntheticProcess:
 os.environ["ENG_PLATFORM_TRUSTED_REPORT_DIRECTORY"] = str(root / "reports")
 os.environ["ENG_PLATFORM_SCANNER_STAGING_DIRECTORY"] = str(root / "staging")
 os.environ["ENG_PLATFORM_SCANNER_DEADLINE"] = str(time.monotonic() + 30)
+os.environ["ENG_PLATFORM_SCANNER_RUNTIME_PARENT"] = str(root / "trusted-scanner-runtime")
 wrapper = str(Path(sys.argv[1]) / "trusted_scanner.py")
 sys.argv = [wrapper, "semgrep", "--output", str(root / "reports/semgrep.json")]
 with patch("os.geteuid", return_value=0), patch("os.chown"), \\
      patch.object(Path, "stat", owned_stat), \\
-     patch("tempfile.mkdtemp", return_value=str(root / "runtime")), \\
+     patch("tempfile.mkdtemp", return_value=str(root / "trusted-scanner-runtime/runtime")), \\
      patch("subprocess.Popen", SyntheticProcess), \\
      patch.object(untrusted_command, "_kill_descendants"):
     runpy.run_path(wrapper, run_name="__main__")

@@ -3,9 +3,19 @@ FROM python:3.12.11-slim-bookworm
 ARG TRIVY_VERSION=0.72.0
 ARG ACTIONLINT_VERSION=1.7.12
 
-RUN apt-get update \
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 NPM_CONFIG_AUDIT=false
+
+# An optional public CA bundle supports build proxies without persisting trust.
+RUN --mount=type=secret,id=build-ca-bundle,required=false,mode=0444 \
+    if [ -f /run/secrets/build-ca-bundle ]; then \
+        export PIP_CERT=/run/secrets/build-ca-bundle CURL_CA_BUNDLE=/run/secrets/build-ca-bundle; \
+        printf 'Acquire::https::CaInfo "/run/secrets/build-ca-bundle";\n' > /tmp/quality-build-apt.conf; \
+        export APT_CONFIG=/tmp/quality-build-apt.conf; \
+    fi \
+    && sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl docker.io git nodejs npm socat \
-    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/lib/apt/lists/* /tmp/quality-build-apt.conf \
     && python -m pip install --no-cache-dir \
         bandit==1.8.6 \
         mypy==1.18.2 \

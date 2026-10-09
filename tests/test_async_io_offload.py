@@ -252,7 +252,7 @@ async def test_processed_webhook_replay_does_not_reexecute(browser, webhook):
     calls.complete.assert_not_called()
 
 
-@pytest.mark.parametrize("stage", ["get", "verify", "accept", "reconcile"])
+@pytest.mark.parametrize("stage", ["get", "verify", "admit", "accept", "reconcile"])
 async def test_release_callback_offloads_io_in_authenticated_order(
     browser, monkeypatch, stage
 ):
@@ -260,6 +260,8 @@ async def test_release_callback_offloads_io_in_authenticated_order(
     state = {
         "execution_id": "execution-1",
         "fingerprint": fingerprint,
+        "provider": "cloud_build",
+        "provider_run_id": "build-1",
         "event_sequence": 0,
         "status": "running_quality",
         "event_token_hash": hashlib.sha256(b"test-event-token").hexdigest(),
@@ -269,6 +271,11 @@ async def test_release_callback_offloads_io_in_authenticated_order(
     stages = {
         "get": (release_execution_events.release_executions, "get", state),
         "verify": (release_execution_events, "_verify_provider", None),
+        "admit": (
+            release_execution_events.release_executions,
+            "admit_event_provider",
+            state,
+        ),
         "accept": (
             release_execution_events.release_executions,
             "accept_event",
@@ -313,10 +320,17 @@ async def test_release_callback_offloads_io_in_authenticated_order(
     assert [call[0] for call in calls.mock_calls] == [
         "get",
         "verify",
+        "admit",
         "accept",
         "reconcile",
     ]
     calls.verify.assert_called_once_with(state, "build-1", "Bearer test-identity")
+    calls.admit.assert_called_once_with(
+        "execution-1",
+        expected_provider="cloud_build",
+        expected_run_id="build-1",
+        expected_token_hash=state["event_token_hash"],
+    )
 
 
 @pytest.mark.parametrize("name", ["can_view_catalog", "can_query_databases"])

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from datetime import datetime, timezone
 from threading import RLock
 from typing import Any, Literal
@@ -74,6 +75,535 @@ _TRANSITIONS: dict[str, set[str]] = {
 
 _memory: dict[str, dict[str, Any]] = {}
 _lock = RLock()
+QUALITY_BOOTSTRAP_TICKET_ID = "artemis-pr172-quality-bootstrap-v1"
+_BOOTSTRAP_DOCUMENT_ID = "__bootstrap_ticket_" + QUALITY_BOOTSTRAP_TICKET_ID
+_IDENTITY_FIELDS = frozenset(
+    {
+        "execution_id",
+        "fingerprint",
+        "repository",
+        "service_name",
+        "operation",
+        "head_sha",
+        "base_sha",
+        "profile_hash",
+        "executor_digest",
+        "policy_hash",
+        "planner_hash",
+    }
+)
+
+
+def _persistent_bootstrap_collection():
+    """The global fence may use memory only in explicit mock mode."""
+    collection = _collection()
+    if collection is None and not config.mock_mode:
+        raise RuntimeError("Persistent quality bootstrap storage is unavailable")
+    return collection
+
+
+def get_quality_bootstrap_ticket() -> dict[str, Any] | None:
+    collection = _persistent_bootstrap_collection()
+    if collection is None:
+        with _lock:
+            return deepcopy(_memory.get(_BOOTSTRAP_DOCUMENT_ID))
+    snapshot = collection.document(_BOOTSTRAP_DOCUMENT_ID).get()
+    return snapshot.to_dict() if snapshot.exists else None
+
+
+def _mutate(execution_id: str, callback):
+    """Read, check and update the same version in a serializable transaction."""
+    if execution_id == _BOOTSTRAP_DOCUMENT_ID:
+        raise ValueError("Quality bootstrap global ticket is immutable")
+    collection = _collection()
+    if collection is None:
+        with _lock:
+            current = _memory.get(execution_id)
+            if current is None:
+                raise KeyError(execution_id)
+            if current.get("bootstrap_ticket_id") and not config.mock_mode:
+                raise RuntimeError(
+                    "Persistent quality bootstrap storage is unavailable"
+                )
+            changes, result = callback(deepcopy(current))
+            if changes:
+                current.update(deepcopy(changes))
+            return deepcopy(result if result is not None else current)
+    document = collection.document(execution_id)
+    transaction = document._client.transaction()
+    from google.cloud.firestore import transactional
+
+    @transactional
+    def write(txn):
+        snapshot = document.get(transaction=txn)
+        if not snapshot.exists:
+            raise KeyError(execution_id)
+        current = snapshot.to_dict()
+        changes, result = callback(current)
+        if changes:
+            txn.update(document, changes)
+            current.update(changes)
+        return result if result is not None else current
+
+    return write(transaction)
+
+
+def _validate_changes(current: dict[str, Any], changes: dict[str, Any]) -> None:
+    if current.get("ticket_id") == QUALITY_BOOTSTRAP_TICKET_ID:
+        raise ValueError("Quality bootstrap global ticket is immutable")
+    if _IDENTITY_FIELDS.intersection(changes):
+        raise ValueError("Release execution identity fields are immutable")
+    if any(key.startswith("bootstrap_") for key in changes):
+        raise ValueError("Quality bootstrap fields are immutable")
+    if current.get("bootstrap_ticket_id"):
+        if not config.mock_mode:
+            _persistent_bootstrap_collection()
+        if any(
+            key in changes and changes[key] != current.get(key)
+            for key in (
+                "provider",
+                "build_id",
+                "provider_run_id",
+                "github_run_id",
+                "build_name",
+                "logs_url",
+                "pull_request_number",
+                "repository_id",
+                "source_token_issued_at",
+                "source_token_build_id",
+                "event_token_hash",
+                "event_token_issued_at",
+                "event_token_build_id",
+                "event_token_provider_run_id",
+                "previous_build_ids",
+            )
+        ):
+            raise ValueError("Quality bootstrap attempt cannot be reset or rebound")
+        if changes.get("status") in {
+            "received",
+            "waiting_github",
+            "submission_pending",
+            "submission_failed",
+        }:
+            raise ValueError("Quality bootstrap attempt cannot be retried")
+        if any(
+            key.startswith("planner_retry") or key.startswith("reconciliation_attempt")
+            for key in changes
+        ):
+            raise ValueError("Quality bootstrap attempt cannot be retried")
+        for field in (
+            "event_sequence",
+            "pending_report_hash",
+            "report_hash",
+            "evidence_committed",
+        ):
+            if current.get(field) and field in changes:
+                if field == "event_sequence":
+                    if changes[field] < current[field]:
+                        raise ValueError("Quality bootstrap evidence cannot be reset")
+                elif current[field] != changes[field]:
+                    raise ValueError("Quality bootstrap evidence is immutable")
+    _validate_status_change(current, changes)
+
+
+def _require_event_identity(
+    current: dict[str, Any],
+    *,
+    expected_provider: str,
+    expected_run_id: str,
+    expected_token_hash: str = "",
+) -> None:
+    if current.get("provider") != expected_provider:
+        raise ValueError("Release execution provider changed")
+    run_id = str(current.get("provider_run_id", ""))
+    if not expected_run_id or run_id != expected_run_id:
+        raise ValueError("Release execution run changed")
+    if expected_token_hash and current.get("event_token_hash") != expected_token_hash:
+        raise ValueError("Release execution event token changed")
+    if current.get("bootstrap_ticket_id") and not current.get(
+        "bootstrap_build_verified"
+    ):
+        raise ValueError("Quality bootstrap build has not been verified")
+
+
+def save_for_provider(
+    execution_id: str,
+    *,
+    expected_provider: str,
+    expected_run_id: str | None = None,
+    **changes: Any,
+) -> dict[str, Any]:
+    changes["updated_at"] = _now()
+
+    def change(current):
+        if current.get("provider") != expected_provider:
+            raise ValueError("Release execution provider changed")
+        if (
+            expected_run_id is not None
+            and str(current.get("provider_run_id", "")) != expected_run_id
+        ):
+            raise ValueError("Release execution run changed")
+        _validate_changes(current, changes)
+        return changes, None
+
+    return _mutate(execution_id, change)
+
+
+def admit_github_run(
+    execution_id: str, *, provider_run_id: str, **metadata: Any
+) -> dict[str, Any]:
+    """Fence authenticated GitHub admission against a simultaneous bootstrap."""
+    if not provider_run_id or not provider_run_id.isdigit():
+        raise ValueError("GitHub workflow run is invalid")
+    changes = {
+        **metadata,
+        "provider_run_id": provider_run_id,
+        "github_run_id": int(provider_run_id),
+        "updated_at": _now(),
+    }
+
+    def change(current):
+        if current.get("provider") != "github_actions" or current.get(
+            "bootstrap_ticket_id"
+        ):
+            raise ValueError("Release execution provider changed")
+        if current.get("status") not in {"waiting_github", "running_quality"}:
+            raise ValueError("Release execution is not available for GitHub admission")
+        if (
+            current.get("provider_run_id")
+            and str(current["provider_run_id"]) != provider_run_id
+        ):
+            raise ValueError("Release execution already has a run")
+        _validate_changes(current, changes)
+        return changes, None
+
+    return _mutate(execution_id, change)
+
+
+def admit_event_provider(
+    execution_id: str,
+    *,
+    expected_provider: str,
+    expected_run_id: str,
+    expected_token_hash: str,
+) -> dict[str, Any]:
+    """Fence the provider before writing immutable pending report evidence."""
+
+    def change(current):
+        _require_event_identity(
+            current,
+            expected_provider=expected_provider,
+            expected_run_id=expected_run_id,
+            expected_token_hash=expected_token_hash,
+        )
+        if current.get("status") in {
+            "failed",
+            "quality_failed",
+            "no_release",
+            "released",
+            "superseded",
+        } or (
+            current.get("bootstrap_ticket_id")
+            and current.get("status") == "quality_passed"
+        ):
+            raise ValueError("Release execution is terminal")
+        return {"event_admitted_at": _now()}, None
+
+    return _mutate(execution_id, change)
+
+
+def reserve_quality_bootstrap(
+    execution_id: str, *, binding: dict[str, Any]
+) -> tuple[dict[str, Any], bool]:
+    """Consume one deployment-independent global ticket with the fresh execution."""
+    binding = deepcopy(binding)
+    required = {
+        "requested_by",
+        "idempotency_key",
+        "repository",
+        "repository_id",
+        "service_name",
+        "pull_request_number",
+        "head_sha",
+        "base_sha",
+        "fingerprint",
+        "profile_hash",
+        "executor_digest",
+        "policy_hash",
+        "build_request",
+        "build_request_hash",
+        "nonce",
+        "authorization_policy",
+        "max_compute_usd",
+        "timeout_seconds",
+        "dispatch_token_hash",
+    }
+    if not required.issubset(binding):
+        raise ValueError("Quality bootstrap binding is incomplete")
+    if (
+        binding["repository"] != "diegomad14/cgm-artemis-api"
+        or str(binding["repository_id"]) != "1306114845"
+        or binding["service_name"] != "cgm-artemis-api"
+        or binding["pull_request_number"] != 172
+        or binding["base_sha"] != "3c807a789ba78eea95068a3cc0a7a6e537b0bae9"
+        or binding["authorization_policy"] != QUALITY_BOOTSTRAP_TICKET_ID
+        or str(binding["max_compute_usd"]) != "0.36"
+        or binding["timeout_seconds"] != 3600
+        or not binding["requested_by"]
+        or len(str(binding["idempotency_key"])) != 64
+        or not binding["nonce"]
+        or len(str(binding["dispatch_token_hash"])) != 64
+        or not isinstance(binding["build_request"], dict)
+    ):
+        raise ValueError("Quality bootstrap does not match the fixed authorization")
+    request_hash = hashlib.sha256(
+        json.dumps(
+            binding["build_request"],
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+    ).hexdigest()
+    if request_hash != binding["build_request_hash"]:
+        raise ValueError("Quality bootstrap build request hash mismatch")
+    collection = _persistent_bootstrap_collection()
+    now = _now()
+
+    def validate(current, ticket):
+        if ticket is not None:
+            if (
+                ticket.get("idempotency_key") != binding["idempotency_key"]
+                or ticket.get("requested_by") != binding["requested_by"]
+                or ticket.get("execution_id") != execution_id
+                or any(
+                    ticket.get(field) != binding[field]
+                    for field in (
+                        "repository",
+                        "repository_id",
+                        "service_name",
+                        "pull_request_number",
+                        "head_sha",
+                        "base_sha",
+                        "fingerprint",
+                        "profile_hash",
+                        "executor_digest",
+                        "policy_hash",
+                        "authorization_policy",
+                    )
+                )
+            ):
+                raise ValueError("Quality bootstrap global ticket is already consumed")
+            return None
+        if current is None:
+            raise KeyError(execution_id)
+        if (
+            current.get("status") != "waiting_github"
+            or current.get("provider") != "github_actions"
+            or current.get("operation") != "pr_quality"
+            or current.get("pull_request_number") != 172
+            or any(
+                current.get(field)
+                for field in (
+                    "bootstrap_ticket_id",
+                    "provider_run_id",
+                    "github_run_id",
+                    "build_id",
+                    "build_name",
+                    "source_token_issued_at",
+                    "source_token_build_id",
+                    "event_token_hash",
+                    "event_token_issued_at",
+                    "event_token_build_id",
+                    "event_token_provider_run_id",
+                    "event_admitted_at",
+                    "event_sequence",
+                    "engine_event_status",
+                    "pending_report_hash",
+                    "report_hash",
+                    "evidence_committed",
+                    "release_plan",
+                    "provider_terminal_success",
+                    "previous_build_ids",
+                    "planner_retry_count",
+                )
+            )
+            or any(
+                current.get(field) != binding[field]
+                for field in (
+                    "repository",
+                    "service_name",
+                    "head_sha",
+                    "base_sha",
+                    "fingerprint",
+                    "profile_hash",
+                    "executor_digest",
+                    "policy_hash",
+                )
+            )
+            or execution_id != current.get("execution_id")
+        ):
+            raise ValueError(
+                "Quality bootstrap requires a fresh matching GitHub execution"
+            )
+        return {
+            "provider": "cloud_build",
+            "status": "submitting",
+            "updated_at": now,
+            "bootstrap_ticket_id": QUALITY_BOOTSTRAP_TICKET_ID,
+            "bootstrap_attempts": 1,
+            "bootstrap_binding": binding,
+            "bootstrap_nonce": binding["nonce"],
+            "bootstrap_build_request": binding["build_request"],
+            "bootstrap_build_request_hash": request_hash,
+            "bootstrap_requested_by": binding["requested_by"],
+            "bootstrap_idempotency_key": binding["idempotency_key"],
+            "bootstrap_reserved_at": now,
+        }
+
+    if collection is None:
+        with _lock:
+            current = _memory.get(execution_id)
+            ticket = _memory.get(_BOOTSTRAP_DOCUMENT_ID)
+            changes = validate(current, ticket)
+            if changes is None:
+                assert ticket is not None
+                return deepcopy(_memory[ticket["execution_id"]]), False
+            assert current is not None
+            ticket = {
+                **binding,
+                "ticket_id": QUALITY_BOOTSTRAP_TICKET_ID,
+                "execution_id": execution_id,
+                "consumed_at": now,
+            }
+            _memory[_BOOTSTRAP_DOCUMENT_ID] = deepcopy(ticket)
+            current.update(deepcopy(changes))
+            return deepcopy(current), True
+    document = collection.document(execution_id)
+    ticket_document = collection.document(_BOOTSTRAP_DOCUMENT_ID)
+    transaction = document._client.transaction()
+    from google.cloud.firestore import transactional
+
+    @transactional
+    def write(txn):
+        ticket_snapshot = ticket_document.get(transaction=txn)
+        ticket = ticket_snapshot.to_dict() if ticket_snapshot.exists else None
+        snapshot = document.get(transaction=txn)
+        current = snapshot.to_dict() if snapshot.exists else None
+        changes = validate(current, ticket)
+        if changes is None:
+            assert ticket is not None
+            saved = collection.document(ticket["execution_id"]).get(transaction=txn)
+            if not saved.exists:
+                raise RuntimeError("Quality bootstrap execution is unavailable")
+            return saved.to_dict(), False
+        assert current is not None
+        txn.set(
+            ticket_document,
+            {
+                **binding,
+                "ticket_id": QUALITY_BOOTSTRAP_TICKET_ID,
+                "execution_id": execution_id,
+                "consumed_at": now,
+            },
+        )
+        txn.update(document, changes)
+        current.update(changes)
+        return current, True
+
+    return write(transaction)
+
+
+def update_quality_bootstrap(
+    execution_id: str, *, attempt_nonce: str, changes: dict[str, Any]
+) -> dict[str, Any]:
+    """Persist the sole attempt's outcome; this API never authorizes a POST."""
+    _persistent_bootstrap_collection()
+    changes = deepcopy(changes)
+    allowed = {
+        "status",
+        "error",
+        "build_id",
+        "provider_run_id",
+        "provider_status",
+        "logs_url",
+        "build_name",
+        "submission_reconciled_at",
+        "bootstrap_build_verified",
+        "bootstrap_verified_request_hash",
+    }
+    if not set(changes).issubset(allowed):
+        raise ValueError("Quality bootstrap update contains reserved fields")
+    changes["updated_at"] = _now()
+
+    def change(current):
+        if (
+            current.get("bootstrap_ticket_id") != QUALITY_BOOTSTRAP_TICKET_ID
+            or current.get("bootstrap_nonce") != attempt_nonce
+        ):
+            raise ValueError("Quality bootstrap attempt identity mismatch")
+        if "build_id" in changes:
+            build_id = str(changes["build_id"])
+            if (
+                not current.get("bootstrap_dispatch_started")
+                or not build_id
+                or len(build_id) > 128
+                or changes.get("provider_run_id") != build_id
+                or changes.get("bootstrap_build_verified") is not True
+                or changes.get("bootstrap_verified_request_hash")
+                != current.get("bootstrap_build_request_hash")
+                or current.get("build_id") not in (None, "", build_id)
+                or current.get("provider_run_id") not in (None, "", build_id)
+            ):
+                raise ValueError("Quality bootstrap build binding is not verified")
+        elif any(
+            key in changes
+            for key in (
+                "provider_run_id",
+                "bootstrap_build_verified",
+                "bootstrap_verified_request_hash",
+            )
+        ):
+            raise ValueError("Quality bootstrap verification requires a build binding")
+        if changes.get("status") in {
+            "received",
+            "waiting_github",
+            "submission_pending",
+            "submission_failed",
+        }:
+            raise ValueError("Quality bootstrap attempt cannot be retried")
+        _validate_status_change(current, changes)
+        return changes, None
+
+    return _mutate(execution_id, change)
+
+
+def claim_quality_bootstrap_dispatch(
+    execution_id: str, *, attempt_nonce: str, dispatch_token: str
+) -> bool:
+    """Consume the winning process's ephemeral permit before the only POST."""
+    _persistent_bootstrap_collection()
+    token_hash = hashlib.sha256(dispatch_token.encode()).hexdigest()
+
+    def change(current):
+        if (
+            current.get("bootstrap_ticket_id") != QUALITY_BOOTSTRAP_TICKET_ID
+            or current.get("bootstrap_nonce") != attempt_nonce
+            or not dispatch_token
+            or current.get("bootstrap_binding", {}).get("dispatch_token_hash")
+            != token_hash
+            or current.get("bootstrap_dispatch_started")
+            or current.get("provider") != "cloud_build"
+            or current.get("status") != "submitting"
+            or current.get("build_id")
+        ):
+            return {}, False
+        return {
+            "bootstrap_dispatch_started": True,
+            "bootstrap_dispatch_started_at": _now(),
+            "updated_at": _now(),
+        }, True
+
+    return _mutate(execution_id, change)
 
 
 def _now() -> str:
@@ -87,6 +617,8 @@ def planner_retry_candidate(
     allow_contract_retry: bool = False,
 ) -> bool:
     """Whether one safe planner-only recovery is available for this execution."""
+    if value.get("bootstrap_ticket_id"):
+        return False
     retry_count = int(value.get("planner_retry_count", 0) or 0)
     remediation_image = str(value.get("planner_remediation_retry_image", ""))
     remediation_hash = str(value.get("planner_remediation_retry_hash", ""))
@@ -177,7 +709,11 @@ def get(execution_id: str) -> dict[str, Any] | None:
     if collection is None:
         with _lock:
             value = _memory.get(execution_id)
-            return dict(value) if value else None
+            if value and value.get("bootstrap_ticket_id") and not config.mock_mode:
+                raise RuntimeError(
+                    "Persistent quality bootstrap storage is unavailable"
+                )
+            return deepcopy(value) if value else None
     snapshot = collection.document(execution_id).get()
     return snapshot.to_dict() if snapshot.exists else None
 
@@ -257,9 +793,9 @@ def reserve(
                     )
                 ):
                     raise ValueError("Release execution identity cannot change")
-                return dict(current), False
+                return deepcopy(current), False
             _memory[execution_id] = value
-            return dict(value), True
+            return deepcopy(value), True
 
     document = collection.document(execution_id)
     transaction = document._client.transaction()
@@ -295,37 +831,14 @@ def reserve(
 
 def save(execution_id: str, **changes: Any) -> dict[str, Any]:
     changes["updated_at"] = _now()
-    immutable = {
-        "execution_id",
-        "fingerprint",
-        "repository",
-        "service_name",
-        "operation",
-        "head_sha",
-        "base_sha",
-        "profile_hash",
-        "executor_digest",
-        "policy_hash",
-        "planner_hash",
-    }
-    if immutable.intersection(changes):
+    if _IDENTITY_FIELDS.intersection(changes):
         raise ValueError("Release execution identity fields are immutable")
-    collection = _collection()
-    if collection is None:
-        with _lock:
-            current = _memory.get(execution_id)
-            if current is None:
-                raise KeyError(execution_id)
-            _validate_status_change(current, changes)
-            current.update(changes)
-            return dict(current)
-    document = collection.document(execution_id)
-    snapshot = document.get()
-    if not snapshot.exists:
-        raise KeyError(execution_id)
-    _validate_status_change(snapshot.to_dict(), changes)
-    document.set(changes, merge=True)
-    return document.get().to_dict()
+
+    def change(current):
+        _validate_changes(current, changes)
+        return changes, None
+
+    return _mutate(execution_id, change)
 
 
 def transition_to_cloud_build(execution_id: str, *, reason: str) -> tuple[dict, bool]:
@@ -342,6 +855,8 @@ def transition_to_cloud_build(execution_id: str, *, reason: str) -> tuple[dict, 
             current = _memory.get(execution_id)
             if current is None:
                 raise KeyError(execution_id)
+            if current.get("bootstrap_ticket_id"):
+                raise ValueError("Quality bootstrap provider cannot be reset")
             if current.get("provider") == "cloud_build":
                 return dict(current), False
             if current.get("provider") != "github_actions":
@@ -361,6 +876,8 @@ def transition_to_cloud_build(execution_id: str, *, reason: str) -> tuple[dict, 
         if not snapshot.exists:
             raise KeyError(execution_id)
         current = snapshot.to_dict()
+        if current.get("bootstrap_ticket_id"):
+            raise ValueError("Quality bootstrap provider cannot be reset")
         if current.get("provider") == "cloud_build":
             return current, False
         if current.get("provider") != "github_actions":
@@ -384,7 +901,8 @@ def claim_submission(execution_id: str) -> bool:
             if current is None:
                 raise KeyError(execution_id)
             if (
-                current.get("provider") != "cloud_build"
+                current.get("bootstrap_ticket_id")
+                or current.get("provider") != "cloud_build"
                 or current.get("build_id")
                 or current.get("status")
                 not in {"submission_pending", "submission_failed"}
@@ -404,7 +922,8 @@ def claim_submission(execution_id: str) -> bool:
             raise KeyError(execution_id)
         current = snapshot.to_dict()
         if (
-            current.get("provider") != "cloud_build"
+            current.get("bootstrap_ticket_id")
+            or current.get("provider") != "cloud_build"
             or current.get("build_id")
             or current.get("status") not in {"submission_pending", "submission_failed"}
         ):
@@ -450,6 +969,8 @@ def bind_build(execution_id: str, *, build_id: str, **metadata: Any) -> dict[str
             current = _memory.get(execution_id)
             if current is None:
                 raise KeyError(execution_id)
+            if current.get("bootstrap_ticket_id"):
+                raise ValueError("Quality bootstrap requires verified build binding")
             if current.get("provider") != "cloud_build":
                 raise ValueError("Release execution is not Cloud Build managed")
             current_build = str(current.get("build_id", ""))
@@ -471,6 +992,8 @@ def bind_build(execution_id: str, *, build_id: str, **metadata: Any) -> dict[str
         if not snapshot.exists:
             raise KeyError(execution_id)
         current = snapshot.to_dict()
+        if current.get("bootstrap_ticket_id"):
+            raise ValueError("Quality bootstrap requires verified build binding")
         if current.get("provider") != "cloud_build":
             raise ValueError("Release execution is not Cloud Build managed")
         current_build = str(current.get("build_id", ""))
@@ -536,6 +1059,20 @@ def _claim_build_scoped_token(
     issued_field: str,
 ) -> bool:
     provider = current.get("provider")
+    if current.get("bootstrap_ticket_id"):
+        if not config.mock_mode:
+            _persistent_bootstrap_collection()
+        if not current.get("bootstrap_build_verified"):
+            return False
+        if current.get("status") in {
+            "failed",
+            "quality_failed",
+            "no_release",
+            "released",
+            "superseded",
+            "quality_passed",
+        }:
+            return False
     if not provider_run_id:
         return False
     if provider == "cloud_build":
@@ -672,7 +1209,13 @@ def claim_event_token(
 
 
 def accept_event(
-    execution_id: str, sequence: int, **changes: Any
+    execution_id: str,
+    sequence: int,
+    *,
+    expected_provider: str = "",
+    expected_run_id: str = "",
+    expected_token_hash: str = "",
+    **changes: Any,
 ) -> tuple[dict[str, Any], bool]:
     """Accept only a newer engine event; duplicates remain harmless."""
     changes["event_sequence"] = sequence
@@ -683,9 +1226,20 @@ def accept_event(
             current = _memory.get(execution_id)
             if current is None:
                 raise KeyError(execution_id)
+            if expected_provider:
+                _require_event_identity(
+                    current,
+                    expected_provider=expected_provider,
+                    expected_run_id=expected_run_id,
+                    expected_token_hash=expected_token_hash,
+                )
+            elif current.get("bootstrap_ticket_id"):
+                raise ValueError(
+                    "Quality bootstrap event requires verified provider identity"
+                )
             if sequence <= int(current.get("event_sequence", 0)):
                 return dict(current), False
-            _validate_status_change(current, changes)
+            _validate_changes(current, changes)
             current.update(changes)
             return dict(current), True
 
@@ -699,9 +1253,20 @@ def accept_event(
         if not snapshot.exists:
             raise KeyError(execution_id)
         current = snapshot.to_dict()
+        if expected_provider:
+            _require_event_identity(
+                current,
+                expected_provider=expected_provider,
+                expected_run_id=expected_run_id,
+                expected_token_hash=expected_token_hash,
+            )
+        elif current.get("bootstrap_ticket_id"):
+            raise ValueError(
+                "Quality bootstrap event requires verified provider identity"
+            )
         if sequence <= int(current.get("event_sequence", 0)):
             return current, False
-        _validate_status_change(current, changes)
+        _validate_changes(current, changes)
         txn.update(document, changes)
         current.update(changes)
         return current, True
@@ -714,6 +1279,8 @@ def reconcile_submission_absent(execution_id: str) -> dict[str, Any]:
     current = get(execution_id)
     if current is None:
         raise KeyError(execution_id)
+    if current.get("bootstrap_ticket_id"):
+        raise ValueError("Quality bootstrap attempt cannot be retried")
     if current.get("build_id") or current.get("status") not in {
         "submitting",
         "unknown",
@@ -937,6 +1504,8 @@ def _validate_status_change(current: dict[str, Any], changes: dict[str, Any]) ->
     if not new_status or new_status == current.get("status"):
         return
     old_status = str(current.get("status", "received"))
+    if current.get("bootstrap_ticket_id") and old_status == "quality_passed":
+        raise ValueError("Completed quality bootstrap cannot be reopened")
     if new_status not in _TRANSITIONS.get(old_status, set()):
         raise ValueError(
             f"Invalid release execution transition {old_status}->{new_status}"
@@ -952,6 +1521,7 @@ def list_for_repository(repository: str, *, limit: int = 50) -> list[dict[str, A
                 dict(value)
                 for value in _memory.values()
                 if value.get("repository") in repository_names
+                and value.get("ticket_id") != QUALITY_BOOTSTRAP_TICKET_ID
             ]
     else:
         # Apply the limit only after deterministic ordering. Firestore's
@@ -960,7 +1530,11 @@ def list_for_repository(repository: str, *, limit: int = 50) -> list[dict[str, A
         values = []
         for name in repository_names:
             query = collection.where("repository", "==", name)
-            values.extend(snapshot.to_dict() for snapshot in query.stream())
+            values.extend(
+                snapshot.to_dict()
+                for snapshot in query.stream()
+                if snapshot.to_dict().get("ticket_id") != QUALITY_BOOTSTRAP_TICKET_ID
+            )
     values.sort(key=lambda value: value.get("created_at", ""), reverse=True)
     return values[:limit]
 
@@ -993,6 +1567,7 @@ def list_due(*, limit: int = 100) -> list[dict[str, Any]]:
                         allow_contract_retry=True,
                     )
                 )
+                and value.get("ticket_id") != QUALITY_BOOTSTRAP_TICKET_ID
                 and not (
                     value.get("operation") == "pr_quality"
                     and value.get("status") == "quality_passed"
@@ -1012,6 +1587,7 @@ def list_due(*, limit: int = 100) -> list[dict[str, Any]]:
                     allow_contract_retry=True,
                 )
             )
+            and snapshot.to_dict().get("ticket_id") != QUALITY_BOOTSTRAP_TICKET_ID
             and not (
                 snapshot.to_dict().get("operation") == "pr_quality"
                 and snapshot.to_dict().get("status") == "quality_passed"

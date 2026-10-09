@@ -253,6 +253,7 @@ def test_streamable_http_initialize_and_tool_discovery(monkeypatch):
     assert discovery.status_code == 200
     assert '"name":"start_deployment"' in discovery.text
     assert '"name":"start_rollback"' in discovery.text
+    assert '"name":"request_quality_bootstrap"' in discovery.text
 
 
 def test_read_tool_requires_scope_and_audits_no_raw_inputs():

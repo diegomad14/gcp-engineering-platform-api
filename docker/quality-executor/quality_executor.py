@@ -33,6 +33,12 @@ from quality_profiles import (
     available_services,
     verify_profile_hash,
 )
+from trusted_scanner import (
+    TrustedScannerError,
+    _SCANNER_RUNTIME_PARENT_ENV,
+    _SCANNER_RUNTIME_PARENT_NAME,
+    _validate_scanner_directory_chain,
+)
 
 
 _UNTRUSTED_UID = 65532
@@ -804,9 +810,63 @@ def _supervised_command(
     )
 
 
+def _prepare_scanner_runtime_parent(scratch: Path) -> Path:
+    """Create the root-owned scanner sibling only inside the motor's scratch."""
+    try:
+        value = str(scratch)
+        if (
+            not scratch.is_absolute()
+            or value.startswith("//")
+            or os.path.normpath(value) != value
+        ):
+            raise TrustedScannerError("Scanner scratch must be canonical absolute")
+        missing = []
+        existing = scratch
+        while True:
+            try:
+                existing.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                missing.append(existing)
+                existing = existing.parent
+            else:
+                break
+        _validate_scanner_directory_chain(existing)
+        for directory in reversed(missing):
+            try:
+                directory.mkdir(mode=0o755)
+            except FileExistsError:
+                pass
+            else:
+                # Newly created root ancestors must remain traversable to the
+                # reduced scanner UID regardless of the supervisor's umask.
+                os.chmod(directory, 0o755)
+            _validate_scanner_directory_chain(directory)
+        parent = scratch / _SCANNER_RUNTIME_PARENT_NAME
+        try:
+            parent.mkdir(mode=0o711)
+        except FileExistsError:
+            pass
+        else:
+            # Do not repair an unsafe preexisting path or change its ownership.
+            os.chmod(parent, 0o711)
+        _validate_scanner_directory_chain(parent, scanner_parent=True)
+    except (OSError, TrustedScannerError) as exc:
+        raise QualityExecutorError("Scanner scratch parent is unsafe") from exc
+    return parent
+
+
 def _trusted_gate_environment(
-    trusted_runtime: Path, checkout: Path, git_directory: Path
+    trusted_runtime: Path,
+    checkout: Path,
+    git_directory: Path,
+    scanner_runtime_parent: Path,
 ) -> dict[str, str]:
+    if scanner_runtime_parent != trusted_runtime.parent / _SCANNER_RUNTIME_PARENT_NAME:
+        raise QualityExecutorError("Scanner parent must be derived from motor scratch")
+    try:
+        _validate_scanner_directory_chain(scanner_runtime_parent, scanner_parent=True)
+    except TrustedScannerError as exc:
+        raise QualityExecutorError("Scanner scratch parent is unsafe") from exc
     home = trusted_runtime / "home"
     temporary = trusted_runtime / "tmp"
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -828,6 +888,7 @@ def _trusted_gate_environment(
         "CI": "true",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
+        _SCANNER_RUNTIME_PARENT_ENV: str(scanner_runtime_parent),
     }
 
 
@@ -969,6 +1030,7 @@ def _run_quality(
     if service != identity["service_name"]:
         raise QualityExecutorError("Service argument does not match execution identity")
     profile = verify_profile_hash(service, identity["profile_hash"])
+    scanner_runtime_parent = _prepare_scanner_runtime_parent(scratch)
     checkout, git_directory, runtime = _isolated_checkout(
         source.resolve(), scratch.resolve(), identity
     )
@@ -999,7 +1061,7 @@ def _run_quality(
     scanner_staging.mkdir(mode=0o700)
     deadline = time.monotonic() + float(profile["timeout_seconds"])
     gate_environment = _trusted_gate_environment(
-        trusted_runtime, checkout, git_directory
+        trusted_runtime, checkout, git_directory, scanner_runtime_parent
     )
     gate_environment.update(
         {
