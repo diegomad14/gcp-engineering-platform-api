@@ -252,7 +252,7 @@ class QualityIsolationTest(unittest.TestCase):
     def _check_isolated_checkout_ownership(self, *, different_uid: bool) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            source = root / "source"
+            source = root / "source 'with spaces' $(touch injected)"
             source.mkdir()
             home = root / "home"
             home.mkdir()
@@ -371,6 +371,7 @@ class QualityIsolationTest(unittest.TestCase):
                 self.assertNotIn("GIT_TEST_ASSUME_DIFFERENT_OWNER", child)
                 self.assertEqual("/dev/null", child["GIT_CONFIG_GLOBAL"])
                 self.assertEqual(before, snapshot())
+                self.assertFalse(any(root.rglob("injected")))
                 self.assertEqual(
                     "[user]\n\tname = Quality Test\n", global_config.read_text()
                 )
