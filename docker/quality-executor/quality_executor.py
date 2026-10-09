@@ -399,6 +399,13 @@ def _isolated_checkout(
             "-c",
             f"safe.directory={source / '.git'}",
             "clone",
+            # Git clears command-scoped config before starting upload-pack.
+            # Older Git also checks ownership there, so trust the exact source
+            # Git directory in that child without changing global config.
+            "--upload-pack",
+            shlex.join(
+                ["git", "-c", f"safe.directory={source / '.git'}", "upload-pack"]
+            ),
             "--local",
             "--no-single-branch",
             "--no-hardlinks",
