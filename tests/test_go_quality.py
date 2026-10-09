@@ -97,6 +97,10 @@ def test_go_catalog_proposal_and_server_owned_profiles_agree(monkeypatch):
     assert "-coverpkg=./..." in profile.spec["commands"]["tests"]
     assert "-race" in profile.spec["commands"]["tests"]
     assert release_profiles.profile_for(service).name == service.service_name
+    assert service.deployment.health_path == "/health"
+    assert release_profiles.profile_for(service).fingerprint() == (
+        "0cfb01e76b2d9521ec549ff2d8f1efa4a558b4dc603d1d98517a07009af88a7d"
+    )
     monkeypatch.setattr(
         config.release_orchestrator,
         "quality_go_image",
