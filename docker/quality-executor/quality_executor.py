@@ -396,6 +396,8 @@ def _isolated_checkout(
             scratch,
             "-c",
             f"safe.directory={source}",
+            "-c",
+            f"safe.directory={source / '.git'}",
             "clone",
             "--local",
             "--no-single-branch",

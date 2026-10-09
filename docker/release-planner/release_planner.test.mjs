@@ -8,6 +8,35 @@ import assert from "node:assert/strict";
 
 import { calculatePlan, gitArguments } from "./release_planner.mjs";
 
+const plannerHandlebars = () => {
+  const writerRequire = createRequire(import.meta.resolve("conventional-changelog-writer"));
+  return writerRequire("handlebars");
+};
+
+test("the note writer rejects invalid AST block parameters in compile and precompile", () => {
+  // GHSA-8r5x-fm3f-whwj: an object length must never become generated code.
+  const handlebars = plannerHandlebars();
+  for (const mode of ["compile", "precompile"]) {
+    const ast = handlebars.parse("{{#if enabled}}ready{{/if}}");
+    ast.body[0].program.blockParams = { length: "(1 + 1)" };
+    assert.throws(() => {
+      const template = handlebars[mode](ast);
+      if (mode === "compile") template({ enabled: true });
+    }, /Invalid AST: Program blockParams must be an array/);
+  }
+});
+
+test("the note writer blocks prototype constructors while preserving ordinary context data", () => {
+  // GHSA-p8wg-vrv2-v86f: prototype objects have their own constructor property.
+  const handlebars = plannerHandlebars();
+  const template = handlebars.compile('{{lookup (lookup fn "__proto__") "constructor"}}');
+  assert.equal(template({ fn: () => {} }, { allowProtoMethodsByDefault: true }), "");
+  assert.equal(
+    handlebars.compile("{{constructor.name}}")({ constructor: { name: "release" } }),
+    "release",
+  );
+});
+
 test("the scoped analyzer matcher only needs the pinned isMatch contract", () => {
   const packageJson = JSON.parse(readFileSync(new URL("./package.json", import.meta.url)));
   assert.deepEqual(packageJson.overrides, {
@@ -99,6 +128,29 @@ const cases = [
     type: "major",
   },
 ];
+
+test("the planner generates release notes with the locked template writer", async () => {
+  const fixture = repository(
+    { subject: "fix(planner): render release notes (#42)", body: "Closes #42" },
+    "v2.3.4",
+  );
+  try {
+    const plan = await calculatePlan(fixture.cwd, {
+      repository: "test/example",
+      head_sha: fixture.head,
+      base_sha: fixture.base,
+      planner_hash: "c".repeat(64),
+    });
+    assert.equal(plan.next_version, "2.3.5");
+    assert.match(plan.notes, /### Bug Fixes/);
+    assert.match(plan.notes, /\*\*planner:\*\* render release notes/);
+    assert.ok(plan.notes.includes("https://github.com/test/example/compare/v2.3.4...v2.3.5"));
+    assert.ok(plan.notes.includes(`https://github.com/test/example/commit/${fixture.head}`));
+    assert.ok(plan.notes.includes("https://github.com/test/example/issues/42"));
+  } finally {
+    rmSync(fixture.cwd, { recursive: true, force: true });
+  }
+});
 
 test("fix, feat and breaking changes all start untagged repositories at 1.0.0", async (t) => {
   for (const item of cases) {

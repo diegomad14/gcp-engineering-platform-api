@@ -7,7 +7,7 @@ RUN apt-get update \
 WORKDIR /opt/eng-platform
 COPY docker/release-planner/package.json ./package.json
 COPY docker/release-planner/package-lock.json ./package-lock.json
-RUN npm ci --omit=dev --ignore-scripts --legacy-peer-deps \
+RUN npm ci --omit=dev --ignore-scripts --legacy-peer-deps --no-audit --no-fund \
     && npm cache clean --force
 COPY docker/release-planner/release_planner.mjs docker/release-planner/release_planner.test.mjs ./
 RUN npm test

@@ -49,6 +49,7 @@ def test_image_profile_contract_is_also_checked_by_api_ci():
             "-m",
             "unittest",
             "test_quality_executor.QualityProfilesTest.test_profiles_preserve_security_and_coverage_contracts",
+            "test_quality_executor.QualityIsolationTest.test_isolated_checkout_with_simulated_different_owner",
         ],
         cwd=Path(__file__).resolve().parents[1] / "docker/quality-executor",
         check=True,
