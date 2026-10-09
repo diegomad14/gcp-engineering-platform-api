@@ -1,0 +1,78 @@
+name: Platform GitHub-only Routing
+run-name: Pin platform releases to GitHub Actions
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: platform-github-only-routing
+  cancel-in-progress: false
+
+jobs:
+  pin:
+    if: ${{ github.ref == 'refs/heads/main' && github.repository == 'diegomad14/gcp-engineering-platform-api' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Require exact OSS quality evidence
+        uses: ./.github/actions/verify-quality
+        with:
+          platform-api-url: ${{ vars.ENG_PLATFORM_API_URL }}
+          service-name: eng-platform-api
+          commit-sha: ${{ github.sha }}
+          wait-seconds: '0'
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f
+      - name: Remove only platform services from Cloud Build enrollment
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          REGION: ${{ vars.GCP_REGION }}
+          PLATFORM_API_URL: ${{ vars.ENG_PLATFORM_API_URL }}
+        run: |
+          set -euo pipefail
+          gcloud run services describe eng-platform-api --project "$PROJECT_ID" --region "$REGION" --format=json > "$RUNNER_TEMP/platform-runtime.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          directory = Path(os.environ['RUNNER_TEMP'])
+          document = json.loads((directory / 'platform-runtime.json').read_text())
+          values = {row['name']: row.get('value') for row in document['spec']['template']['spec']['containers'][0].get('env', [])}
+          targets = {'eng-platform-api', 'eng-platform-web'}
+          changes = []
+          for key in ('ENG_PLATFORM_CLOUD_BUILD_ENABLED_SERVICES', 'ENG_PLATFORM_CLOUD_BUILD_ONLY_SERVICES', 'ENG_PLATFORM_RELEASE_ENABLED_SERVICES', 'ENG_PLATFORM_RELEASE_CANARY_SERVICES'):
+              value = values.get(key)
+              if value is None:
+                  continue
+              remaining = ','.join(name.strip() for name in value.split(',') if name.strip() and name.strip() not in targets)
+              if value != remaining:
+                  changes.append(f'{key}={remaining}')
+          (directory / 'github-routing-update.txt').write_text('^;^' + ';'.join(changes) if changes else '')
+          PY
+          routing_update="$(cat "$RUNNER_TEMP/github-routing-update.txt")"
+          if [ -n "$routing_update" ]; then
+            gcloud run services update eng-platform-api --project "$PROJECT_ID" --region "$REGION" --update-env-vars "$routing_update" --quiet
+            gcloud run services update-traffic eng-platform-api --project "$PROJECT_ID" --region "$REGION" --to-latest --quiet
+          fi
+          gcloud run services describe eng-platform-api --project "$PROJECT_ID" --region "$REGION" --format=json > "$RUNNER_TEMP/platform-runtime-verified.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          document = json.loads((Path(os.environ['RUNNER_TEMP']) / 'platform-runtime-verified.json').read_text())
+          if not any(row.get('percent') == 100 and row.get('revisionName') == document['status']['latestReadyRevisionName'] for row in document['status'].get('traffic', [])):
+              raise SystemExit('GitHub-only routing revision is not serving all traffic')
+          values = {row['name']: row.get('value', '') for row in document['spec']['template']['spec']['containers'][0].get('env', [])}
+          targets = {'eng-platform-api', 'eng-platform-web'}
+          for key in ('ENG_PLATFORM_CLOUD_BUILD_ENABLED_SERVICES', 'ENG_PLATFORM_CLOUD_BUILD_ONLY_SERVICES', 'ENG_PLATFORM_RELEASE_ENABLED_SERVICES', 'ENG_PLATFORM_RELEASE_CANARY_SERVICES'):
+              if targets.intersection(name.strip() for name in values.get(key, '').split(',')):
+                  raise SystemExit('GitHub-only routing verification failed')
+          print('Platform services are excluded from Cloud Build selection and fallback.')
+          PY
+          curl --fail --silent --show-error --max-time 30 "$PLATFORM_API_URL/health"

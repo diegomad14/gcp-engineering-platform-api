@@ -10,7 +10,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 
-from ..config import catalog_source_identity
+from ..services.metadata_scope import cache_identity
 from ..models import (
     DeploymentCreateRequest,
     DeploymentItem,
@@ -295,7 +295,7 @@ def _overview_item(
 def get_deployments_overview():
     """Return the deployment list page data with bounded external concurrency."""
     global _overview_cache
-    source = catalog_source_identity()
+    source = cache_identity()
     with _overview_cache_lock:
         now = monotonic()
         if (
@@ -332,6 +332,13 @@ def get_deployment(deployment_id: str):
     item = deployment_store.get(deployment_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Deployment not found")
+    from ..services.metadata_scope import visible_services
+
+    scope = visible_services.get()
+    if scope is not None and item.service_name not in scope:
+        raise HTTPException(
+            status_code=403, detail="You are not allowed to view this metadata"
+        )
     if item.status not in github_deployments.TERMINAL_STATUSES:
         try:
             previous = item.model_dump()

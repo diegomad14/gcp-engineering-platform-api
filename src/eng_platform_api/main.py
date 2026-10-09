@@ -143,6 +143,15 @@ async def _lifespan(_app: FastAPI):
         yield
 
 
+async def scoped_private_metadata(
+    request: Request, authorized: None = Depends(require_private_metadata_request)
+):
+    from .services.metadata_scope import reader_scope
+
+    with reader_scope(getattr(request.state, "metadata_scope", None)):
+        yield
+
+
 app = FastAPI(
     title="Engineering Platform API",
     version="0.5.0",
@@ -151,7 +160,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=_lifespan,
-    dependencies=[Depends(require_private_metadata_request)],
+    dependencies=[Depends(scoped_private_metadata)],
 )
 
 app.add_middleware(

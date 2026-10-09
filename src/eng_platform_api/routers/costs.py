@@ -8,7 +8,8 @@ from typing import Callable, TypeVar, cast
 
 from fastapi import APIRouter, Query
 
-from ..config import catalog_source_identity, config
+from ..config import config
+from ..services.metadata_scope import cache_identity
 from ..models import CloudBuildUsage, CostComparison, CostSummary, DailyCostSeries
 from ..services import cloud_build_usage
 from ..services import gcp_billing_bigquery as billing
@@ -27,7 +28,7 @@ def _cached(key: tuple[object, ...], loader: Callable[[], _T]) -> _T:
     # A five-minute cache must not carry yesterday across local midnight.
     key = (
         *key,
-        catalog_source_identity(),
+        cache_identity(),
         billing.utc_now().astimezone(billing._TIMEZONE).date().isoformat(),
     )
     with _cache_lock:
@@ -82,7 +83,9 @@ def get_cost_summary(
 
 def _cloud_build_usage() -> CloudBuildUsage | None:
     """Read the collector snapshot; never make provider calls from a UI poll."""
-    if not config.cloud_build.usage_enabled:
+    from ..services.metadata_scope import visible_services
+
+    if visible_services.get() is not None or not config.cloud_build.usage_enabled:
         return None
     # The collector owns a UTC monthly ledger; estimates stay separate from
     # Bogota consumption billing and must never be added to exported totals.

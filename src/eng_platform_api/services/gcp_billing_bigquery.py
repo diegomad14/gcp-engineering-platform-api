@@ -11,6 +11,8 @@ from zoneinfo import ZoneInfo
 from google.cloud import bigquery
 
 from ..config import config
+from .metadata_scope import visible_services
+from . import log_catalog
 from ..models import (
     BillingQuality,
     CostChange,
@@ -80,12 +82,41 @@ def _period(start: datetime, end: datetime) -> CostPeriod:
 def _where(start: datetime, end: datetime, as_of: datetime) -> str:
     # Values are server-created aware datetimes, never caller SQL. Ingestion
     # partitions/invoice month are deliberately not consumption boundaries.
+    resource_filter = (
+        " AND resource.global_name IN UNNEST(@visible_resources)"
+        if visible_services.get() is not None
+        else ""
+    )
     return (
         f"project.id = '{_PROJECT_ID}' AND cost_type = 'regular' "
         f"AND usage_start_time >= TIMESTAMP('{start.isoformat()}') "
         f"AND usage_start_time < TIMESTAMP('{end.isoformat()}') "
         f"AND usage_end_time <= TIMESTAMP('{end.isoformat()}') "
         f"AND export_time <= TIMESTAMP('{as_of.isoformat()}')"
+        f"{resource_filter}"
+    )
+
+
+def _query(client, sql):
+    scope = visible_services.get()
+    if scope is None:
+        return client.query(sql)
+    names = []
+    for resource in log_catalog.resources():
+        if resource.service_id not in scope:
+            continue
+        kind = "jobs" if resource.kind == "cloud_run_job" else "services"
+        path = f"projects/{resource.project}/locations/{resource.region}/{kind}/{resource.service_id}"
+        names.extend(
+            [path, f"//run.googleapis.com/{path}", f"https://run.googleapis.com/{path}"]
+        )
+    return client.query(
+        sql,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ArrayQueryParameter("visible_resources", "STRING", names)
+            ]
+        ),
     )
 
 
@@ -177,8 +208,8 @@ def _query_billing(
                 ],
             )
             for row in (
-                client.query(
-                    _build_items_sql(table_fqn, where_clause, group_by)
+                _query(
+                    client, _build_items_sql(table_fqn, where_clause, group_by)
                 ).result()
                 if include_items
                 else ()
@@ -191,7 +222,7 @@ def _query_billing(
           MIN(usage_start_time) AS first_usage_at, MAX(usage_end_time) AS latest_usage_at
         FROM `{table_fqn}` WHERE {where_clause}
         """
-        totals = next(iter(client.query(sql).result()))
+        totals = next(iter(_query(client, sql).result()))
         return items, totals
     except Exception:
         raise BillingUnavailable("billing_query_unavailable") from None
@@ -207,7 +238,13 @@ def _summary(
     include_items: bool = True,
 ) -> CostSummary:
     quality = BillingQuality(retrieved_at=as_of.isoformat())
-    result = CostSummary(period=_period(start, end), data_quality=quality)
+    result = CostSummary(
+        period=_period(start, end),
+        data_quality=quality,
+        scope="authorized_resources"
+        if visible_services.get() is not None
+        else "project",
+    )
     if not table:
         quality.status, quality.reason = "unavailable", "export_unavailable"
         return result
@@ -326,7 +363,7 @@ def get_daily_costs(days: int = 30, month_to_date: bool = False) -> DailyCostSer
             client = bigquery.Client(project=_PROJECT_ID)
             rows = [
                 (r.usage_date, float(r.cost or 0), float(r.credits or 0))
-                for r in client.query(sql).result()
+                for r in _query(client, sql).result()
             ]
         except Exception:
             quality.status, quality.reason = "unavailable", "billing_query_unavailable"

@@ -177,7 +177,13 @@ def _catalog_service(cfg: dict) -> CatalogService:
     )
 
 
-def get_services(visible_services: set[str] | None = None) -> CatalogResponse:
+def get_services(
+    visible_services: set[str] | frozenset[str] | None = None,
+) -> CatalogResponse:
+    if visible_services is None:
+        from .metadata_scope import visible_services as reader_services
+
+        visible_services = reader_services.get()
     services = [
         _catalog_service(cfg)
         for cfg in _get_service_config()
@@ -195,13 +201,16 @@ def get_service(service_name: str) -> Optional[CatalogService]:
     return None
 
 
-def get_services_by_repository(repository: str) -> list[CatalogService]:
+def get_services_by_repository(
+    repository: str, visible: frozenset[str] | None = None
+) -> list[CatalogService]:
     return [
         _catalog_service(item)
         for item in _get_service_config()
         if item.get("management_mode", "managed") == "managed"
         and item["repository"]
         and same_repository(item["repository"], repository)
+        and (visible is None or item["service_name"] in visible)
     ]
 
 

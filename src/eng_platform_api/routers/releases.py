@@ -6,7 +6,8 @@ from time import monotonic
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from ..config import catalog_source_identity, config
+from ..config import config
+from ..services.metadata_scope import cache_identity
 from ..models import ReleaseCreateRequest, ReleaseItem, ReleaseSummary
 from ..services import (
     github_actions,
@@ -51,6 +52,29 @@ def list_releases(
     limit: int = Query(default=20, ge=1, le=100),
 ):
     """List recent releases, optionally filtered by service."""
+    from ..services.metadata_scope import visible_services
+
+    scope = visible_services.get()
+    if scope is not None:
+        names = (
+            [service_name]
+            if service_name in scope
+            else sorted(scope)
+            if service_name is None
+            else []
+        )
+        stored = [
+            item
+            for name in names
+            for item in releases_store.get_releases(service_name=name, limit=limit)
+        ]
+        stored.sort(key=lambda item: item.created_at, reverse=True)
+        return ReleaseSummary(
+            recent=stored[:limit],
+            total_releases=sum(
+                releases_store.count_releases(service_name=name) for name in names
+            ),
+        )
     stored = releases_store.get_releases(service_name=service_name, limit=limit)
     total = releases_store.count_releases(service_name=service_name)
     return ReleaseSummary(recent=stored, total_releases=total)
@@ -60,7 +84,7 @@ def list_releases(
 def get_release_summary():
     """Merge persisted service rows with GitHub semantic releases."""
     global _summary_cache
-    source = catalog_source_identity()
+    source = cache_identity()
     with _summary_cache_lock:
         now = monotonic()
         if (
@@ -78,10 +102,23 @@ def get_release_summary():
 
 
 def _build_release_summary() -> ReleaseSummary:
-    recent = releases_store.get_releases(limit=100)
+    from ..services.metadata_scope import visible_services
+
+    scope = visible_services.get()
+    recent = (
+        releases_store.get_releases(limit=100)
+        if scope is None
+        else [
+            item
+            for name in sorted(scope)
+            for item in releases_store.get_releases(service_name=name, limit=100)
+        ]
+    )
     github = github_actions.get_release_summary()
     seen = {_release_identity(item) for item in recent}
     for item in github.recent:
+        if scope is not None and item.service_name not in scope:
+            continue
         identity = _release_identity(item)
         if identity not in seen:
             recent.append(item)

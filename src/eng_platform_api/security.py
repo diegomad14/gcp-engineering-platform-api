@@ -208,9 +208,8 @@ def require_private_catalog_reader(
 ) -> set[str] | None:
     """Revalidate source and ACL before any private metadata provider/cache hit.
 
-    A catalog list can be filtered before computing readiness. Other existing
-    aggregate DTOs are not partitioned by reader, so deny those aggregates if
-    any resource is hidden rather than returning a broader cached result.
+    Filterable HTTP aggregates use a request-local scope and partition caches.
+    Unscoped consumers (including MCP) still require access to every resource.
     """
     if not private_catalog_required():
         return None
@@ -283,9 +282,36 @@ def require_private_metadata_request(request: Request) -> None:
     identity = log_reader_identity(request)
     if identity and not log_auth_configured():
         raise HTTPException(403, "You are not allowed to view this metadata")
+    filtered = bool(request.path_params.get("deployment_id")) or request.url.path in {
+        "/api/catalog/services",
+        "/api/deployments/overview",
+        "/api/metrics/cloud-run/summary",
+        "/api/health/services",
+        "/api/quality/summary",
+        "/api/releases/summary",
+        "/api/releases/",
+        "/api/releases",
+        "/api/costs/status",
+        "/api/costs/summary",
+        "/api/costs/by-service",
+        "/api/costs/by-sku",
+        "/api/costs/daily",
+        "/api/costs/comparison",
+    }
     request.state.catalog_visible_services = require_private_catalog_reader(
         identity,
         request.path_params.get("service_name"),
-        filtered_catalog=request.url.path == "/api/catalog/services",
+        filtered_catalog=filtered,
+    )
+    # Fully authorized readers retain the existing project-wide billing view.
+    # Partial readers receive resource-attributed costs only, never hidden or
+    # unattributed project totals. Never infer authority from deployment rights.
+    scope = request.state.catalog_visible_services
+    from .services import log_catalog
+
+    request.state.metadata_scope = (
+        frozenset(scope)
+        if filtered and scope is not None and len(scope) < len(log_catalog.resources())
+        else None
     )
     request.state.private_catalog_source = catalog_source_identity()

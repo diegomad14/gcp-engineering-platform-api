@@ -64,8 +64,14 @@ def _release_item(
     )
 
 
-def _release_items_for_repository(repository: str) -> list[ReleaseItem]:
-    services = catalog.get_services_by_repository(repository)
+def _release_items_for_repository(
+    repository: str, visible: frozenset[str] | None = None
+) -> list[ReleaseItem]:
+    services = (
+        catalog.get_services_by_repository(repository)
+        if visible is None
+        else catalog.get_services_by_repository(repository, visible)
+    )
     if not services:
         return []
     try:
@@ -108,7 +114,15 @@ def get_release_summary() -> ReleaseSummary:
     )
     workers = min(6, max(1, len(repositories)))
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        groups = list(executor.map(_release_items_for_repository, repositories))
+        from functools import partial
+        from .metadata_scope import visible_services
+
+        worker = _release_items_for_repository
+        if visible_services.get() is not None:
+            worker = partial(
+                _release_items_for_repository, visible=visible_services.get()
+            )
+        groups = list(executor.map(worker, repositories))
     recent = [item for group in groups for item in group]
 
     recent.sort(key=lambda release: release.created_at, reverse=True)

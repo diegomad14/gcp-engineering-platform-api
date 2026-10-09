@@ -12,7 +12,8 @@ from time import monotonic
 
 from google.cloud import monitoring_v3
 
-from ..config import catalog_source_identity, config
+from ..config import config
+from ..services.metadata_scope import cache_identity
 from ..models import CloudRunServiceMetrics, MetricsSummary
 
 _METRIC_REQUEST_COUNT = "run.googleapis.com/request_count"
@@ -228,7 +229,7 @@ def get_metrics_summary(minutes: int = 1440) -> MetricsSummary:
     from .catalog import get_services
 
     global _metrics_cache
-    source = catalog_source_identity()
+    source = cache_identity()
     cache_key = minutes if source is None else (minutes, source)
     with _metrics_cache_lock:
         now = monotonic()
