@@ -1,0 +1,22 @@
+{
+  "fixture_scope": "Sanitized metadata observed read-only on a historical canonical Artemis build; no credentials, source tokens, event tokens, nonce, account or step command contents are included.",
+  "response_fields": {
+    "id": "9c24db98-2b1b-4653-ae0a-aca81d0e0389",
+    "source": {
+      "connectedRepository": {
+        "repository": "projects/cgm-assistant-prod/locations/us-central1/connections/eng-platform-github/repositories/cgm-artemis-api",
+        "revision": "d5c38323cd4cf0c28f7a35657ab1b3d9c8d5a01f"
+      }
+    },
+    "sourceProvenance": {},
+    "timeout": "3600s",
+    "queueTtl": "3600s",
+    "options": {
+      "pool": {},
+      "substitutionOption": "ALLOW_LOOSE",
+      "logging": "CLOUD_LOGGING_ONLY"
+    }
+  },
+  "observed_step_output_keys": ["status", "timing", "pullTiming"],
+  "observed_step_timeout_present": false
+}

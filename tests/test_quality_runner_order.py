@@ -318,6 +318,11 @@ def test_executor_retains_extras_integrity_and_failed_manifest(
         lambda *_args: (gate.root, gate.root / ".git", runtime),
     )
     monkeypatch.setattr(executor, "_child_environment", lambda *_args: {})
+    monkeypatch.setattr(
+        executor,
+        "_prepare_scanner_runtime_parent",
+        lambda *_args: scratch / "trusted-scanner-runtime",
+    )
     monkeypatch.setattr(executor, "_chown_tree", lambda *_args: None)
     monkeypatch.setattr(executor, "_anchor_report_exchange", lambda *_args: None)
     monkeypatch.setattr(executor, "_trusted_gate_environment", lambda *_args: {})

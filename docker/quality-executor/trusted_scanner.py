@@ -14,11 +14,13 @@ import time
 from pathlib import Path
 from typing import BinaryIO
 
-from untrusted_command import _kill_descendants
+from untrusted_command import _kill_descendants, _uid_processes
 
 
 _UID = 65532
 _GID = 65532
+_SCANNER_RUNTIME_PARENT_ENV = "ENG_PLATFORM_SCANNER_RUNTIME_PARENT"
+_SCANNER_RUNTIME_PARENT_NAME = "trusted-scanner-runtime"
 _MAX_OUTPUT_BYTES = 128 * 1024 * 1024
 _SEMGREP_ERROR_ENTRY_LIMIT = 4096
 _SEMGREP_ERROR_COUNT_LIMIT = 65535
@@ -99,17 +101,63 @@ def _deadline() -> float:
     return value
 
 
+def _validate_scanner_directory_chain(
+    directory: Path, *, scanner_parent: bool = False
+) -> None:
+    value = str(directory)
+    if (
+        not directory.is_absolute()
+        or value.startswith("//")
+        or os.path.normpath(value) != value
+    ):
+        raise TrustedScannerError("Scanner parent must be canonical absolute")
+    for current in (*reversed(directory.parents), directory):
+        try:
+            metadata = current.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise TrustedScannerError("Scanner parent is unavailable") from exc
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise TrustedScannerError("Scanner parent contains a non-directory")
+        if (metadata.st_uid, metadata.st_gid) != (0, 0):
+            raise TrustedScannerError("Scanner parent chain must be root-owned")
+        if not metadata.st_mode & 0o001:
+            raise TrustedScannerError("Scanner parent chain is not traversable")
+        writable = bool(metadata.st_mode & 0o022)
+        if writable and not metadata.st_mode & stat.S_ISVTX:
+            raise TrustedScannerError("Scanner parent chain is replaceable")
+        if scanner_parent and current == directory:
+            if writable or stat.S_IMODE(metadata.st_mode) != 0o711:
+                raise TrustedScannerError("Scanner parent must have mode 0711")
+
+
+def _scanner_runtime_parent() -> Path:
+    value = os.environ.get(_SCANNER_RUNTIME_PARENT_ENV, "")
+    if not value or str(Path(value)) != value:
+        raise TrustedScannerError("Scanner parent must be canonical absolute")
+    parent = Path(value)
+    if parent.name != _SCANNER_RUNTIME_PARENT_NAME:
+        raise TrustedScannerError("Scanner parent name is not authorized")
+    _validate_scanner_directory_chain(parent, scanner_parent=True)
+    return parent
+
+
 def _runtime_environment() -> dict[str, str]:
-    # The gate's TMPDIR is root-only. Scanner processes drop to UID 65532,
-    # so their private runtime must have a traversable parent.
-    runtime = Path(tempfile.mkdtemp(prefix="eng-platform-scanner-", dir="/tmp"))
-    os.chown(runtime, _UID, _GID, follow_symlinks=False)
+    parent = _scanner_runtime_parent()
+    # Repo commands and scanners share UID 65532. Require the previous
+    # supervisor's cleanup to have completed before starting a scanner phase.
+    if _uid_processes():
+        raise TrustedScannerError("Untrusted processes remain before scanner phase")
+    runtime = Path(tempfile.mkdtemp(prefix="eng-platform-scanner-", dir=str(parent)))
+    # Configure permissions while root still owns the directory: the executor
+    # deliberately lacks CAP_FOWNER once ownership is transferred.
     os.chmod(runtime, 0o700)
+    os.chown(runtime, _UID, _GID, follow_symlinks=False)
     return {
         "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "HOME": str(runtime),
         "TMPDIR": str(runtime),
         "XDG_CACHE_HOME": str(runtime / ".cache"),
+        "TRIVY_CACHE_DIR": str(runtime / ".cache" / "trivy"),
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_TERMINAL_PROMPT": "0",

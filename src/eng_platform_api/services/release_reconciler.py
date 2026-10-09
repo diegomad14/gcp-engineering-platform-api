@@ -65,6 +65,8 @@ def _verify_build(
     *,
     planner_digest: str = "",
 ) -> None:
+    if execution.get("bootstrap_ticket_id"):
+        release_cloud_build.verify_quality_bootstrap_build(execution, build)
     substitutions = build.get("substitutions", {})
     source = build.get("source", {}).get("connectedRepository", {})
     expected_repository = config.cloud_build.repositories.get(
@@ -511,6 +513,15 @@ def reconcile(execution_id: str) -> dict[str, Any]:
     if execution is None:
         raise KeyError(execution_id)
     require_managed_service_name(str(execution.get("service_name", "")))
+    if execution.get("bootstrap_ticket_id") and execution.get("status") in {
+        "submitting",
+        "unknown",
+    }:
+        # This branch precedes the ordinary unknown return. It only reads
+        # candidate builds, and never resets the consumed bootstrap ticket.
+        execution = release_cloud_build.reconcile_quality_bootstrap(execution)
+        if not execution.get("build_id"):
+            return execution
     if execution.get("status") in {"received", "waiting_github"} and (
         execution.get("provider") == "github_actions"
     ):

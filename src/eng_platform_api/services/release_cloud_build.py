@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
+import json
+from collections.abc import Callable
 from typing import Any
 
 from google.auth import default
 from google.auth.transport.requests import AuthorizedSession
+from requests.adapters import HTTPAdapter
 
 from ..config import config
 from ..models import CatalogService
@@ -34,6 +38,273 @@ def _location() -> str:
 def _session() -> AuthorizedSession:
     credentials, _ = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
     return AuthorizedSession(credentials)
+
+
+def _bootstrap_session() -> AuthorizedSession:
+    """POST cannot be replayed by credential refresh, transport or redirect."""
+    credentials, _ = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    session = AuthorizedSession(credentials, max_refresh_attempts=0)
+    session.mount("https://", HTTPAdapter(max_retries=0))
+    session.mount("http://", HTTPAdapter(max_retries=0))
+    return session
+
+
+def _request_hash(request: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            request,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+    ).hexdigest()
+
+
+def _validate_quality_bootstrap_request(request: dict[str, Any]) -> None:
+    validate_submission(request)
+    if "queueTtl" in request:
+        raise ReleaseCloudBuildError("Bootstrap request cannot override queue TTL")
+
+
+def _normalize_quality_bootstrap_response(build: dict[str, Any]) -> dict[str, Any]:
+    """Remove only the exact defaults observed in a canonical Google response.
+
+    Submission validation remains strict: even pool={} cannot be requested.
+    Empty default pool and the observed queue TTL affect response comparison
+    only; no other provider input is discarded.
+    """
+    normalized = dict(build)
+    options = dict(build.get("options", {}))
+    if options.get("pool") == {}:
+        del options["pool"]
+    normalized["options"] = options
+    if "queueTtl" in normalized:
+        if normalized["queueTtl"] != "3600s":
+            raise ReleaseCloudBuildError("Bootstrap response queue TTL changed")
+        del normalized["queueTtl"]
+    return normalized
+
+
+def verify_quality_bootstrap_build(
+    execution: dict[str, Any], build: dict[str, Any], *, expected_build_id: str = ""
+) -> None:
+    """Verify every input-bearing build field against the consumed request."""
+    build_id = str(build.get("id", ""))
+    if not build_id or any(
+        value and str(value) != build_id
+        for value in (
+            expected_build_id,
+            execution.get("build_id"),
+            execution.get("provider_run_id"),
+        )
+    ):
+        raise ReleaseCloudBuildError(
+            "Bootstrap build ID does not match requested or bound identity"
+        )
+    request = execution.get("bootstrap_build_request")
+    if not isinstance(request, dict) or (
+        _request_hash(request) != execution.get("bootstrap_build_request_hash")
+        or not execution.get("bootstrap_nonce")
+        or request.get("substitutions", {}).get("_BOOTSTRAP_NONCE")
+        != execution.get("bootstrap_nonce")
+    ):
+        raise ReleaseCloudBuildError("Bootstrap request binding is invalid")
+    _validate_quality_bootstrap_request(request)
+    build = _normalize_quality_bootstrap_response(build)
+    validate_submission(build)
+    if request.get("timeout") != "3600s" or build.get("timeout") != "3600s":
+        raise ReleaseCloudBuildError("Bootstrap timeout is invalid")
+    if not build.get("id") or any(
+        build.get(key) != request.get(key)
+        for key in ("source", "serviceAccount", "substitutions", "options", "tags")
+    ):
+        raise ReleaseCloudBuildError("Bootstrap build request identity changed")
+    if build.get("images", []) != request.get("images", []):
+        raise ReleaseCloudBuildError("Bootstrap build images changed")
+    # Server-populated step timing/status is not part of the submitted input.
+    expected_steps = request.get("steps", [])
+    actual_steps = build.get("steps", [])
+    if not isinstance(actual_steps, list) or len(actual_steps) != len(expected_steps):
+        raise ReleaseCloudBuildError("Bootstrap build steps changed")
+    for expected, actual in zip(expected_steps, actual_steps, strict=True):
+        step = {
+            key: value
+            for key, value in actual.items()
+            if key
+            not in {
+                "status",
+                "timing",
+                "pullTiming",
+                "exitCode",
+            }
+        }
+        if step != expected:
+            raise ReleaseCloudBuildError("Bootstrap build steps changed")
+    allowed = set(request) | {
+        "id",
+        "name",
+        "projectId",
+        "status",
+        "statusDetail",
+        "createTime",
+        "startTime",
+        "finishTime",
+        "logUrl",
+        "results",
+        "timing",
+        "warnings",
+        "sourceProvenance",
+        "failureInfo",
+        "images",
+    }
+    if set(build) - allowed:
+        raise ReleaseCloudBuildError("Bootstrap build contains unapproved fields")
+    provenance = build.get("sourceProvenance", {}).get("resolvedConnectedRepository")
+    if (
+        provenance is not None
+        and provenance != request["source"]["connectedRepository"]
+    ):
+        raise ReleaseCloudBuildError("Bootstrap resolved source changed")
+
+
+def _bind_quality_bootstrap(
+    execution: dict[str, Any], build: dict[str, Any], *, expected_build_id: str = ""
+) -> dict[str, Any]:
+    verify_quality_bootstrap_build(
+        execution, build, expected_build_id=expected_build_id
+    )
+    return release_executions.update_quality_bootstrap(
+        str(execution["execution_id"]),
+        attempt_nonce=str(execution["bootstrap_nonce"]),
+        changes={
+            "build_id": str(build["id"]),
+            "provider_run_id": str(build["id"]),
+            "provider_status": str(build.get("status", "QUEUED")),
+            "logs_url": str(build.get("logUrl", "")),
+            "build_name": str(build.get("name", "")),
+            "bootstrap_build_verified": True,
+            "bootstrap_verified_request_hash": str(
+                execution["bootstrap_build_request_hash"]
+            ),
+            "submission_reconciled_at": datetime.now(timezone.utc).isoformat(),
+            "status": "running_quality",
+        },
+    )
+
+
+def submit_quality_bootstrap(
+    execution: dict[str, Any],
+    *,
+    request: dict[str, Any],
+    dispatch_token: str,
+    reauthorize: Callable[[], Any],
+) -> dict[str, Any]:
+    """Only a reservation winner calls this once. No claim, retry or recovery POST."""
+    if (
+        execution.get("status") != "submitting"
+        or execution.get("provider") != "cloud_build"
+        or not execution.get("bootstrap_ticket_id")
+        or execution.get("build_id")
+        or _request_hash(request) != execution.get("bootstrap_build_request_hash")
+    ):
+        raise ReleaseCloudBuildError("Bootstrap submission is not reserved")
+    _validate_quality_bootstrap_request(request)
+    if request.get("timeout") != "3600s":
+        raise ReleaseCloudBuildError("Bootstrap timeout is invalid")
+    session = _bootstrap_session()
+    reauthorize()
+    if not release_executions.claim_quality_bootstrap_dispatch(
+        str(execution["execution_id"]),
+        attempt_nonce=str(execution["bootstrap_nonce"]),
+        dispatch_token=dispatch_token,
+    ):
+        raise ReleaseCloudBuildError("Bootstrap dispatch is already consumed")
+    reauthorize()
+    try:
+        response = session.post(
+            f"{_API}/{_location()}/builds",
+            json=request,
+            timeout=30,
+            allow_redirects=False,
+        )
+        if response.status_code >= 300:
+            raise ReleaseCloudBuildError("Bootstrap submission did not confirm a build")
+        operation = response.json()
+        if not isinstance(operation, dict):
+            raise ReleaseCloudBuildError(
+                "Bootstrap submission response is unverifiable"
+            )
+        build = operation.get("metadata", {}).get("build", operation)
+        if not isinstance(build, dict):
+            raise ReleaseCloudBuildError(
+                "Bootstrap submission response is unverifiable"
+            )
+        return _bind_quality_bootstrap(execution, build)
+    except Exception:
+        raise ReleaseCloudBuildError(
+            "Bootstrap attempt consumed; read-only recovery required"
+        ) from None
+
+
+def reconcile_quality_bootstrap(
+    execution: dict[str, Any], *, expected_build_id: str = ""
+) -> dict[str, Any]:
+    """Paginate all candidate builds; bind only one fully verified result."""
+    if not execution.get("bootstrap_ticket_id") or execution.get("status") not in {
+        "submitting",
+        "unknown",
+    }:
+        return execution
+    if execution.get("build_id"):
+        build = get_build(str(execution["build_id"]))
+        if str(build.get("id", "")) != str(execution["build_id"]):
+            raise ReleaseCloudBuildError("Bootstrap bound build identity changed")
+        return _bind_quality_bootstrap(
+            execution, build, expected_build_id=expected_build_id
+        )
+    matches: list[dict[str, Any]] = []
+    session = _session()
+    token = ""
+    seen_tokens: set[str] = set()
+    while True:
+        params = {
+            "filter": f'tags="release-{str(execution["execution_id"])[:48]}"',
+            "pageSize": "100",
+        }
+        if token:
+            params["pageToken"] = token
+        response = session.get(
+            f"{_API}/{_location()}/builds", params=params, timeout=15
+        )
+        if response.status_code >= 300:
+            raise ReleaseCloudBuildError("Bootstrap read-only recovery failed")
+        payload = response.json()
+        builds = payload.get("builds", [])
+        if not isinstance(builds, list):
+            raise ReleaseCloudBuildError("Bootstrap recovery response is unverifiable")
+        for build in builds:
+            # Any result carrying this attempt's nonce must match in full;
+            # never silently skip altered input and bind a different result.
+            if build.get("substitutions", {}).get("_BOOTSTRAP_NONCE") == execution.get(
+                "bootstrap_nonce"
+            ):
+                verify_quality_bootstrap_build(
+                    execution, build, expected_build_id=expected_build_id
+                )
+                matches.append(build)
+        token = str(payload.get("nextPageToken", ""))
+        if not token:
+            break
+        if token in seen_tokens:
+            raise ReleaseCloudBuildError("Bootstrap recovery pagination is incomplete")
+        seen_tokens.add(token)
+    if len(matches) > 1:
+        raise ReleaseCloudBuildError("Bootstrap recovery is ambiguous")
+    if not matches:
+        return execution
+    return _bind_quality_bootstrap(
+        execution, matches[0], expected_build_id=expected_build_id
+    )
 
 
 def _repository(service: CatalogService) -> str:
@@ -582,6 +853,8 @@ def _expected_substitutions(execution: dict[str, Any]) -> dict[str, str]:
 
 
 def _matching_build(execution: dict[str, Any]) -> dict[str, Any] | None:
+    if execution.get("bootstrap_ticket_id"):
+        raise ReleaseCloudBuildError("Bootstrap requires full read-only recovery")
     execution_id = str(execution["execution_id"])
     response = _session().get(
         f"{_API}/{_location()}/builds",
@@ -629,6 +902,8 @@ def submit(execution_id: str, service: CatalogService) -> dict[str, Any]:
     execution = release_executions.get(execution_id)
     if execution is None:
         raise ReleaseCloudBuildError("Unknown release execution")
+    if execution.get("bootstrap_ticket_id"):
+        raise ReleaseCloudBuildError("Bootstrap submission cannot be retried")
     if execution.get("provider") != "cloud_build":
         raise ReleaseCloudBuildError("Release execution is not Cloud Build managed")
     if execution.get("build_id"):
@@ -693,6 +968,8 @@ def reconcile_uncertain_submission(
     execution = release_executions.get(execution_id)
     if execution is None:
         raise ReleaseCloudBuildError("Unknown release execution")
+    if execution.get("bootstrap_ticket_id"):
+        return reconcile_quality_bootstrap(execution)
     if execution.get("provider") != "cloud_build":
         return execution
     if execution.get("build_id"):

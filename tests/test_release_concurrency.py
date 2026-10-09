@@ -134,6 +134,8 @@ async def test_concurrent_duplicate_callbacks_accept_and_reconcile_once(
     execution_id = execution["execution_id"]
     executions.save(
         execution_id,
+        build_id="single-build",
+        provider_run_id="single-build",
         event_token_hash=hashlib.sha256(b"offline-event-token").hexdigest(),
     )
     # Both callbacks have read sequence=0 before either reaches atomic acceptance.
@@ -190,6 +192,8 @@ async def test_http_events_share_one_ordered_worker_and_leave_ui_pool_free(
     execution_id = execution["execution_id"]
     executions.save(
         execution_id,
+        build_id="single-build",
+        provider_run_id="single-build",
         event_token_hash=hashlib.sha256(b"offline-event-token").hexdigest(),
     )
     monkeypatch.setattr(config.release_orchestrator, "enabled", True)

@@ -36,6 +36,25 @@ REPOSITORY_RESOURCE = (
 
 @pytest.fixture(autouse=True)
 def call_async_event_endpoint_from_sync_tests(monkeypatch):
+    # These identity/router unit tests mock the execution store. The separate
+    # bootstrap store suite exercises both durable admission transactions.
+    monkeypatch.setattr(
+        events.release_executions,
+        "admit_event_provider",
+        lambda execution_id, **_identity: events.release_executions.get(execution_id),
+    )
+    monkeypatch.setattr(
+        events.release_executions,
+        "admit_github_run",
+        lambda execution_id, *, provider_run_id, **changes: (
+            events.release_executions.save(
+                execution_id,
+                provider_run_id=provider_run_id,
+                github_run_id=int(provider_run_id),
+                **changes,
+            )
+        ),
+    )
     monkeypatch.setattr(
         events.config.cloud_build,
         "repositories",

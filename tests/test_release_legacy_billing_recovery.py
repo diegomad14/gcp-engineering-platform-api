@@ -97,6 +97,18 @@ def _configure(
         "save",
         lambda _execution_id, **changes: {**execution, **changes},
     )
+    # This legacy billing unit fixture uses a synthetic reserve result; durable
+    # provider admission is tested separately against both storage backends.
+    monkeypatch.setattr(
+        orchestrator.release_executions,
+        "admit_github_run",
+        lambda _execution_id, *, provider_run_id, **changes: {
+            **execution,
+            **changes,
+            "provider_run_id": provider_run_id,
+            "github_run_id": int(provider_run_id),
+        },
+    )
     monkeypatch.setattr(orchestrator, "_open_circuit", mock.Mock())
     monkeypatch.setattr(
         orchestrator.release_executions,
