@@ -83,6 +83,22 @@ GitHub release WIF uses
 Internal Tasks/Scheduler use
 `reconnections-task-invoker@cgm-reconnections-prod.iam.gserviceaccount.com`.
 
+The proposal's `infrastructure_resources` lists 13 metadata references: Firestore,
+the attachments/state/Terraform buckets, queue, Scheduler job, app registry,
+five secret containers and the dedicated budget. Its five `operational_secrets`
+bindings are names only and remain noneditable. Append this reviewed proposal
+only after publishing the schema/model support; it does not create separate
+Cloud Run entries for those resources or grant deployment/log capabilities.
+
+The current pinned Google auth action creates no quota-project field for WIF,
+and these image-reader transports do not request `x-goog-user-project` or a
+`WithQuotaProject` client. Artifact Registry Reader is sufficient for Docker
+pulls. Do not add Service Usage Consumer just because local user-ADC Terraform
+needed a quota project for Billing Budgets. If a future transport explicitly
+selects a quota project, verify `serviceusage.services.use` on that project and
+grant that consumption permission separately; keep deployment, secrets and task
+permissions absent from quality/publication identities.
+
 Initialize in simulation mode, validate real fixtures and candidate health, then
 promote through the platform. Provider and communications credentials are secret
 values outside catalog and source. Production activation requires its real pilot;

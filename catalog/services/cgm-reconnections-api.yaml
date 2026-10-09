@@ -31,6 +31,57 @@ finops:
   env: prod
   owner: cgm
   cost_center: cgm
+operational_secrets:
+  - key: WEBHOOK_SHARED_SECRET
+    secret_id: reconnections-webhook-shared-secret
+    description: Authentication for the Outlook webhook and request reads.
+  - key: SANPLAT_USERNAME
+    secret_id: reconnections-sanplat-username
+    description: Dedicated SanPlat login account; independent of header account.
+  - key: SANPLAT_HEADER_ACCOUNT
+    secret_id: reconnections-sanplat-header-account
+    description: Dedicated SanPlat account header.
+  - key: SANPLAT_PASSWORD_ENCRYPTED
+    secret_id: reconnections-sanplat-password-encrypted
+    description: Dedicated encrypted SanPlat login password.
+  - key: COMMUNICATIONS_API_KEY
+    secret_id: reconnections-communications-api-key
+    description: Scoped communications-ms identity for Diego's reports.
+infrastructure_resources:
+  - resource_type: firestore_database
+    resource_name: projects/cgm-reconnections-prod/databases/(default)
+    description: Request metadata, leases and order/meter ledgers with TTL.
+  - resource_type: gcs_bucket
+    resource_name: projects/_/buckets/cgm-reconnections-prod-attachments
+    description: Original email envelopes and attachments; 30-day lifecycle.
+  - resource_type: gcs_bucket
+    resource_name: projects/_/buckets/cgm-reconnections-prod-state
+    description: Immutable full request snapshots; 180-day lifecycle.
+  - resource_type: gcs_bucket
+    resource_name: projects/_/buckets/cgm-reconnections-prod-tfstate
+    description: Private versioned Terraform remote backend.
+  - resource_type: cloud_tasks_queue
+    resource_name: projects/cgm-reconnections-prod/locations/us-central1/queues/reconnections-processing
+    description: Durable processing with verified task OIDC identity.
+  - resource_type: cloud_scheduler_job
+    resource_name: projects/cgm-reconnections-prod/locations/us-central1/jobs/reconnections-reconcile
+    description: Reconciliation every 15 minutes; paused until activation.
+  - resource_type: artifact_registry_repository
+    resource_name: projects/cgm-reconnections-prod/locations/us-central1/repositories/cgm-reconnections-repo
+    description: Managed immutable application release images.
+  - resource_type: secret_manager_secret
+    resource_name: projects/cgm-reconnections-prod/secrets/reconnections-webhook-shared-secret
+  - resource_type: secret_manager_secret
+    resource_name: projects/cgm-reconnections-prod/secrets/reconnections-sanplat-username
+  - resource_type: secret_manager_secret
+    resource_name: projects/cgm-reconnections-prod/secrets/reconnections-sanplat-header-account
+  - resource_type: secret_manager_secret
+    resource_name: projects/cgm-reconnections-prod/secrets/reconnections-sanplat-password-encrypted
+  - resource_type: secret_manager_secret
+    resource_name: projects/cgm-reconnections-prod/secrets/reconnections-communications-api-key
+  - resource_type: billing_budget
+    resource_name: billingAccounts/01CBB5-464EAA-96C8AC/budgets/58b93445-4652-4c5a-8941-63eca46afda7
+    description: Dedicated project budget; USD 10 monthly with alerts only.
 logs:
   enabled: false
   allowed_logins: []

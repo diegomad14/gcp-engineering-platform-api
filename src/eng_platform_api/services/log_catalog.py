@@ -28,6 +28,7 @@ from pydantic import (
 from ..config import config, validate_catalog_source
 from ..models import (
     FinOpsLabels,
+    InfrastructureResource,
     InventorySource,
     OperationalSecret,
     ServiceDeploymentConfig,
@@ -113,6 +114,9 @@ class CatalogRecord(BaseModel):
     deployment: CatalogDeployment
     finops: CatalogFinOps = Field(default_factory=CatalogFinOps)
     operational_secrets: list[CatalogOperationalSecret] = Field(default_factory=list)
+    infrastructure_resources: list[InfrastructureResource] = Field(
+        default_factory=list, max_length=256
+    )
     logs: LogPolicy = Field(
         default_factory=lambda: LogPolicy(enabled=False, allowed_logins=[])
     )

@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing import Any, Literal
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 
 # ── Catalog ──────────────────────────────────────────────────────────
@@ -57,6 +64,23 @@ class OperationalSecret(BaseModel):
     editable: bool = False
 
 
+class InfrastructureResource(BaseModel):
+    """Auxiliary GCP identity metadata; never deployment or log authority."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    resource_type: Literal[
+        "firestore_database",
+        "gcs_bucket",
+        "cloud_tasks_queue",
+        "cloud_scheduler_job",
+        "artifact_registry_repository",
+        "secret_manager_secret",
+        "billing_budget",
+    ]
+    resource_name: str = Field(min_length=1, max_length=512, pattern=r"^\S+$")
+    description: str = Field(default="", max_length=1024)
+
+
 class ServiceLogsCapability(BaseModel):
     """Public capability only; reader identities never leave the authority."""
 
@@ -92,6 +116,20 @@ class CatalogService(BaseModel):
     deployment_ready: bool = False
     deployment_blockers: list[str] = Field(default_factory=list)
     operational_secrets: list[OperationalSecret] = Field(default_factory=list)
+    infrastructure_resources: list[InfrastructureResource] = Field(
+        default_factory=list, max_length=256
+    )
+
+    @model_serializer(mode="wrap")
+    def serialize_optional_infrastructure(self, handler: SerializerFunctionWrapHandler):
+        # No serializer return annotation: Pydantic must preserve the structured
+        # CatalogService/ServiceDetail OpenAPI schema rather than a generic dict.
+        data: dict[str, Any] = handler(self)
+        # Older services keep their exact response shape. References are emitted
+        # only when present and never become independent managed catalog entries.
+        if not self.infrastructure_resources:
+            data.pop("infrastructure_resources", None)
+        return data
 
     @model_validator(mode="after")
     def validate_management_mode(self):
@@ -102,6 +140,7 @@ class CatalogService(BaseModel):
                 or self.inventory_source is None
                 or self.deployment.enabled
                 or self.operational_secrets
+                or self.infrastructure_resources
                 or self.quality.enabled
             ):
                 raise ValueError(

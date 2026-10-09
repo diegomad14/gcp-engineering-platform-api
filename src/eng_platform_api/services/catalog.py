@@ -165,6 +165,7 @@ def _catalog_service(cfg: dict) -> CatalogService:
         deployment=ServiceDeploymentConfig(**deployment_cfg),
         finops=FinOpsLabels(**cfg.get("finops", {})),
         operational_secrets=cfg.get("operational_secrets", []),
+        infrastructure_resources=cfg.get("infrastructure_resources", []),
         logs=ServiceLogsCapability(
             enabled=cfg.get("logs", {}).get("enabled", False),
             configured="logs" in cfg,
