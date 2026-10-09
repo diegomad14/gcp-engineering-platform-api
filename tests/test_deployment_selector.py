@@ -12,6 +12,11 @@ from eng_platform_api.services import catalog, cloud_build, github_deployments
 @pytest.fixture
 def service(monkeypatch):
     monkeypatch.setattr(
+        deployments.github_actions_quota.config.release_orchestrator,
+        "private_executor_mode",
+        "auto",
+    )
+    monkeypatch.setattr(
         deployments.github_actions_quota.config.cloud_build, "enabled", True
     )
     monkeypatch.setattr(

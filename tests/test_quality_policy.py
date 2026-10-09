@@ -524,6 +524,11 @@ def test_dispatch_retry_rechecks_quality_without_requalifying_rollback(monkeypat
     monkeypatch.setattr(deployments, "_require_release_quality", check)
     monkeypatch.setattr(deployments.github_deployments, "retry_dispatch", retry)
     monkeypatch.setattr(deployments.deployment_store, "save", lambda item, _: item)
+    monkeypatch.setattr(
+        deployments.deployment_executions,
+        "get",
+        lambda _: {"provider": "github_actions"},
+    )
     with pytest.raises(HTTPException):
         deployments._retry_failed_dispatch(service(), item, "key", "failed")
     retry.assert_not_called()

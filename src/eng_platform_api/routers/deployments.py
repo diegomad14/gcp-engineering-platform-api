@@ -94,7 +94,11 @@ def _dispatch_deploy(service, tag, requested_by: str) -> DeploymentItem:
         item = github_deployments.start_managed_deployment(
             service=service, tag=tag, requested_by=requested_by
         )
-        return _start_cloud_build(service, item, reason="github_quota_preflight")
+        return _start_cloud_build(
+            service,
+            item,
+            reason=deployment_commands._cloud_build_preflight_reason(service),
+        )
     try:
         return github_deployments.start_deployment(
             service=service, tag=tag, requested_by=requested_by
@@ -121,7 +125,11 @@ def _dispatch_rollback(
             kind="rollback",
             target_revision=target.production_revision,
         )
-        return _start_cloud_build(service, item, reason="github_quota_preflight")
+        return _start_cloud_build(
+            service,
+            item,
+            reason=deployment_commands._cloud_build_preflight_reason(service),
+        )
     try:
         return github_deployments.start_rollback(
             service=service, target=target, requested_by=requested_by

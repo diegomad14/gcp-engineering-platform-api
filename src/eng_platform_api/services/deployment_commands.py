@@ -62,6 +62,9 @@ def _open_billing_circuit(service, *, reason: str, evidence: str = "") -> None:
         repository=service.repository,
         evidence=evidence,
     )
+    if config.release_orchestrator.private_executor_mode == "cloud_build":
+        # A late real rejection must not suppress another reserved GitHub job.
+        return
     for repository in {
         item.repository for item in catalog.get_services().services if item.repository
     }:
@@ -179,21 +182,28 @@ def start_cloud_build(service, item: DeploymentItem, *, reason: str) -> Deployme
         raise github_deployments.GitHubDispatchError(item) from exc
 
 
+def _cloud_build_preflight_reason(service) -> str:
+    if config.release_orchestrator.private_executor_mode == "cloud_build":
+        return "explicit_executor_policy"
+    owner = config.github.billing_owner or service.repository.split("/", 1)[0]
+    if executor_circuits.is_open(owner):
+        _open_billing_circuit(
+            service,
+            reason="persistent_github_actions_billing_circuit",
+            evidence="circuit already open",
+        )
+    return "github_quota_preflight"
+
+
 def _dispatch_deploy(service, tag: ReleaseTag, requested_by: str) -> DeploymentItem:
     if github_actions_quota.should_use_cloud_build(
         service.service_name, service.repository
     ):
-        owner = config.github.billing_owner or service.repository.split("/", 1)[0]
-        if executor_circuits.is_open(owner):
-            _open_billing_circuit(
-                service,
-                reason="persistent_github_actions_billing_circuit",
-                evidence="circuit already open",
-            )
+        reason = _cloud_build_preflight_reason(service)
         item = github_deployments.start_managed_deployment(
             service=service, tag=tag, requested_by=requested_by
         )
-        return start_cloud_build(service, item, reason="github_quota_preflight")
+        return start_cloud_build(service, item, reason=reason)
     try:
         return github_deployments.start_deployment(
             service=service, tag=tag, requested_by=requested_by
@@ -218,13 +228,7 @@ def _dispatch_rollback(
     if github_actions_quota.should_use_cloud_build(
         service.service_name, service.repository
     ):
-        owner = config.github.billing_owner or service.repository.split("/", 1)[0]
-        if executor_circuits.is_open(owner):
-            _open_billing_circuit(
-                service,
-                reason="persistent_github_actions_billing_circuit",
-                evidence="circuit already open",
-            )
+        reason = _cloud_build_preflight_reason(service)
         item = github_deployments.start_managed_deployment(
             service=service,
             tag=ReleaseTag(name=target.tag, sha=target.sha),
@@ -232,7 +236,7 @@ def _dispatch_rollback(
             kind="rollback",
             target_revision=target.production_revision,
         )
-        return start_cloud_build(service, item, reason="github_quota_preflight")
+        return start_cloud_build(service, item, reason=reason)
     try:
         return github_deployments.start_rollback(
             service=service, target=target, requested_by=requested_by
@@ -267,17 +271,22 @@ def _retry_failed_dispatch(
             service, ReleaseTag(name=existing.tag, sha=existing.sha)
         )
     try:
-        if github_actions_quota.should_use_cloud_build(
-            service.service_name, service.repository
-        ):
-            owner = config.github.billing_owner or service.repository.split("/", 1)[0]
-            if executor_circuits.is_open(owner):
-                _open_billing_circuit(
-                    service,
-                    reason="persistent_github_actions_billing_circuit",
-                    evidence="circuit already open",
-                )
-            retried = start_cloud_build(service, existing, reason="retry_preflight")
+        execution = deployment_executions.get(existing.id)
+        provider = execution.get("provider") if execution else None
+        if provider in {"github_actions", "cloud_build"}:
+            use_cloud_build = provider == "cloud_build"
+        elif config.release_orchestrator.private_executor_mode == "cloud_build":
+            raise HTTPException(
+                status_code=409,
+                detail="Existing deployment provider requires reconciliation",
+            )
+        else:
+            use_cloud_build = github_actions_quota.should_use_cloud_build(
+                service.service_name, service.repository
+            )
+        if use_cloud_build:
+            reason = _cloud_build_preflight_reason(service)
+            retried = start_cloud_build(service, existing, reason=reason)
         else:
             retried = github_deployments.retry_dispatch(
                 service=service, item=existing, target_revision=target_revision
@@ -297,6 +306,8 @@ def _retry_failed_dispatch(
         raise HTTPException(status_code=502, detail=detail) from exc
     except executor_circuits.CircuitRecoveryRequired as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=_GITHUB_UNAVAILABLE) from exc
     return deployment_store.save(retried, key)

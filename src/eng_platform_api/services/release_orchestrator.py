@@ -114,6 +114,9 @@ def _open_circuit(*, repository: str, run_id: str, reason: str, evidence: str) -
 
 
 def _propagate_open_circuit(owner: str, circuit: dict[str, Any]) -> None:
+    if config.release_orchestrator.private_executor_mode == "cloud_build":
+        # Preserve hints until existing GitHub reservations have drained.
+        return
     # Never cache the provider decision or reopen from a stale read. Only the
     # best-effort repository hints are deduplicated, using the existing durable
     # circuit document so bursts on different workers share one sweep.
@@ -166,6 +169,10 @@ def _provider(service: CatalogService) -> str:
     try:
         private = github_release_control.repository_is_private(service.repository)
     except Exception as exc:
+        if config.release_orchestrator.private_executor_mode == "cloud_build":
+            raise ReleaseOrchestratorError(
+                "Cannot verify repository visibility for explicit Cloud Build policy"
+            ) from exc
         if executor_circuits.is_open(_owner(service.repository)):
             raise ReleaseOrchestratorError(
                 "Cannot verify repository visibility while the GitHub Actions "
@@ -174,6 +181,10 @@ def _provider(service: CatalogService) -> str:
         return "github_actions"
     if not private:
         return "github_actions"
+    if config.release_orchestrator.private_executor_mode == "cloud_build":
+        # Explicit operator policy is independent of the billing circuit.
+        # Reservation keeps any existing execution on its original provider.
+        return "cloud_build"
     owner = _owner(service.repository)
     circuit = executor_circuits.get(owner)
     if circuit.get("state") == "open":
@@ -477,6 +488,12 @@ def _close_circuit_from_probe(repository: str, payload_run: dict[str, Any]) -> b
         nonce=nonce,
     )
     if getattr(run, "conclusion", "") == "success" and started:
+        if settings.private_executor_mode == "cloud_build":
+            # A billing probe cannot override explicit executor policy or
+            # suppress an older GitHub reservation during coordinated drain.
+            # Repository hints are migrated separately after that drain.
+            executor_circuits.close_after_successful_probe(owner, run_id=str(run_id))
+            return True
         updated: list[str] = []
         repositories = {
             service.repository

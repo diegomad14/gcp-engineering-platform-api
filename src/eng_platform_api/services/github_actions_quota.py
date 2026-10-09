@@ -137,7 +137,7 @@ def deployment_fallback_enabled(service_name: str) -> bool:
 
 
 def should_use_cloud_build(service_name: str, repository: str) -> bool:
-    """Choose the managed fallback only when quota evidence is conclusive."""
+    """Honor explicit policy; automatic fallback still requires rejection."""
     service = catalog.get_service(service_name)
     if service and service.deployment.executor == "cloud_build":
         if not service.deployment_ready:
@@ -157,6 +157,10 @@ def should_use_cloud_build(service_name: str, repository: str) -> bool:
         if not bool(getattr(github_client().get_repo(repository), "private", False)):
             return False
     except Exception as exc:
+        if config.release_orchestrator.private_executor_mode == "cloud_build":
+            raise executor_circuits.CircuitRecoveryRequired(
+                "Cannot verify repository visibility for explicit Cloud Build policy"
+            ) from exc
         owner = config.github.billing_owner or repository.split("/", 1)[0]
         if executor_circuits.is_open(owner):
             raise executor_circuits.CircuitRecoveryRequired(
@@ -164,6 +168,9 @@ def should_use_cloud_build(service_name: str, repository: str) -> bool:
                 "circuit is open; automatic execution is paused"
             ) from exc
         return False
+
+    if config.release_orchestrator.private_executor_mode == "cloud_build":
+        return True
 
     owner = config.github.billing_owner or repository.split("/", 1)[0]
     circuit = executor_circuits.get(owner)

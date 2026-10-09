@@ -2,15 +2,59 @@
 
 The release orchestrator gives pull requests and `main` the same quality and
 release semantics whether GitHub Actions or Cloud Build executes the work.
-GitHub Actions is preferred while healthy. Cloud Build is a persistent fallback
-for private repositories when GitHub conclusively cannot start work because of
-Billing or included-minute exhaustion. Provider selection is internal and is
-not present in public REST, MCP or frontend contracts.
+Private repositories default to explicit Cloud Build execution. Public
+repositories remain on GitHub Actions. This operator policy is independent of
+the persistent billing fallback; it never fabricates or opens a billing circuit.
+Provider selection is internal and is not present in public REST, MCP or frontend
+contracts.
 
 The orchestrator prepares releases only. It does not deploy automatically.
 After a successful `main_release`, an operator can deploy the eligible semantic
 tag through the existing UI, REST or MCP command service. That deployment uses
 the same backend selector and reuses the exact `oss-v2` evidence.
+
+## Explicit private executor policy
+
+`ENG_PLATFORM_PRIVATE_EXECUTOR_MODE=cloud_build` is the default. It selects
+Cloud Build for new managed private PR quality and main release reservations.
+It also selects Cloud Build for enrolled private deployments whose existing
+deployment mode is `auto`. Deployment enablement, service allowlists, explicit
+deployment overrides and private-only exceptions still apply. Public repository
+CI stays on GitHub. Unknown repository visibility pauses explicit selection.
+
+`auto` retains GitHub-first execution with verified billing-rejection fallback.
+Changing this mode does not migrate an existing execution: its fingerprint,
+provider, build/run ID, callback binding and evidence remain authoritative.
+Failed deployment dispatches retain their recorded provider; an unrecorded
+provider requires reconciliation before retry in explicit mode.
+
+### Coordinated activation and reversal
+
+Do not publish application changes during this maintenance window. Deploy the
+compatible central version first while retaining current GitHub hints. Verify
+the new serving revision, healthy traffic, unchanged tooling pins and exceptions,
+then drain old-revision requests and all existing GitHub release/deployment
+reservations, including queued or uncertain work. Investigate uncertain records;
+do not delete them, fabricate callbacks or start a second provider.
+
+Only after that drain, set and verify `ENG_PLATFORM_CI_EXECUTOR=cloud_build` on
+each enrolled private repository. Keep the public central repository on GitHub.
+This is a coordinated rollout, not an atomic cross-service transaction. During
+the transition a canonical GitHub runner may start or check out source, but
+`resolve` rejects a Cloud Build reservation before the quality engine or release
+planner can execute. Confirm each participating workflow uses this canonical
+resolve contract and its orchestrator flag is enabled.
+
+No automatic event-time hint setter is introduced: updating a repository hint
+for a new Cloud Build SHA could otherwise suppress an older GitHub reservation.
+A successful billing health probe in explicit mode preserves existing hints
+and only closes its verified billing circuit. It cannot undo explicit policy.
+
+Returning to `auto` also requires an operator-coordinated drain, restoring and
+verifying GitHub hints before admitting new GitHub work. Do not infer completion
+from a variable write alone. Validate the first genuine authorized operation
+through exact OSS evidence and canonical deployment gates; do not launch
+synthetic or duplicate builds merely to certify routing.
 
 ## Event and state model
 
@@ -65,6 +109,8 @@ the same branch protection; exact evidence remains the authoritative backend
 gate for tags and deployments.
 
 ## Persistent Billing circuit
+
+This section describes fallback in `auto` mode, not explicit Cloud Build policy.
 
 The circuit is scoped to `ENG_PLATFORM_GITHUB_BILLING_OWNER`, stored in the
 `executor_circuits` Firestore collection and shared by that owner's private
@@ -348,8 +394,9 @@ POST /api/internal/release-operations/github-actions/probe
 The API records a random nonce before dispatching the workflow. A later
 `workflow_run` must match the exact repository, workflow, `workflow_dispatch`
 event and nonce-bound display title. The API also re-reads jobs from GitHub.
-Only `success` with at least one job that actually started can restore all
-private repository variables to `github_actions` and close the circuit. A
+Only `success` with at least one job that actually started can close the circuit.
+In `auto` mode it also restores private repository variables to `github_actions`;
+in explicit Cloud Build mode it preserves them for the coordinated migration. A
 failed, zero-job, unrelated or forged run leaves it open. If variable updates
 are only partially successful, the API rolls them back to `cloud_build` and
 keeps the circuit open; fix the cause and request a new probe.

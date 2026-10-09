@@ -104,6 +104,7 @@ class ReleaseOrchestratorConfig:
     """
 
     enabled: bool = False
+    private_executor_mode: str = "cloud_build"
     execution_collection: str = "release_executions"
     circuit_collection: str = "executor_circuits"
     webhook_delivery_collection: str = "github_webhook_deliveries"
@@ -414,6 +415,9 @@ def load_config() -> PlatformConfig:
             )
 
     release_orchestrator = ReleaseOrchestratorConfig(
+        private_executor_mode=os.getenv(
+            "ENG_PLATFORM_PRIVATE_EXECUTOR_MODE", "cloud_build"
+        ).strip(),
         enabled=os.getenv("ENG_PLATFORM_RELEASE_ORCHESTRATOR_ENABLED", "false").lower()
         == "true",
         execution_collection=os.getenv(
@@ -485,6 +489,10 @@ def load_config() -> PlatformConfig:
         ),
         artemis_web_sha=os.getenv("ENG_PLATFORM_ARTEMIS_WEB_SHA", "").strip().lower(),
     )
+    if release_orchestrator.private_executor_mode not in {"auto", "cloud_build"}:
+        raise ValueError(
+            "ENG_PLATFORM_PRIVATE_EXECUTOR_MODE must be auto or cloud_build"
+        )
     if release_orchestrator.enabled:
         if not release_orchestrator.webhook_secret:
             raise ValueError(
