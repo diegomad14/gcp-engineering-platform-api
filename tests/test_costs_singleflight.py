@@ -15,7 +15,7 @@ def isolated_cache(monkeypatch):
     monkeypatch.setattr(costs.config, "mock_mode", False)
     monkeypatch.setattr(costs, "_cache", {})
     monkeypatch.setattr(costs, "_inflight", {})
-    monkeypatch.setattr(costs, "catalog_source_identity", lambda: ("path", "digest"))
+    monkeypatch.setattr(costs, "cache_identity", lambda: ("path", "digest"))
     monkeypatch.setattr(
         costs.billing,
         "utc_now",
@@ -97,7 +97,7 @@ def test_same_key_singleflight_wakes_waiters_and_recovers(monkeypatch, fails):
 def test_cache_expiry_and_catalog_identity_are_preserved(monkeypatch):
     clock, source = [10.0], [("path", "first")]
     monkeypatch.setattr(costs, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(costs, "catalog_source_identity", lambda: source[0])
+    monkeypatch.setattr(costs, "cache_identity", lambda: source[0])
     loader = Mock(side_effect=["one", "two", "three"])
     assert costs._cached(("summary",), loader) == "one"
     clock[0] += costs._CACHE_TTL_SECONDS - 1

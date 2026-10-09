@@ -155,7 +155,23 @@ def test_closed_future_resource_is_filtered_before_readiness_without_hiding_curr
     assert seen == ["private-example"]
     assert "future-disabled" not in response.text
     assert client.get("/api/catalog/services/future-disabled").status_code == 403
-    assert client.get("/api/deployments/overview").status_code == 403
+    monkeypatch.setattr(deployments, "_overview_cache", None)
+    monkeypatch.setattr(
+        deployments,
+        "_overview_item",
+        lambda service, latest: DeploymentOverviewItem(
+            service_name=service.service_name
+        ),
+    )
+    monkeypatch.setattr(
+        deployments.deployment_store, "latest_for_services", lambda names: {}
+    )
+    overview = client.get("/api/deployments/overview")
+    assert overview.status_code == 200
+    assert [row["service_name"] for row in overview.json()["items"]] == [
+        "private-example"
+    ]
+    assert "future-disabled" not in overview.text
     assert client.get("/api/auth/me").json()["can_view_catalog"] is True
 
 
@@ -397,3 +413,194 @@ def test_explicit_public_mock_factory_smoke_still_works(monkeypatch):
     )
     assert response.status_code == 200
     assert "platform_deploy_workflow" in response.text
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/deployments/overview",
+        "/api/metrics/cloud-run/summary",
+        "/api/health/services",
+        "/api/quality/summary",
+        "/api/releases/summary",
+        "/api/releases/",
+        "/api/costs/status",
+        "/api/costs/summary",
+        "/api/costs/by-service",
+        "/api/costs/by-sku",
+        "/api/costs/daily",
+        "/api/costs/comparison",
+    ],
+)
+def test_partial_reader_aggregates_exclude_closed_resources(
+    monkeypatch, private_authority, path
+):
+    from eng_platform_api.models import ServiceDetail
+    from eng_platform_api.routers import releases
+    from eng_platform_api.services import gcp_monitoring, github_actions, releases_store
+    from eng_platform_api.services import gcp_billing_bigquery as billing
+    from eng_platform_api.services.metadata_scope import visible_services
+
+    document = deepcopy(PRIVATE)
+    hidden = deepcopy(document["services"][0])
+    hidden["service_name"] = "future-disabled"
+    hidden["logs"] = {"enabled": False, "allowed_logins": []}
+    document["services"].append(hidden)
+    replace_authority(monkeypatch, private_authority, document)
+    original = catalog._catalog_service
+
+    def project(row):
+        assert row["service_name"] != "future-disabled"
+        return original(row)
+
+    monkeypatch.setattr(catalog, "_catalog_service", project)
+    monkeypatch.setattr(
+        catalog,
+        "get_service_detail",
+        lambda name: ServiceDetail(**catalog.get_service(name).model_dump()),
+    )
+    monkeypatch.setattr(deployments, "_overview_cache", None)
+    monkeypatch.setattr(quality, "_summary_cache", None)
+    monkeypatch.setattr(releases, "_summary_cache", None)
+    monkeypatch.setattr(
+        deployments.deployment_store, "latest_for_services", lambda names: {}
+    )
+    monkeypatch.setattr(
+        quality,
+        "_quality_project",
+        lambda service: quality.QualityProject(
+            service_name=service.service_name, project_key=service.service_name
+        ),
+    )
+
+    def metrics(names, minutes):
+        assert names == ["private-example"]
+        return []
+
+    monkeypatch.setattr(gcp_monitoring, "get_metrics_for_services", metrics)
+    monkeypatch.setattr(github_actions, "_fetch_recent_releases", lambda repository: [])
+    monkeypatch.setattr(
+        releases_store, "get_releases", lambda service_name=None, limit=20: []
+    )
+    monkeypatch.setattr(releases_store, "count_releases", lambda service_name=None: 0)
+
+    def table():
+        assert visible_services.get() == frozenset({"private-example"})
+        return None
+
+    monkeypatch.setattr(billing, "_billing_table_exists", table)
+    response = catalog_client().get(path)
+    assert response.status_code == 200, response.text
+    assert "future-disabled" not in response.text
+    assert response.headers["cache-control"] == "no-store"
+    assert visible_services.get() is None
+    if path in {"/api/costs/summary", "/api/costs/by-service", "/api/costs/by-sku"}:
+        assert response.json()["scope"] == "authorized_resources"
+        assert response.json()["cloud_build"] is None
+
+
+def test_partial_billing_scope_filters_rows_before_every_aggregation(monkeypatch):
+    from datetime import datetime, timezone
+    from eng_platform_api.services import gcp_billing_bigquery as billing
+    from eng_platform_api.services.metadata_scope import reader_scope
+
+    now = datetime(2026, 10, 9, tzinfo=timezone.utc)
+    client = Mock()
+    with reader_scope(frozenset({"private-example"})):
+        where = billing._where(now, now, now)
+        assert "resource.global_name IN UNNEST(@visible_resources)" in where
+        for grouping in ("resource", "service", "sku"):
+            sql = billing._build_items_sql("synthetic.table", where, grouping)
+            assert sql.index("@visible_resources") < sql.index("FROM components")
+            billing._query(client, sql)
+            job = client.query.call_args.kwargs["job_config"]
+            values = job.query_parameters[0].values
+            assert (
+                "projects/example-project/locations/us-central1/services/private-example"
+                in values
+            )
+            assert all(value.endswith("/private-example") for value in values)
+    assert "@visible_resources" not in billing._where(now, now, now)
+    billing._query(client, "unscoped")
+    client.query.assert_called_with("unscoped")
+
+
+def test_cost_cache_is_partitioned_by_resource_scope(monkeypatch):
+    from eng_platform_api.routers import costs
+    from eng_platform_api.services.metadata_scope import reader_scope
+
+    monkeypatch.setattr(costs, "_cache", {})
+    loader = Mock(side_effect=["visible-one", "visible-two", "all"])
+    with reader_scope(frozenset({"one"})):
+        assert costs._cached(("scope-test",), loader) == "visible-one"
+    with reader_scope(frozenset({"two"})):
+        assert costs._cached(("scope-test",), loader) == "visible-two"
+    assert costs._cached(("scope-test",), loader) == "all"
+    with reader_scope(frozenset({"one"})):
+        assert costs._cached(("scope-test",), loader) == "visible-one"
+    assert loader.call_count == 3
+
+
+def test_partial_deployment_poll_checks_service_before_refresh(
+    monkeypatch, private_authority
+):
+    from eng_platform_api.models import DeploymentItem
+
+    document = deepcopy(PRIVATE)
+    hidden = deepcopy(document["services"][0])
+    hidden["service_name"] = "future-disabled"
+    hidden["logs"] = {"enabled": False, "allowed_logins": []}
+    document["services"].append(hidden)
+    replace_authority(monkeypatch, private_authority, document)
+    item = DeploymentItem(
+        id="synthetic",
+        service_name="private-example",
+        repository="example/repo",
+        tag="v1.0.0",
+        status="SUCCEEDED",
+    )
+    monkeypatch.setattr(deployments.deployment_store, "get", lambda deployment_id: item)
+    refresh = Mock(side_effect=AssertionError("hidden deployment must not refresh"))
+    monkeypatch.setattr(deployments, "_refresh", refresh)
+    client = catalog_client()
+    assert client.get("/api/deployments/synthetic").status_code == 200
+    item.service_name = "future-disabled"
+    item.status = "QUEUED"
+    assert client.get("/api/deployments/synthetic").status_code == 403
+    refresh.assert_not_called()
+
+
+def test_scoped_release_history_filters_github_before_totals_and_limit(monkeypatch):
+    from eng_platform_api.models import ReleaseItem, ReleaseSummary
+    from eng_platform_api.routers import releases
+    from eng_platform_api.services.metadata_scope import reader_scope
+
+    item = ReleaseItem(
+        service_name="private-example",
+        repository="example/repo",
+        version="v1.0.0",
+        status="success",
+        created_at="2026-10-08",
+    )
+    hidden = item.model_copy(update={"service_name": "hidden", "version": "v2.0.0"})
+    stored = Mock(return_value=[item])
+    monkeypatch.setattr(releases.releases_store, "get_releases", stored)
+    monkeypatch.setattr(
+        releases.releases_store, "count_releases", lambda service_name: 12
+    )
+    monkeypatch.setattr(
+        releases.github_actions,
+        "get_release_summary",
+        lambda: ReleaseSummary(recent=[item, hidden]),
+    )
+    with reader_scope(frozenset({"private-example"})):
+        summary = releases._build_release_summary()
+        assert summary.recent == [item]
+        assert summary.total_releases == 1
+        result = releases.list_releases(service_name=None, limit=1)
+        assert result.recent == [item] and result.total_releases == 12
+        assert releases.list_releases(service_name="hidden", limit=1).recent == []
+    assert all(
+        call.kwargs.get("service_name") == "private-example"
+        for call in stored.call_args_list
+    )

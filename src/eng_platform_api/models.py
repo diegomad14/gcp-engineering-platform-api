@@ -574,6 +574,7 @@ class BillingQuality(BaseModel):
 
 
 class CostSummary(BaseModel):
+    scope: Literal["project", "authorized_resources"] = "project"
     currency: str = "USD"
     period: CostPeriod
     total_cost: float | None = None
