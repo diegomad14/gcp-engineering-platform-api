@@ -22,9 +22,17 @@ func main() {
 			panic(err)
 		}
 		lines := map[[2]int]bool{}
-		ast.Inspect(file, func(n ast.Node) bool {
-			switch n.(type) {
-			case *ast.BlockStmt, *ast.EmptyStmt, *ast.CaseClause, *ast.CommClause, *ast.LabeledStmt:
+		var inspect func(ast.Node) bool
+		inspect = func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.CommClause:
+				// Go native coverage instruments select bodies, not the
+				// send/receive statements that choose a communication case.
+				for _, body := range node.Body {
+					ast.Inspect(body, inspect)
+				}
+				return false
+			case *ast.BlockStmt, *ast.EmptyStmt, *ast.CaseClause, *ast.LabeledStmt:
 			default:
 				if _, ok := n.(ast.Stmt); ok {
 					position := fs.Position(n.Pos())
@@ -32,7 +40,8 @@ func main() {
 				}
 			}
 			return true
-		})
+		}
+		ast.Inspect(file, inspect)
 		result[path] = [][2]int{}
 		for line := range lines {
 			result[path] = append(result[path], line)

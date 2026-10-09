@@ -231,3 +231,26 @@ def test_go_extension_cannot_override_pinned_profiles(tmp_path, monkeypatch):
         profiles.QualityProfileError, match="overrides a pinned profile"
     ):
         profiles.profile_document()
+
+
+@pytest.mark.parametrize("mode", ["atomic", "count", "set"])
+def test_go_coverpkg_duplicate_blocks_merge_without_double_counting(
+    go_coverage, tmp_path, monkeypatch, mode
+):
+    code = source(tmp_path)
+    report = tmp_path / "coverage.out"
+    name = "github.com/example/reconnections/internal/service.go"
+    report.write_text(
+        f"mode: {mode}\n{name}:3.2,4.2 1 0\n{name}:4.2,4.7 1 0\n{name}:3.2,4.2 1 1\n"
+    )
+    monkeypatch.setattr(
+        go_coverage.subprocess,
+        "check_output",
+        lambda *_args, **_kw: json.dumps({str(code): [[3, 2], [4, 2]]}),
+    )
+    percentage, lines = go_coverage.go_coverage(report, tmp_path, tmp_path)
+    assert percentage == 50
+    assert lines["internal/service.go"] == {3: True, 4: False}
+    report.write_text(f"mode: {mode}\n{name}:3.2,4.2 1 0\n{name}:3.2,4.2 2 1\n")
+    with pytest.raises(ValueError, match="Conflicting.*statement counts"):
+        go_coverage.go_coverage(report, tmp_path, tmp_path)

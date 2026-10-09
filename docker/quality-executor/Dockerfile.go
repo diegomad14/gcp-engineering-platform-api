@@ -14,6 +14,7 @@ RUN apt-get update \
 COPY scripts/quality/quality_gate.py scripts/quality/differential_coverage.py scripts/quality/go_coverage.py scripts/quality/go_executable_lines.go /opt/eng-platform/
 COPY docker/quality-executor/trivyignore.yaml /opt/eng-platform/trivyignore.yaml
 COPY docker/quality-executor/quality_executor.py docker/quality-executor/quality_profiles.py docker/quality-executor/untrusted_command.py docker/quality-executor/trusted_scanner.py docker/quality-executor/trusted_scanner.sh docker/quality-executor/test_quality_executor.py /opt/eng-platform/
+COPY docker/quality-executor/test_go_coverage.py /opt/eng-platform/
 COPY src/eng_platform_api/release_quality_profiles.json src/eng_platform_api/release_quality_profiles.go.json /opt/eng-platform/
 RUN go build -o /opt/eng-platform/go_executable_lines /opt/eng-platform/go_executable_lines.go \
     && mkdir -p /opt/eng-platform/trusted-bin \
@@ -23,5 +24,5 @@ RUN go build -o /opt/eng-platform/go_executable_lines /opt/eng-platform/go_execu
     && chmod 0555 /opt/eng-platform/quality_executor.py /opt/eng-platform/untrusted_command.py /opt/eng-platform/trusted_scanner.py /opt/eng-platform/go_executable_lines \
     && chmod 0444 /opt/eng-platform/release_quality_profiles.json /opt/eng-platform/release_quality_profiles.go.json /opt/eng-platform/trivyignore.yaml \
     && cd /opt/eng-platform \
-    && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_quality_executor.py
+    && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_quality_executor.py test_go_coverage.py
 ENTRYPOINT ["python3", "/opt/eng-platform/quality_executor.py"]

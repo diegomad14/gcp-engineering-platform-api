@@ -48,8 +48,7 @@ def go_coverage(
     if not lines or lines[0] not in {"mode: atomic", "mode: count", "mode: set"}:
         raise ValueError("Invalid native Go coverage mode")
     blocks: dict[str, list[tuple[tuple[int, int], tuple[int, int], int]]] = {}
-    total = covered = 0
-    seen = set()
+    merged: dict[tuple[str, int, int, int, int], tuple[int, int]] = {}
     for line in lines[1:]:
         match = _BLOCK.fullmatch(line)
         if not match:
@@ -67,10 +66,19 @@ def go_coverage(
         if a < 1 or ac < 1 or b < a or bc < 1 or (a == b and bc < ac):
             raise ValueError("Invalid Go coverage block range")
         identity = (str(path), a, ac, b, bc)
-        if identity in seen:
-            raise ValueError("Duplicate native Go coverage block")
-        seen.add(identity)
-        blocks.setdefault(str(path), []).append(((a, ac), (b, bc), hit))
+        if identity in merged:
+            previous_count, previous_hit = merged[identity]
+            if previous_count != count:
+                raise ValueError("Conflicting native Go coverage statement counts")
+            hit = (
+                max(previous_hit, hit)
+                if lines[0] == "mode: set"
+                else previous_hit + hit
+            )
+        merged[identity] = (count, hit)
+    total = covered = 0
+    for (name, a, ac, b, bc), (count, hit) in merged.items():
+        blocks.setdefault(name, []).append(((a, ac), (b, bc), hit))
         total += count
         covered += count if hit else 0
     if not total:
