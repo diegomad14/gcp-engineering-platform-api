@@ -45,6 +45,7 @@ _UNTRUSTED_UID = 65532
 _UNTRUSTED_GID = 65532
 _RESULT_NAME = "quality-result.json"
 _RESULT_KIND = "eng-platform-quality-result"
+_GO_TEMPORARY_NAME = ".go-temporary"
 _EVENT_TOKEN_NAME = "event-token"
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _HASH = re.compile(r"^[0-9a-f]{64}$")
@@ -451,6 +452,7 @@ def _child_environment(
     profile: dict[str, Any],
     checkout: Path | None = None,
     git_directory: Path | None = None,
+    go_temporary_directory: Path | None = None,
 ) -> dict[str, str]:
     home = runtime / "home"
     home.mkdir(parents=True, exist_ok=True)
@@ -481,8 +483,13 @@ def _child_environment(
         "ENG_PLATFORM_RELEASE_BASE_SHA": identity["base_sha"],
     }
     if profile["runtime"] == "go":
+        if go_temporary_directory is None:
+            raise QualityExecutorError(
+                "Go quality requires an isolated temporary directory"
+            )
         environment.update(
             {
+                "GOTMPDIR": str(go_temporary_directory),
                 "GOTOOLCHAIN": "local",
                 "GOCACHE": str(home / ".cache" / "go-build"),
                 "GOMODCACHE": str(home / "go" / "pkg" / "mod"),
@@ -1028,6 +1035,48 @@ def _timeout_report(
     }
 
 
+def _prepare_go_temporary_directory(output_dir: Path) -> Path:
+    """Use the existing executable volume without exposing sealed reports.
+
+    The root-owned parent permits traversal only. Repository code can write to
+    its private child but cannot create, replace or list sibling evidence.
+    """
+    if any(path.is_symlink() for path in (output_dir, *output_dir.parents)):
+        raise QualityExecutorError("Go quality output path must not be a symlink")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "linux" and os.statvfs(output_dir).f_flag & os.ST_NOEXEC:
+        raise QualityExecutorError("Go quality output volume must permit execution")
+    os.chown(output_dir, 0, 0, follow_symlinks=False)
+    os.chmod(output_dir, 0o711)
+    temporary = output_dir / _GO_TEMPORARY_NAME
+    # A fresh execution volume must not reuse attacker-controlled executables.
+    temporary.mkdir(mode=0o700)
+    os.chown(temporary, _UNTRUSTED_UID, _UNTRUSTED_GID, follow_symlinks=False)
+    return temporary
+
+
+def _remove_go_temporary_directory(temporary: Path, output_dir: Path) -> None:
+    """Remove only the known private subtree, after repository processes stop."""
+    if temporary != output_dir / _GO_TEMPORARY_NAME:
+        raise QualityExecutorError("Go temporary cleanup escaped its output directory")
+
+    def remove(path: Path) -> None:
+        info = path.lstat()
+        if stat.S_ISDIR(info.st_mode):
+            # CHOWN is available; DAC_OVERRIDE is deliberately unavailable.
+            # Reclaim closed/private directories before walking their contents.
+            os.chown(path, 0, 0, follow_symlinks=False)
+            os.chmod(path, 0o700)
+            for child in path.iterdir():
+                remove(child)
+            path.rmdir()
+        else:
+            # In particular, do not follow repository-created symlinks.
+            path.unlink()
+
+    remove(temporary)
+
+
 def _run_quality(
     service: str,
     source: Path,
@@ -1039,13 +1088,51 @@ def _run_quality(
     if service != identity["service_name"]:
         raise QualityExecutorError("Service argument does not match execution identity")
     profile = verify_profile_hash(service, identity["profile_hash"])
+    temporary = (
+        _prepare_go_temporary_directory(output_dir)
+        if profile.get("runtime") == "go"
+        else None
+    )
+    try:
+        return _run_prepared_quality(
+            service,
+            source,
+            scratch,
+            output_dir,
+            external_dir,
+            identity,
+            profile,
+            temporary,
+        )
+    finally:
+        if temporary is not None:
+            try:
+                _terminate_untrusted_processes()
+                _remove_go_temporary_directory(temporary, output_dir)
+            except Exception:
+                # A cleanup/isolation failure must never leave a PASSED result
+                # for the always-running credentialed publisher to consume.
+                (output_dir / _RESULT_NAME).unlink(missing_ok=True)
+                raise
+
+
+def _run_prepared_quality(
+    service: str,
+    source: Path,
+    scratch: Path,
+    output_dir: Path,
+    external_dir: Path,
+    identity: dict[str, str],
+    profile: dict[str, Any],
+    go_temporary_directory: Path | None,
+) -> int:
     scanner_runtime_parent = _prepare_scanner_runtime_parent(scratch)
     checkout, git_directory, runtime = _isolated_checkout(
         source.resolve(), scratch.resolve(), identity
     )
     cwd = _working_directory(checkout, profile["working_directory"])
     environment = _child_environment(
-        runtime, identity, profile, checkout, git_directory
+        runtime, identity, profile, checkout, git_directory, go_temporary_directory
     )
     (runtime / "tmp").mkdir(parents=True, exist_ok=True)
     report_directory = cwd / "quality-reports"

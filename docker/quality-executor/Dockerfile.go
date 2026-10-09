@@ -15,6 +15,7 @@ COPY scripts/quality/quality_gate.py scripts/quality/differential_coverage.py sc
 COPY docker/quality-executor/trivyignore.yaml /opt/eng-platform/trivyignore.yaml
 COPY docker/quality-executor/quality_executor.py docker/quality-executor/quality_profiles.py docker/quality-executor/untrusted_command.py docker/quality-executor/trusted_scanner.py docker/quality-executor/trusted_scanner.sh docker/quality-executor/test_quality_executor.py /opt/eng-platform/
 COPY docker/quality-executor/test_go_coverage.py /opt/eng-platform/
+COPY docker/quality-executor/smoke_go_isolation.py /opt/eng-platform/
 COPY src/eng_platform_api/release_quality_profiles.json src/eng_platform_api/release_quality_profiles.go.json /opt/eng-platform/
 RUN go build -o /opt/eng-platform/go_executable_lines /opt/eng-platform/go_executable_lines.go \
     && mkdir -p /opt/eng-platform/trusted-bin \

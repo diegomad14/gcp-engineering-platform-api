@@ -566,6 +566,92 @@ class ScannerScratchContractTest(unittest.TestCase):
         checkout.assert_not_called()
 
 
+class GoTemporaryDirectoryTest(unittest.TestCase):
+    def test_go_private_directory_preserves_noexec_runtime_and_cleans_symlinks(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch("os.chown") as chown:
+            root = Path(folder).resolve()
+            output = root / "output"
+            temporary = quality_executor._prepare_go_temporary_directory(output)
+            self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o711)
+            self.assertEqual(stat.S_IMODE(temporary.stat().st_mode), 0o700)
+            chown.assert_any_call(output, 0, 0, follow_symlinks=False)
+            chown.assert_any_call(temporary, 65532, 65532, follow_symlinks=False)
+            sensitive = dict.fromkeys(
+                quality_executor._SENSITIVE_ENV_NAMES, "must-not-leak"
+            )
+            with mock.patch.dict(os.environ, sensitive):
+                environment = quality_executor._child_environment(
+                    root / "runtime",
+                    {"head_sha": "a", "base_sha": "b"},
+                    {"runtime": "go"},
+                    go_temporary_directory=temporary,
+                )
+            self.assertEqual(environment["GOTMPDIR"], str(temporary))
+            self.assertEqual(environment["TMPDIR"], str(root / "runtime/tmp"))
+            self.assertTrue(
+                quality_executor._SENSITIVE_ENV_NAMES.isdisjoint(environment)
+            )
+            protected = root / "protected"
+            protected.write_text("sealed")
+            (temporary / "escape").symlink_to(protected)
+            nested = temporary / "private"
+            nested.mkdir()
+            (nested / "artifact").write_text("native test binary")
+            nested.chmod(0)
+            quality_executor._remove_go_temporary_directory(temporary, output)
+            self.assertFalse(temporary.exists())
+            self.assertEqual(protected.read_text(), "sealed")
+
+    def test_go_rejects_reused_or_symlinked_directories(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch("os.chown"):
+            root = Path(folder).resolve()
+            output = root / "output"
+            quality_executor._prepare_go_temporary_directory(output)
+            with self.assertRaises(FileExistsError):
+                quality_executor._prepare_go_temporary_directory(output)
+            alias = root / "alias"
+            alias.symlink_to(output, target_is_directory=True)
+            with self.assertRaisesRegex(
+                quality_executor.QualityExecutorError, "symlink"
+            ):
+                quality_executor._prepare_go_temporary_directory(alias)
+            with self.assertRaisesRegex(
+                quality_executor.QualityExecutorError, "escaped"
+            ):
+                quality_executor._remove_go_temporary_directory(root, output)
+
+    def test_failed_cleanup_removes_the_publishable_manifest(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch("os.chown"):
+            output = Path(folder).resolve() / "output"
+            identity = {"service_name": "cgm-reconnections-api", "profile_hash": "a"}
+
+            def completed(*_args):
+                (output / quality_executor._RESULT_NAME).write_text("sealed result")
+                return 0
+
+            with (
+                mock.patch.object(quality_executor, "_identity", return_value=identity),
+                mock.patch.object(
+                    quality_executor,
+                    "verify_profile_hash",
+                    return_value={"runtime": "go"},
+                ),
+                mock.patch.object(
+                    quality_executor, "_run_prepared_quality", side_effect=completed
+                ),
+                mock.patch.object(
+                    quality_executor,
+                    "_terminate_untrusted_processes",
+                    side_effect=RuntimeError("process remains"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "process remains"):
+                    quality_executor._run_quality(
+                        "cgm-reconnections-api", output, output, output, output
+                    )
+            self.assertFalse((output / quality_executor._RESULT_NAME).exists())
+
+
 class MandatorySmartiEvidenceTest(unittest.TestCase):
     def _report(self, service: str, status: str = "PASSED"):
         profile = quality_profiles.profile_for(service)
