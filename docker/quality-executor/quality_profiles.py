@@ -88,7 +88,7 @@ def _validate_profile(service: str, raw: Any) -> dict[str, Any]:
             f"{service}: profile fields must be exactly {sorted(_PROFILE_FIELDS)}"
         )
     runtime = raw.get("runtime")
-    if runtime not in {"node", "python"}:
+    if runtime not in {"node", "python", "go"}:
         raise QualityProfileError(f"{service}: unsupported runtime {runtime!r}")
     _relative_directory(raw.get("working_directory"), service=service)
     threshold = raw.get("coverage_threshold")
@@ -111,6 +111,8 @@ def _validate_profile(service: str, raw: Any) -> dict[str, Any]:
         raise QualityProfileError(f"{service}: commands must be strings")
     required_commands = {"install", "tests", "lint", "typecheck"}
     required_commands.add("build" if runtime == "node" else "format")
+    if runtime == "go":
+        required_commands.add("build")
     if any(not commands[name].strip() for name in required_commands):
         raise QualityProfileError(f"{service}: required quality command is empty")
     extras = raw.get("extra")
@@ -157,6 +159,23 @@ def profile_document() -> dict[str, Any]:
         raise QualityProfileError("Unsupported quality profile schema")
     if not raw["profiles"]:
         raise QualityProfileError("Quality profile document is empty")
+    extension_path = path.with_name("release_quality_profiles.go.json")
+    if extension_path.is_file():
+        try:
+            extension = json.loads(extension_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise QualityProfileError("Unable to load Go quality extension") from exc
+        if (
+            not isinstance(extension, dict)
+            or set(extension) != {"schema_version", "profiles"}
+            or extension.get("schema_version") != 1
+            or not isinstance(extension.get("profiles"), dict)
+            or set(raw["profiles"]).intersection(extension["profiles"])
+        ):
+            raise QualityProfileError(
+                "Go quality extension is invalid or overrides a pinned profile"
+            )
+        raw["profiles"].update(extension["profiles"])
     profiles = {
         service: _validate_profile(service, profile)
         for service, profile in raw["profiles"].items()

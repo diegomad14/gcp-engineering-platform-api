@@ -105,6 +105,7 @@ class ReleaseOrchestratorConfig:
 
     enabled: bool = False
     private_executor_mode: str = "cloud_build"
+    github_first_services: tuple[str, ...] = ()
     execution_collection: str = "release_executions"
     circuit_collection: str = "executor_circuits"
     webhook_delivery_collection: str = "github_webhook_deliveries"
@@ -116,6 +117,7 @@ class ReleaseOrchestratorConfig:
     reconciler_service_account: str = ""
     quality_node_image: str = ""
     quality_python_image: str = ""
+    quality_go_image: str = ""
     release_planner_image: str = ""
     postgres_image: str = ""
     github_mode_variable: str = "ENG_PLATFORM_CI_EXECUTOR"
@@ -418,6 +420,13 @@ def load_config() -> PlatformConfig:
         private_executor_mode=os.getenv(
             "ENG_PLATFORM_PRIVATE_EXECUTOR_MODE", "cloud_build"
         ).strip(),
+        github_first_services=tuple(
+            service.strip()
+            for service in os.getenv("ENG_PLATFORM_GITHUB_FIRST_SERVICES", "").split(
+                ","
+            )
+            if service.strip()
+        ),
         enabled=os.getenv("ENG_PLATFORM_RELEASE_ORCHESTRATOR_ENABLED", "false").lower()
         == "true",
         execution_collection=os.getenv(
@@ -460,6 +469,7 @@ def load_config() -> PlatformConfig:
         ).strip(),
         quality_node_image=os.getenv("ENG_PLATFORM_QUALITY_NODE_IMAGE", "").strip(),
         quality_python_image=os.getenv("ENG_PLATFORM_QUALITY_PYTHON_IMAGE", "").strip(),
+        quality_go_image=os.getenv("ENG_PLATFORM_QUALITY_GO_IMAGE", "").strip(),
         release_planner_image=_effective_release_planner_image(
             os.getenv("ENG_PLATFORM_RELEASE_PLANNER_IMAGE", "")
         ),
@@ -571,6 +581,10 @@ def load_config() -> PlatformConfig:
             raise ValueError("Cloud Build usage alert thresholds must be positive")
         if release_orchestrator.release_dispatch_timeout_seconds <= 0:
             raise ValueError("Release dispatch timeout must be positive")
+    if release_orchestrator.quality_go_image and not re.fullmatch(
+        r"[^\s]+@sha256:[0-9a-f]{64}", release_orchestrator.quality_go_image
+    ):
+        raise ValueError("Go quality executor image must be pinned by digest")
     paired_web_sha = release_orchestrator.artemis_web_sha
     if paired_web_sha and not re.fullmatch(r"[0-9a-f]{40}", paired_web_sha):
         raise ValueError("The paired Artemis Web SHA must be a full commit SHA")

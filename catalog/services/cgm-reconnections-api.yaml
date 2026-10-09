@@ -1,0 +1,36 @@
+# Reviewed proposal; append to the pinned private runtime catalog during onboarding.
+service_name: cgm-reconnections-api
+management_mode: managed
+repository: diegomad14/cgm-reconnections-api
+owner: cgm
+cost_center: cgm
+project_id: cgm-reconnections-prod
+region: us-central1
+environment: prod
+release_model: managed-release
+release_policy: oss-v2
+deployment:
+  executor: auto
+  enabled: true
+  workflow_file: platform-deploy.yml
+  image_name: cgm-reconnections-api
+  artifact_repository: cgm-reconnections-repo
+  build_context: .
+  dockerfile_path: Dockerfile
+  runtime_kind: cloud_run_service
+  private_runtime: false
+  health_path: /healthz
+quality:
+  enabled: true
+  profile: go
+  coverage_threshold: 80
+  policy_version: oss-v2
+  differential_threshold: 80
+finops:
+  service: cgm-reconnections-api
+  env: prod
+  owner: cgm
+  cost_center: cgm
+logs:
+  enabled: false
+  allowed_logins: []

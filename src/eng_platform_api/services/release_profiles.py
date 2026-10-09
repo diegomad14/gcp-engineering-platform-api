@@ -57,6 +57,7 @@ _PROFILES: dict[str, ReleaseProfile] = {
     "eng-platform-web": ReleaseProfile(
         "eng-platform-web", 1800, build_args=(("APP_VERSION", "{tag}"),)
     ),
+    "cgm-reconnections-api": ReleaseProfile("cgm-reconnections-api", 1800),
     "communications-ms": ReleaseProfile(
         "communications-ms", 1800, candidate_update_strategy="overwrite"
     ),

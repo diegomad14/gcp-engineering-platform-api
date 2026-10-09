@@ -17,7 +17,7 @@ class ValidationTarget(BaseModel):
 
 class ServiceQualityConfig(BaseModel):
     enabled: bool = False
-    profile: Literal["python", "node", "static"] | None = None
+    profile: Literal["python", "node", "go", "static"] | None = None
     coverage_threshold: float = 70.0
     policy_version: str = "oss-v2"
     differential_threshold: float = 80.0
@@ -370,7 +370,7 @@ class QualityReportCreate(BaseModel):
     repository: str = Field(min_length=1, max_length=256)
     commit_sha: str = Field(min_length=7, max_length=64, pattern=r"^[0-9a-fA-F]+$")
     branch: str = ""
-    profile: Literal["python", "node", "static"]
+    profile: Literal["python", "node", "go", "static"]
     workflow_run_url: str = ""
     generated_at: str
     coverage: float | None = Field(default=None, ge=0, le=100)

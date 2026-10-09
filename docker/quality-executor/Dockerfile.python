@@ -33,7 +33,7 @@ RUN --mount=type=secret,id=build-ca-bundle,required=false,mode=0444 \
         "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
         | tar -xz -C /usr/local/bin actionlint
 
-COPY scripts/quality/quality_gate.py scripts/quality/differential_coverage.py /opt/eng-platform/
+COPY scripts/quality/quality_gate.py scripts/quality/differential_coverage.py scripts/quality/go_coverage.py /opt/eng-platform/
 COPY docker/quality-executor/trivyignore.yaml /opt/eng-platform/trivyignore.yaml
 COPY docker/quality-executor/quality_executor.py docker/quality-executor/quality_profiles.py docker/quality-executor/untrusted_command.py docker/quality-executor/trusted_scanner.py docker/quality-executor/trusted_scanner.sh docker/quality-executor/api_container_smoke.sh docker/quality-executor/test_quality_executor.py /opt/eng-platform/
 COPY docker/quality-executor/smarti_pg.py docker/quality-executor/test_smarti_pg.py /opt/eng-platform/

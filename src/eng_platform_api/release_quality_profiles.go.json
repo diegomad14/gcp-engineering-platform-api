@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "cgm-reconnections-api": {
+      "runtime": "go",
+      "working_directory": ".",
+      "coverage_threshold": 80,
+      "timeout_seconds": 1800,
+      "postgres": false,
+      "container_smoke": false,
+      "commands": {
+        "install": "go mod download && go mod verify",
+        "tests": "go test -race -count=1 -covermode=atomic -coverpkg=./... -coverprofile=quality-reports/coverage.out ./...",
+        "build": "go build ./...",
+        "lint": "go vet ./...",
+        "format": "test -z \"$(git ls-files -z '*.go' | xargs -0 -r gofmt -l)\"",
+        "typecheck": "go test -run=^$ ./..."
+      },
+      "extra": []
+    }
+  }
+}

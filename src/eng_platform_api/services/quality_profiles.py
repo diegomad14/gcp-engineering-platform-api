@@ -17,6 +17,19 @@ def _load_document() -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if value.get("schema_version") != 1 or not isinstance(value.get("profiles"), dict):
         raise RuntimeError("Release quality profile document is invalid")
+    extension_path = path.with_name("release_quality_profiles.go.json")
+    extension = json.loads(extension_path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(extension, dict)
+        or set(extension) != {"schema_version", "profiles"}
+        or extension.get("schema_version") != 1
+        or not isinstance(extension.get("profiles"), dict)
+        or set(value["profiles"]).intersection(extension["profiles"])
+    ):
+        raise RuntimeError(
+            "Go quality extension is invalid or overrides a pinned profile"
+        )
+    value["profiles"].update(extension["profiles"])
     return value
 
 
@@ -98,6 +111,8 @@ def executor_image(profile: QualityProfile) -> str:
     image = (
         config.release_orchestrator.quality_node_image
         if profile.runtime == "node"
+        else config.release_orchestrator.quality_go_image
+        if profile.runtime == "go"
         else config.release_orchestrator.quality_python_image
     )
     if "@sha256:" not in image:
