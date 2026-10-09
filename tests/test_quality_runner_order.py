@@ -256,7 +256,36 @@ def test_test_errors_missing_report_and_low_coverage_remain_blocking(gate, setti
     assert status == 1
     assert gate.order() == list(PYTHON_ORDER)
     assert checks(report)["tests"]["status"] == "FAILED"
+    assert report["base_sha"] == gate.base
     assert eligibility_errors(report)
+
+
+@pytest.mark.parametrize("profile", ["python", "go"])
+def test_failed_differential_retains_authorized_identity(gate, monkeypatch, profile):
+    def unavailable(*_args):
+        raise ValueError("Native Go coverage has no executable statement evidence")
+
+    monkeypatch.setattr(gate.runner, "differential", unavailable)
+    monkeypatch.setattr(gate.runner, "go_coverage", unavailable)
+    status, report = gate.execute(profile=profile)
+    assert status == 1
+    assert report["base_sha"] == gate.base
+    assert report["commit_sha"] == gate.head
+    assert report["policy_version"] == "oss-v2"
+    assert checks(report)["differential_coverage"]["status"] == "FAILED"
+    assert eligibility_errors(report)
+    directory = Path(__file__).parents[1] / "docker/quality-executor"
+    monkeypatch.syspath_prepend(str(directory))
+    executor = load_module(
+        "failed_identity_executor", directory / "quality_executor.py"
+    )
+    identity = {
+        "service_name": "test-api",
+        "repository": "test/api",
+        "head_sha": gate.head,
+        "base_sha": gate.base,
+    }
+    assert len(executor._validate_report(report, identity, {"runtime": profile})) == 64
 
 
 @pytest.mark.parametrize("profile", ["node", "static"])

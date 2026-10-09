@@ -495,12 +495,16 @@ def main() -> int:
                 f"Coverage {coverage}% is below {args.coverage_threshold}%."
             )
 
-    differential_fields = {"policy_version": "oss-v2"}
+    # A failed coverage calculation still belongs to the authorized base/head.
+    # Keep that identity so the supervisor can publish FAILED evidence instead
+    # of rejecting the report and leaving the execution without a manifest.
+    differential_fields = {"policy_version": "oss-v2", "base_sha": args.base_sha}
     if args.profile != "static":
         try:
             event_path = os.environ.get("GITHUB_EVENT_PATH")
             event = json.loads(Path(event_path).read_text()) if event_path else {}
             base = resolve_base(cwd, args.commit_sha, event, args.base_sha)
+            differential_fields["base_sha"] = base
             if preflight_failure:
                 differential_fields.update(
                     base_sha=base,

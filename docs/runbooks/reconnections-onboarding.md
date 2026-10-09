@@ -24,6 +24,22 @@ Controller and engine profile hashes must agree before processing this service.
 Go profiles are additive in `release_quality_profiles.go.json`; the reviewed
 primary manifest, existing per-service hashes and bundle image pins stay intact.
 
+Go's compiled test programs need an executable filesystem. The supervisor uses
+only `.go-temporary` beneath the existing output volume for `GOTMPDIR`; `/tmp`
+keeps its existing noexec policy. The volume parent remains root-owned without
+repository write permission, its temporary child is private to UID 65532, and
+sealed reports remain outside that child. After repository processes stop, the
+supervisor removes only this child without following symlinks. Cleanup failures
+invalidate the publishable manifest. Publish Release Tooling runs native race
+tests against these real Linux mounts and verifies evidence cannot be replaced
+before publishing Go's digest. Existing transport callers require no migration.
+
+An execution's executor digest is immutable. Updating the server's Go image pin
+does not change a previously reserved SHA's execution during a workflow rerun.
+Reserve fresh quality through the next genuine PR push, or reopen the unchanged
+PR after coordinated image maintenance; the canonical PR event includes the new
+digest in its execution fingerprint. Preserve previous records and gates.
+
 The private default remains Cloud Build for existing repositories. Add only
 `cgm-reconnections-api` to `ENG_PLATFORM_GITHUB_FIRST_SERVICES` for GitHub-first
 quality, SemVer publication and deployment with verified billing fallback.

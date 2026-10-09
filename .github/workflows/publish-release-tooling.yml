@@ -61,6 +61,9 @@ jobs:
             if [[ "$name" == quality-python ]]; then
               python3 docker/quality-executor/smoke_python_isolation.py "$tag"
             fi
+            if [[ "$name" == quality-go ]]; then
+              python3 docker/quality-executor/smoke_go_isolation.py "$tag"
+            fi
             if [[ "$name" == eng-platform-release-executor ]]; then
               docker run --rm --entrypoint /usr/bin/python3 "$tag" \
                 -c 'import runpy, yaml; runpy.run_path("/opt/eng-platform/release_executor.py")'
