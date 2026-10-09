@@ -68,6 +68,14 @@ def test_only_failed_runs_can_be_billing_rejections(monkeypatch, conclusion):
     annotation.assert_not_called()
 
 
+@pytest.fixture(autouse=True)
+def automatic_executor_policy(monkeypatch):
+    """These regression cases exercise the retained billing-only auto mode."""
+    monkeypatch.setattr(
+        orchestrator.config.release_orchestrator, "private_executor_mode", "auto"
+    )
+
+
 def _annotation_run(monkeypatch, *, steps, message):
     requester = mock.Mock()
     requester.requestJsonAndCheck.return_value = (None, [{"message": message}])

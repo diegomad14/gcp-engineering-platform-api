@@ -1,9 +1,19 @@
 from datetime import datetime, timezone
 from unittest import mock
 
+import pytest
+
 from eng_platform_api.models import DeploymentItem
 from eng_platform_api.services import github_actions_quota as quota
 from eng_platform_api.services import github_deployments
+
+
+@pytest.fixture(autouse=True)
+def automatic_executor_policy(monkeypatch):
+    """These regression cases exercise the retained billing-only auto mode."""
+    monkeypatch.setattr(
+        quota.config.release_orchestrator, "private_executor_mode", "auto"
+    )
 
 
 def test_artemis_cloud_build_only_policy_is_backend_owned(monkeypatch):

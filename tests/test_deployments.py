@@ -19,7 +19,8 @@ tmp_store = Path(tempfile.mkdtemp(prefix="deployments_test_")) / "deployments.js
 
 
 @pytest.fixture(autouse=True)
-def isolated_store():
+def isolated_store(monkeypatch):
+    monkeypatch.setattr(config.release_orchestrator, "private_executor_mode", "auto")
     private_key = (
         Ed25519PrivateKey.generate()
         .private_bytes(

@@ -48,6 +48,14 @@ def propagation(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def automatic_executor_policy(monkeypatch):
+    """These regression cases exercise the retained billing-only auto mode."""
+    monkeypatch.setattr(
+        orchestrator.config.release_orchestrator, "private_executor_mode", "auto"
+    )
+
+
 def _open():
     orchestrator._open_circuit(
         repository=REPOSITORY,
