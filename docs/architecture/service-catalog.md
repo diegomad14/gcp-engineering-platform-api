@@ -101,3 +101,21 @@ Public metadata endpoints are `GET /api/catalog/services` and
 `GET /api/catalog/services/{service_name}`. Managed detail may enrich metadata with
 best-effort Cloud Run state; observation-only detail remains metadata only. Log reader lists stay private. Catalog files must
 never contain credentials, tokens, customer data or secret values.
+
+## Auxiliary infrastructure references
+
+Managed entries may include `infrastructure_resources`, a bounded list of typed
+GCP identity metadata with `resource_type`, `resource_name` and optional
+`description`. Supported kinds are Firestore databases, GCS buckets, Cloud Tasks
+queues, Scheduler jobs, Artifact Registry repositories, Secret Manager secrets
+and Billing budgets. Secret references contain names only; operational secret
+bindings remain in `operational_secrets`.
+
+These references describe dependencies of one managed Service/Job. They are not
+additional catalog services, deployment targets, log authorities, readiness
+checks, cloud discovery or permission grants. Existing Cloud Run coordinates and
+reader policies alone continue to define those capabilities. Observation-only
+entries cannot carry managed auxiliary references. Omitted or empty references
+preserve existing API payloads and authority fingerprints; nonempty references
+are returned as metadata without querying GCP. Actual resource existence and
+ownership must be verified during the separate infrastructure review.

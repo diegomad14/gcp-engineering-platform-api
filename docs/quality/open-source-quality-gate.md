@@ -18,7 +18,9 @@ pushes. Manual reruns must preserve the original base SHA. No executable changes
 produce N/A, never a fabricated 100%. Missing or incomplete coverage fails.
 `.quality-sources.json` lists source roots and justified exclusions relative to
 the service working directory. Instrument the entire source set, including
-unimported files. Detailed Python JSON or LCOV is required.
+unimported files. Detailed Python JSON, LCOV or native Go coverprofile is required. Go profiles
+use atomic statement coverage over every package; changed-line evidence counts
+trusted syntax statement starts, excluding comments and declarations.
 
 ## Evidence and release
 

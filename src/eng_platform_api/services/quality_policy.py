@@ -49,7 +49,13 @@ def policy_errors(
             errors.append("Report timestamp is in the future")
     except (ValueError, TypeError):
         errors.append("Invalid report timestamp")
-    required = _REQUIRED | ({"format"} if report.profile == "python" else {"build"})
+    required = _REQUIRED | (
+        {"format", "build"}
+        if report.profile == "go"
+        else {"format"}
+        if report.profile == "python"
+        else {"build"}
+    )
     if report.profile == "static":
         required -= {"tests", "typecheck"}
     checks = {check.category: check for check in report.checks}

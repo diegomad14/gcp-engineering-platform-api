@@ -24,7 +24,7 @@ RUN npm exec --yes --package=playwright@${PLAYWRIGHT_VERSION} -- playwright inst
     && find "${PLAYWRIGHT_BROWSERS_PATH}" -type f -exec chmod a+r,a-w {} + \
     && rm -rf /root/.npm /var/lib/apt/lists/*
 
-COPY scripts/quality/quality_gate.py scripts/quality/differential_coverage.py /opt/eng-platform/
+COPY scripts/quality/quality_gate.py scripts/quality/differential_coverage.py scripts/quality/go_coverage.py /opt/eng-platform/
 COPY docker/quality-executor/trivyignore.yaml /opt/eng-platform/trivyignore.yaml
 COPY docker/quality-executor/quality_executor.py docker/quality-executor/quality_profiles.py docker/quality-executor/untrusted_command.py docker/quality-executor/trusted_scanner.py docker/quality-executor/trusted_scanner.sh docker/quality-executor/test_quality_executor.py /opt/eng-platform/
 COPY docker/quality-executor/smarti_ux.py docker/quality-executor/test_smarti_ux.py docker/quality-executor/smarti_pg.py docker/quality-executor/test_smarti_pg.py /opt/eng-platform/

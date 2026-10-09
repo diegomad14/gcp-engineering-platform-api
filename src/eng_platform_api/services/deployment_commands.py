@@ -183,7 +183,7 @@ def start_cloud_build(service, item: DeploymentItem, *, reason: str) -> Deployme
 
 
 def _cloud_build_preflight_reason(service) -> str:
-    if config.release_orchestrator.private_executor_mode == "cloud_build":
+    if github_actions_quota.explicit_private_policy(service.service_name):
         return "explicit_executor_policy"
     owner = config.github.billing_owner or service.repository.split("/", 1)[0]
     if executor_circuits.is_open(owner):

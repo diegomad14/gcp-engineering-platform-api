@@ -480,6 +480,15 @@ def _child_environment(
         "ENG_PLATFORM_RELEASE_HEAD_SHA": identity["head_sha"],
         "ENG_PLATFORM_RELEASE_BASE_SHA": identity["base_sha"],
     }
+    if profile["runtime"] == "go":
+        environment.update(
+            {
+                "GOTOOLCHAIN": "local",
+                "GOCACHE": str(home / ".cache" / "go-build"),
+                "GOMODCACHE": str(home / "go" / "pkg" / "mod"),
+                "GOPATH": str(home / "go"),
+            }
+        )
     if checkout is not None and git_directory is not None:
         environment["GIT_DIR"] = str(git_directory)
         environment["GIT_WORK_TREE"] = str(checkout)

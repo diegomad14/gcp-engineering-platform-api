@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from differential_coverage import differential, resolve_base
+from go_coverage import go_coverage
 
 
 def _extra_checks(value: str) -> list[dict[str, Any]]:
@@ -256,6 +257,17 @@ def _defaults(
             "format": "ruff format --check .",
             "typecheck": "python -m compileall -q .",
         }
+    if profile == "go":
+        return {
+            **common,
+            "install": "go mod download && go mod verify",
+            "tests": "go test -race -count=1 -covermode=atomic -coverpkg=./... "
+            + f"-coverprofile={shlex.quote(str(report_dir / 'coverage.out'))} ./...",
+            "build": "go build ./...",
+            "lint": "go vet ./...",
+            "format": "test -z \"$(git ls-files -z '*.go' | xargs -0 -r gofmt -l)\"",
+            "typecheck": "go test -run=^$ ./...",
+        }
     if profile == "node":
         return {
             **common,
@@ -287,7 +299,7 @@ def main() -> int:
     parser.add_argument("--commit-sha", required=True)
     parser.add_argument("--branch", default="")
     parser.add_argument(
-        "--profile", choices=("python", "node", "static"), required=True
+        "--profile", choices=("python", "node", "go", "static"), required=True
     )
     parser.add_argument("--working-directory", default=".")
     parser.add_argument("--workflow-run-url", default="")
@@ -375,13 +387,29 @@ def main() -> int:
                 continue
         raw[name] = _run(command, cwd, report_dir / f"{name}.log")
 
-    coverage_file = report_dir / "coverage.json"
+    coverage_file = report_dir / (
+        "coverage.out" if args.profile == "go" else "coverage.json"
+    )
     ruff_file = report_dir / "ruff.json"
     eslint_file = report_dir / "eslint.json"
     semgrep_file = report_dir / "semgrep.json"
     trivy_file = report_dir / "trivy.json"
     coverage = None if preflight_failure else _coverage(coverage_file)
-    if coverage is None and not preflight_failure:
+    if args.profile == "go":
+        try:
+            coverage = go_coverage(
+                report_dir / "coverage.out",
+                cwd,
+                Path(
+                    subprocess.check_output(
+                        ["git", "rev-parse", "--show-toplevel"], cwd=cwd, text=True
+                    ).strip()
+                ),
+            )[0]
+        except (ValueError, OSError, subprocess.SubprocessError, KeyError) as exc:
+            print(f"Native Go coverage unavailable: {exc}")
+            coverage = None
+    elif coverage is None and not preflight_failure:
         coverage = _coverage(report_dir / "coverage-summary.json")
     lint_findings = _count_list_report(ruff_file)
     if eslint_file.exists():
@@ -560,6 +588,7 @@ def main() -> int:
             "ruff": _version("ruff --version", cwd),
             "semgrep": _version("semgrep --version", cwd),
             "trivy": _version("trivy --version", cwd),
+            "go": _version("go version", cwd) if args.profile == "go" else "not-used",
             "node": _version("node --version", cwd)
             if args.profile in {"node", "static"}
             else "not-used",

@@ -169,7 +169,7 @@ def _provider(service: CatalogService) -> str:
     try:
         private = github_release_control.repository_is_private(service.repository)
     except Exception as exc:
-        if config.release_orchestrator.private_executor_mode == "cloud_build":
+        if github_actions_quota.explicit_private_policy(service.service_name):
             raise ReleaseOrchestratorError(
                 "Cannot verify repository visibility for explicit Cloud Build policy"
             ) from exc
@@ -181,7 +181,12 @@ def _provider(service: CatalogService) -> str:
         return "github_actions"
     if not private:
         return "github_actions"
-    if config.release_orchestrator.private_executor_mode == "cloud_build":
+    if (
+        service.deployment.executor == "cloud_build"
+        or service.service_name in config.cloud_build.cloud_build_only_services
+    ):
+        return "cloud_build"
+    if github_actions_quota.explicit_private_policy(service.service_name):
         # Explicit operator policy is independent of the billing circuit.
         # Reservation keeps any existing execution on its original provider.
         return "cloud_build"

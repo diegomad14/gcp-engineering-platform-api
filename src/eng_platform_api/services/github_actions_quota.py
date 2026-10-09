@@ -136,6 +136,14 @@ def deployment_fallback_enabled(service_name: str) -> bool:
     )
 
 
+def explicit_private_policy(service_name: str) -> bool:
+    """A backend-owned exception changes only the default private policy."""
+    return (
+        config.release_orchestrator.private_executor_mode == "cloud_build"
+        and service_name not in config.release_orchestrator.github_first_services
+    )
+
+
 def should_use_cloud_build(service_name: str, repository: str) -> bool:
     """Honor explicit policy; automatic fallback still requires rejection."""
     service = catalog.get_service(service_name)
@@ -157,7 +165,7 @@ def should_use_cloud_build(service_name: str, repository: str) -> bool:
         if not bool(getattr(github_client().get_repo(repository), "private", False)):
             return False
     except Exception as exc:
-        if config.release_orchestrator.private_executor_mode == "cloud_build":
+        if explicit_private_policy(service_name):
             raise executor_circuits.CircuitRecoveryRequired(
                 "Cannot verify repository visibility for explicit Cloud Build policy"
             ) from exc
@@ -169,7 +177,7 @@ def should_use_cloud_build(service_name: str, repository: str) -> bool:
             ) from exc
         return False
 
-    if config.release_orchestrator.private_executor_mode == "cloud_build":
+    if explicit_private_policy(service_name):
         return True
 
     owner = config.github.billing_owner or repository.split("/", 1)[0]

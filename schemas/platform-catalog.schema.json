@@ -189,6 +189,7 @@
               "enum": [
                 "python",
                 "node",
+                "go",
                 "static"
               ],
               "type": "string"
@@ -317,6 +318,14 @@
           "title": "Operational Secrets",
           "type": "array"
         },
+        "infrastructure_resources": {
+          "items": {
+            "$ref": "#/$defs/InfrastructureResource"
+          },
+          "maxItems": 256,
+          "title": "Infrastructure Resources",
+          "type": "array"
+        },
         "logs": {
           "$ref": "#/$defs/LogPolicy"
         }
@@ -354,6 +363,44 @@
         "name"
       ],
       "title": "CatalogValidationTarget",
+      "type": "object"
+    },
+    "InfrastructureResource": {
+      "additionalProperties": false,
+      "description": "Auxiliary GCP identity metadata; never deployment or log authority.",
+      "properties": {
+        "resource_type": {
+          "enum": [
+            "firestore_database",
+            "gcs_bucket",
+            "cloud_tasks_queue",
+            "cloud_scheduler_job",
+            "artifact_registry_repository",
+            "secret_manager_secret",
+            "billing_budget"
+          ],
+          "title": "Resource Type",
+          "type": "string"
+        },
+        "resource_name": {
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^\\S+$",
+          "title": "Resource Name",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 1024,
+          "title": "Description",
+          "type": "string"
+        }
+      },
+      "required": [
+        "resource_type",
+        "resource_name"
+      ],
+      "title": "InfrastructureResource",
       "type": "object"
     },
     "LogPolicy": {

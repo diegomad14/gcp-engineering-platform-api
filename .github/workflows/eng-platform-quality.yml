@@ -51,8 +51,8 @@ jobs:
 
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
         with:
-          workload_identity_provider: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
-          service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ vars.GCP_QUALITY_WIF_PROVIDER || vars.GCP_RELEASE_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_QUALITY_WIF_SERVICE_ACCOUNT || vars.GCP_WIF_SERVICE_ACCOUNT }}
 
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f
 
@@ -82,17 +82,27 @@ jobs:
           SOURCE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
           BASE_SHA: ${{ steps.execution.outputs.base_sha }}
+          SOURCE_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [[ "$SOURCE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
           export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_LFS_SKIP_SMUDGE=1
+          test -n "$SOURCE_TOKEN"
+          authorization="$(printf 'x-access-token:%s' "$SOURCE_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::$authorization"
+          export GIT_CONFIG_COUNT=2
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraHeader
+          export GIT_CONFIG_VALUE_0="Authorization: Basic $authorization"
+          export GIT_CONFIG_KEY_1=http.followRedirects GIT_CONFIG_VALUE_1=false
+          trap 'unset SOURCE_TOKEN authorization GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1' EXIT
           git init --quiet "$GITHUB_WORKSPACE"
           git -C "$GITHUB_WORKSPACE" fetch --quiet --no-tags \
             "https://github.com/${SOURCE_REPOSITORY}.git" "$SOURCE_SHA"
           git -C "$GITHUB_WORKSPACE" fetch --quiet --no-tags \
             "https://github.com/${GITHUB_REPOSITORY}.git" "$BASE_SHA"
+          unset SOURCE_TOKEN authorization GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1
           git -C "$GITHUB_WORKSPACE" -c filter.lfs.smudge= \
             -c filter.lfs.required=false checkout --quiet --detach "$SOURCE_SHA"
           test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$SOURCE_SHA"

@@ -8,6 +8,7 @@ import re
 import subprocess
 from pathlib import Path
 
+
 POLICY_VERSION = "oss-v2"
 
 
@@ -169,8 +170,13 @@ def differential(
     roots, excludes = config["roots"], config.get("exclude", [])
     if not roots:
         raise ValueError("Coverage source roots are required")
+    if profile == "go":
+        from go_coverage import go_coverage
+
     coverage = (
-        line_coverage(report_dir / "coverage.json", cwd, root)
+        go_coverage(report_dir / "coverage.out", cwd, root)[1]
+        if profile == "go"
+        else line_coverage(report_dir / "coverage.json", cwd, root)
         if profile == "python"
         else lcov_coverage(report_dir / "lcov.info", cwd, root)
     )
@@ -183,7 +189,11 @@ def differential(
         except ValueError:
             continue
         if path.suffix not in (
-            {".py"} if profile == "python" else {".js", ".jsx", ".ts", ".tsx"}
+            {".py"}
+            if profile == "python"
+            else {".go"}
+            if profile == "go"
+            else {".js", ".jsx", ".ts", ".tsx"}
         ):
             continue
         if not any(local == p or local.startswith(p.rstrip("/") + "/") for p in roots):

@@ -13,6 +13,7 @@ on:
           - release-executor
           - release-planner
           - quality-python
+          - quality-go
           - quality
           - all
 
@@ -78,6 +79,9 @@ jobs:
           if [[ "$COMPONENT" == all || "$COMPONENT" == quality || \
                 "$COMPONENT" == quality-python ]]; then
             build_and_push quality-python docker/quality-executor/Dockerfile.python
+          fi
+          if [[ "$COMPONENT" == all || "$COMPONENT" == quality || "$COMPONENT" == quality-go ]]; then
+            build_and_push quality-go docker/quality-executor/Dockerfile.go
           fi
           if [[ "$COMPONENT" == all || "$COMPONENT" == quality ]]; then
             build_and_push quality-node docker/quality-executor/Dockerfile.node
