@@ -70,3 +70,31 @@ def test_failed_python_smoke_stops_publisher_before_push(tmp_path):
     )
     assert "python3 docker/quality-executor/smoke_python_isolation.py" in executed
     assert "docker push" not in executed
+
+
+def test_go_supervisor_root_exception_is_path_scoped_in_both_trivy_policies():
+    """Root seals scanner evidence; repository commands still run as UID 65532."""
+    import yaml
+
+    root = Path(__file__).parents[1]
+    for name in (".trivyignore.yaml", "docker/quality-executor/trivyignore.yaml"):
+        policy = yaml.safe_load((root / name).read_text())
+        rows = [
+            row
+            for row in policy["misconfigurations"]
+            if "docker/quality-executor/Dockerfile.go" in row["paths"]
+        ]
+        assert len(rows) == 1
+        assert rows[0]["id"] == "AVD-DS-0002"
+        assert set(rows[0]["paths"]) == {
+            "docker/quality-executor/Dockerfile.python",
+            "docker/quality-executor/Dockerfile.node",
+            "docker/quality-executor/Dockerfile.go",
+        }
+        assert "UID 65532" in rows[0]["statement"]
+        assert "read-only" in rows[0]["statement"]
+    dockerfile = (root / "docker/quality-executor/Dockerfile.go").read_text()
+    assert (
+        'ENTRYPOINT ["python3", "/opt/eng-platform/quality_executor.py"]' in dockerfile
+    )
+    assert "chmod 0444" in dockerfile and "trivyignore.yaml" in dockerfile

@@ -5,6 +5,7 @@ misconfigurations:
     paths:
       - docker/quality-executor/Dockerfile.python
       - docker/quality-executor/Dockerfile.node
+      - docker/quality-executor/Dockerfile.go
     statement: >-
       Pinned quality-supervisor images require root to seal scanner output
       and launch PR commands as UID 65532. They run read-only, cap-limited,

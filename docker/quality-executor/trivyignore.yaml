@@ -3,6 +3,7 @@ misconfigurations:
     paths:
       - docker/quality-executor/Dockerfile.python
       - docker/quality-executor/Dockerfile.node
+      - docker/quality-executor/Dockerfile.go
     statement: >-
       These pinned quality-supervisor images require root only to seal scanner
       results and drop untrusted subprocesses to UID 65532. Runtime containers
