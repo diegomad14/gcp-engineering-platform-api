@@ -59,12 +59,15 @@ jobs:
           routing_update="$(cat "$RUNNER_TEMP/github-routing-update.txt")"
           if [ -n "$routing_update" ]; then
             gcloud run services update eng-platform-api --project "$PROJECT_ID" --region "$REGION" --update-env-vars "$routing_update" --quiet
+            gcloud run services update-traffic eng-platform-api --project "$PROJECT_ID" --region "$REGION" --to-latest --quiet
           fi
           gcloud run services describe eng-platform-api --project "$PROJECT_ID" --region "$REGION" --format=json > "$RUNNER_TEMP/platform-runtime-verified.json"
           python3 - <<'PY'
           import json, os
           from pathlib import Path
           document = json.loads((Path(os.environ['RUNNER_TEMP']) / 'platform-runtime-verified.json').read_text())
+          if not any(row.get('percent') == 100 and row.get('revisionName') == document['status']['latestReadyRevisionName'] for row in document['status'].get('traffic', [])):
+              raise SystemExit('GitHub-only routing revision is not serving all traffic')
           values = {row['name']: row.get('value', '') for row in document['spec']['template']['spec']['containers'][0].get('env', [])}
           targets = {'eng-platform-api', 'eng-platform-web'}
           for key in ('ENG_PLATFORM_CLOUD_BUILD_ENABLED_SERVICES', 'ENG_PLATFORM_CLOUD_BUILD_ONLY_SERVICES', 'ENG_PLATFORM_RELEASE_ENABLED_SERVICES', 'ENG_PLATFORM_RELEASE_CANARY_SERVICES'):
