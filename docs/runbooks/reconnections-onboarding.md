@@ -83,7 +83,16 @@ catalog separately from any example file. Preserve oss-v2 coverage 80% global an
 ## Dedicated infrastructure
 
 Use `cgm-reconnections-prod`, `us-central1`, registry `cgm-reconnections-repo`,
-Cloud Run service `cgm-reconnections-api` and health `/healthz`. Bootstrap runtime
+Cloud Run service `cgm-reconnections-api` and public health `/health`. The service
+retains `/healthz` for internal container checks. Cloud Run reserves some paths
+ending in `z`; see [reserved URL paths](https://docs.cloud.google.com/run/docs/known-issues#reserved-url-paths).
+The existing release executor reads the health path from the catalog through
+`CGM_HEALTH_PATH`; updating this service's reviewed private catalog entry and
+controller catalog pin preserves the Go release profile fingerprint
+`0cfb01e76b2d9521ec549ff2d8f1efa4a558b4dc603d1d98517a07009af88a7d`
+and requires no executor rebuild or API code change. Existing queued deployments
+retain their dispatched health path; use a new managed deployment after the
+catalog update. Bootstrap runtime
 IAM, Firestore, Storage, Tasks, Scheduler and secret bindings via the service's
 Terraform. The platform executor uses `gcloud run services update`; it requires
 a baseline Cloud Run resource with approved runtime configuration. First artifact

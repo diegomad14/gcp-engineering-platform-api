@@ -19,7 +19,7 @@ deployment:
   dockerfile_path: Dockerfile
   runtime_kind: cloud_run_service
   private_runtime: false
-  health_path: /healthz
+  health_path: /health
 quality:
   enabled: true
   profile: go
