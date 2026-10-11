@@ -65,6 +65,31 @@ def _cloud_build_only_services(row: object) -> frozenset[str]:
     return frozenset(services)
 
 
+ENABLED_SERVICES_ENV = "ENG_PLATFORM_CLOUD_BUILD_ENABLED_SERVICES"
+GITHUB_ONLY_PLATFORM_SERVICES = frozenset({"eng-platform-api", "eng-platform-web"})
+
+
+def _expected_routing(environment: list[dict]) -> frozenset[str]:
+    """Preserve an explicit GitHub-only enrollment without enabling fallback."""
+    desired = frozenset(CLOUD_BUILD_ONLY_SERVICES)
+    matches = [row for row in environment if row.get("name") == ENABLED_SERVICES_ENV]
+    if not matches:
+        return desired
+    if len(matches) != 1 or set(matches[0]) != {"name", "value"}:
+        raise ValueError("ambiguous Cloud Build enrollment")
+    value = matches[0]["value"]
+    if not isinstance(value, str):
+        raise ValueError("invalid Cloud Build enrollment")
+    names = value.split(",") if value else []
+    if len(names) != len(set(names)) or any(
+        not re.fullmatch(r"[a-z][a-z0-9-]*", name) for name in names
+    ):
+        raise ValueError("invalid Cloud Build enrollment")
+    if GITHUB_ONLY_PLATFORM_SERVICES.isdisjoint(names):
+        return desired - GITHUB_ONLY_PLATFORM_SERVICES
+    return desired
+
+
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for name, value in pairs:
@@ -172,9 +197,9 @@ def verify(project: str, region: str, revision: str) -> bool:
             if len(matches) != 1 or matches[0] != {"name": name, "value": value}:
                 return False
         routing = [item for item in env if item.get("name") == CLOUD_BUILD_ONLY_ENV]
-        return len(routing) == 1 and _cloud_build_only_services(routing[0]) == set(
-            CLOUD_BUILD_ONLY_SERVICES
-        )
+        return len(routing) == 1 and _cloud_build_only_services(
+            routing[0]
+        ) == _expected_routing(env)
     except (
         OSError,
         subprocess.SubprocessError,

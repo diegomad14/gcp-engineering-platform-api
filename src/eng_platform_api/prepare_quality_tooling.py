@@ -158,17 +158,22 @@ def prepare() -> bool:
         routing = candidate._cloud_build_only_services(
             environment.get(candidate.CLOUD_BUILD_ONLY_ENV)
         )
+        desired_routing = candidate._expected_routing(list(environment.values()))
         if routing not in (
             frozenset(candidate.BASELINE_CLOUD_BUILD_ONLY_SERVICES),
-            frozenset(candidate.CLOUD_BUILD_ONLY_SERVICES),
+            desired_routing,
         ):
             return False
         values = {
             **images,
             candidate.CLOUD_BUILD_ONLY_ENV: (
                 environment[candidate.CLOUD_BUILD_ONLY_ENV]["value"]
-                if routing == set(candidate.CLOUD_BUILD_ONLY_SERVICES)
-                else ",".join(candidate.CLOUD_BUILD_ONLY_SERVICES)
+                if routing == desired_routing
+                else ",".join(
+                    name
+                    for name in candidate.CLOUD_BUILD_ONLY_SERVICES
+                    if name in desired_routing
+                )
             ),
         }
         desired = {
