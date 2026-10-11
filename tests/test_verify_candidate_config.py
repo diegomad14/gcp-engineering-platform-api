@@ -540,3 +540,56 @@ def test_unloadable_source_validator_fails_before_cloud_query(capsys):
         run.assert_not_called()
     captured = capsys.readouterr()
     assert not captured.out + captured.err
+
+
+@pytest.mark.parametrize(
+    "enrolled", ["", "cgm-artemis-api", "eng-platform-api", "eng-platform-web"]
+)
+def test_candidate_respects_explicit_platform_executor_enrollment(enrolled):
+    expected = set(check.CLOUD_BUILD_ONLY_SERVICES)
+    if not check.GITHUB_ONLY_PLATFORM_SERVICES.intersection(enrolled.split(",")):
+        expected -= check.GITHUB_ONLY_PLATFORM_SERVICES
+    env = [
+        writer(),
+        *pins(),
+        {"name": check.ENABLED_SERVICES_ENV, "value": enrolled},
+        {"name": check.CLOUD_BUILD_ONLY_ENV, "value": ",".join(sorted(expected))},
+    ]
+    with mock.patch.object(check.subprocess, "run") as run:
+        run.return_value.stdout = json.dumps(response(env))
+        assert check.verify("project", "region", REVISION)
+        env[-1]["value"] += ",unexpected-service"
+        run.return_value.stdout = json.dumps(response(env))
+        assert not check.verify("project", "region", REVISION)
+
+
+@pytest.mark.parametrize("enrolled", ["eng-platform-api", "eng-platform-web"])
+def test_candidate_rejects_reduced_routing_while_platform_has_cloud_fallback(enrolled):
+    reduced = set(check.CLOUD_BUILD_ONLY_SERVICES) - check.GITHUB_ONLY_PLATFORM_SERVICES
+    env = [
+        writer(),
+        *pins(),
+        {"name": check.ENABLED_SERVICES_ENV, "value": enrolled},
+        {"name": check.CLOUD_BUILD_ONLY_ENV, "value": ",".join(sorted(reduced))},
+    ]
+    with mock.patch.object(check.subprocess, "run") as run:
+        run.return_value.stdout = json.dumps(response(env))
+        assert not check.verify("project", "region", REVISION)
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [{"name": check.ENABLED_SERVICES_ENV, "value": "other,other"}],
+        [{"name": check.ENABLED_SERVICES_ENV, "value": "other,"}],
+        [{"name": check.ENABLED_SERVICES_ENV, "value": 7}],
+        [{"name": check.ENABLED_SERVICES_ENV, "valueFrom": {"secretKeyRef": {}}}],
+        [{"name": check.ENABLED_SERVICES_ENV, "value": ""}] * 2,
+    ],
+)
+def test_candidate_rejects_ambiguous_executor_enrollment(rows):
+    with mock.patch.object(check.subprocess, "run") as run:
+        run.return_value.stdout = json.dumps(
+            response([writer(), *pins(), routing(), *rows])
+        )
+        assert not check.verify("project", "region", REVISION)

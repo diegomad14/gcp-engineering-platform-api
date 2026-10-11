@@ -730,3 +730,39 @@ def test_failed_preparation_exits_workflow_before_engine_or_cloud_auth(tmp_path)
     assert result.stdout == "Coordinated quality tooling preparation: FAIL\n"
     assert result.stderr == ""
     assert not (tmp_path / "engine-called").exists()
+
+
+@pytest.mark.parametrize("new_pins", [False, True])
+def test_preparation_preserves_explicit_github_only_platform_routing(new_pins):
+    before = service(new_pins=new_pins, new_routing=True)
+    after = staged()
+    reduced = [
+        name
+        for name in candidate.CLOUD_BUILD_ONLY_SERVICES
+        if name not in candidate.GITHUB_ONLY_PLATFORM_SERVICES
+    ]
+    for data in (before, after):
+        env = data["spec"]["template"]["spec"]["containers"][0]["env"]
+        env.append({"name": candidate.ENABLED_SERVICES_ENV, "value": "cgm-artemis-api"})
+        routing_row(data)["value"] = ",".join(reduced)
+    responses = [before] if new_pins else [before, {}, after]
+    with mock.patch.object(subject, "_cloud", side_effect=responses) as cloud:
+        assert subject.prepare()
+    assert cloud.call_count == len(responses)
+    if not new_pins:
+        update = cloud.call_args_list[1].args[0][-1]
+        assert "eng-platform-web" not in update
+        assert "eng-platform-api" not in update
+        assert candidate.ENABLED_SERVICES_ENV not in update
+    assert subject._configuration(before) == subject._configuration(after)
+    assert subject._traffic(before) == subject._traffic(after)
+
+
+def test_preparation_rejects_unknown_route_with_github_only_enrollment():
+    before = service(new_pins=True, new_routing=True)
+    env = before["spec"]["template"]["spec"]["containers"][0]["env"]
+    env.append({"name": candidate.ENABLED_SERVICES_ENV, "value": "cgm-artemis-api"})
+    routing_row(before)["value"] += ",unexpected-service"
+    with mock.patch.object(subject, "_cloud", return_value=before) as cloud:
+        assert not subject.prepare()
+    cloud.assert_called_once_with(["describe"])
