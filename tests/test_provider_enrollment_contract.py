@@ -45,6 +45,7 @@ def _environment(enrolled: set[str], *, cloud_build_enabled: bool) -> dict[str, 
         candidate.WRITER_ENV: candidate.EXPECTED_WRITER,
         candidate.ENABLED_SERVICES_ENV: ",".join(sorted(enrolled)),
         **candidate._tooling_images(),
+        candidate.ARTEMIS_WEB_ENV: candidate._paired_web_sha(),
     }
 
 

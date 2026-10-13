@@ -200,6 +200,10 @@ def test_platform_exact_candidate_guard_precedes_promotion(
     events, traffic = _setup_deploy(engine, monkeypatch, profile="eng-platform-api")
     monkeypatch.setattr(engine, "run_hooks", actual_hooks)
     rows = [
+        {
+            "name": candidate_check.ARTEMIS_WEB_ENV,
+            "value": candidate_check._paired_web_sha(),
+        },
         {"name": candidate_check.WRITER_ENV, "value": candidate_check.EXPECTED_WRITER},
         *[
             {"name": name, "value": value}
@@ -215,7 +219,7 @@ def test_platform_exact_candidate_guard_precedes_promotion(
         },
     ]
     if not correct_pins:
-        rows[1]["value"] = "PRIVATE-stale-pin"
+        rows[2]["value"] = "PRIVATE-stale-pin"
     provider_data = {
         "metadata": {"name": "new-revision"},
         "spec": {"containers": [{"env": rows}]},

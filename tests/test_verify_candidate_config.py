@@ -13,11 +13,10 @@ from eng_platform_api import verify_candidate_config as check
 REVISION = "eng-platform-api-00057-test"
 
 
-def response(env, revision=REVISION):
-    return {
-        "metadata": {"name": revision},
-        "spec": {"containers": [{"env": env}]},
-    }
+def response(env, revision=REVISION, include_pair=True):
+    if include_pair and isinstance(env, list):
+        env = [*env, {"name": check.ARTEMIS_WEB_ENV, "value": check._paired_web_sha()}]
+    return {"metadata": {"name": revision}, "spec": {"containers": [{"env": env}]}}
 
 
 def writer(value=check.EXPECTED_WRITER):
@@ -664,3 +663,56 @@ def test_readiness_transport_failure_and_redirect_fail_closed():
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        None,
+        {"name": check.ARTEMIS_WEB_ENV, "value": "a" * 40},
+        {
+            "name": check.ARTEMIS_WEB_ENV,
+            "valueFrom": {"secretKeyRef": {"name": "secret", "key": "latest"}},
+        },
+    ],
+)
+def test_candidate_rejects_absent_stale_or_nonliteral_artemis_web_pair(row):
+    data = response(
+        [writer(), *pins(), routing(), *([] if row is None else [row])],
+        include_pair=False,
+    )
+    with mock.patch.object(check.subprocess, "run") as run:
+        run.return_value.stdout = json.dumps(data)
+        assert not check.verify("project", "region", REVISION)
+
+
+def test_candidate_rejects_duplicate_artemis_pair():
+    data = response(
+        [
+            writer(),
+            *pins(),
+            routing(),
+            {"name": check.ARTEMIS_WEB_ENV, "value": check._paired_web_sha()},
+        ]
+    )
+    with mock.patch.object(check.subprocess, "run") as run:
+        run.return_value.stdout = json.dumps(data)
+        assert not check.verify("project", "region", REVISION)
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {},
+        {"web_sha": "a" * 40, "extra": True},
+        {"web_sha": "A" * 40},
+        {"web_sha": "short"},
+        {"web_sha": 1},
+    ],
+)
+def test_reviewed_artemis_pair_schema_is_closed(tmp_path, monkeypatch, document):
+    path = tmp_path / "pair.json"
+    path.write_text(json.dumps(document))
+    monkeypatch.setattr(check, "ARTEMIS_PAIR_PATH", path)
+    with pytest.raises(ValueError, match="invalid Artemis release pair"):
+        check._paired_web_sha()
