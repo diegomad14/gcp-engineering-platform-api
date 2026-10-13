@@ -39,15 +39,55 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
       - name: Lint GitHub Actions
         run: docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint:1.7.12 .github/workflows/*.yml templates/github-actions/*.yml examples/caller-workflows/*.yml
-      - name: Smoke Service Factory container image
+      - name: Canonical API container smoke
+        env:
+          SMOKE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          docker build --tag eng-platform-api:ci .
-          docker run --detach --rm --name eng-platform-api-ci --publish 8000:8000 eng-platform-api:ci
-          trap 'docker stop eng-platform-api-ci' EXIT
-          for _ in {1..20}; do curl --fail --silent http://localhost:8000/health && break; sleep 1; done
-          curl --fail-with-body --silent --request POST http://localhost:8000/api/service-factory/plan --header 'Content-Type: application/json' --data '{"repository":"test-org/test-repo","service_name":"test-api","service_type":"api","runtime":"python","gcp_project":"test-project","owner":"platform"}' | grep --quiet 'platform_deploy_workflow'
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SMOKE_SOURCE_SHA"
+          control_dir="$RUNNER_TEMP/canonical-api-smoke"
+          mkdir -p "$control_dir"
+          git show 0489130890038fb7e48870c13530bd788a00238c:docker/quality-executor/api_container_smoke.sh > "$control_dir/smoke.sh"
+          printf '%s  %s\n' c251ecd2de9de354259da2df10698d413039584498a53441e3b56fa4c4a020e4 "$control_dir/smoke.sh" | sha256sum --check
+          sudo chown -R root:root "$control_dir"
+          sudo chmod 0555 "$control_dir" "$control_dir/smoke.sh"
+          sudo env GITHUB_RUN_ID="$GITHUB_RUN_ID" bash "$control_dir/smoke.sh" "$GITHUB_WORKSPACE" "$control_dir/report"
+          python3 - "$control_dir/report/api-container-smoke.json" > "$RUNNER_TEMP/canonical-smoke-attestation.json" <<'PY'
+          import hashlib, json, os, stat, sys
+          from pathlib import Path
+          report = Path(sys.argv[1])
+          directory = report.parent.stat(follow_symlinks=False)
+          metadata = report.stat(follow_symlinks=False)
+          assert directory.st_uid == metadata.st_uid == 0
+          assert stat.S_ISDIR(directory.st_mode) and stat.S_ISREG(metadata.st_mode)
+          assert stat.S_IMODE(directory.st_mode) == 0o555
+          assert stat.S_IMODE(metadata.st_mode) == 0o444
+          payload = json.loads(report.read_text())
+          assert payload['schema_version'] == 1 and payload['category'] == 'container_smoke'
+          assert payload['status'] == 'PASSED', payload['details']
+          assert payload['findings'] == payload['blocking_findings'] == 0
+          value = {'repository': os.environ['GITHUB_REPOSITORY'], 'commit_sha': os.environ['SMOKE_SOURCE_SHA'],
+                   'workflow_run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+                   'report_sha256': hashlib.sha256(report.read_bytes()).hexdigest(), 'report_uid': metadata.st_uid,
+                   'report_mode': stat.S_IMODE(metadata.st_mode), 'directory_mode': stat.S_IMODE(directory.st_mode),
+                   'wrapper_source_sha': '0489130890038fb7e48870c13530bd788a00238c',
+                   'wrapper_sha256': 'c251ecd2de9de354259da2df10698d413039584498a53441e3b56fa4c4a020e4'}
+          print(json.dumps(value, sort_keys=True))
+          PY
+          sudo install -m 0444 "$RUNNER_TEMP/canonical-smoke-attestation.json" "$control_dir/report/attestation.json"
+          cat "$control_dir/report/attestation.json"
+      - name: Upload canonical smoke evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: canonical-api-smoke-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/canonical-api-smoke/report/
+          if-no-files-found: error
 
   normalized:
     if: ${{ vars.ENG_PLATFORM_RELEASE_ORCHESTRATOR_ENABLED != 'true' }}
