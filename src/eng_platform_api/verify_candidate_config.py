@@ -4,8 +4,12 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 WRITER_ENV = "ENG_PLATFORM_SECRETS_WRITER_SERVICE_ACCOUNT"
@@ -216,15 +220,54 @@ def verify(project: str, region: str, revision: str) -> bool:
         return False
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        return None
+
+
+def verify_readiness(url: str) -> bool:
+    """Probe only the engine-resolved tagged controller, without credentials."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or not re.fullmatch(
+                r"c-[0-9a-f]{12}---eng-platform-api-[a-z0-9.-]+\.run\.app",
+                parsed.hostname,
+            )
+            or parsed.port is not None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            return False
+        opener = urllib.request.build_opener(_NoRedirect())
+        with opener.open(url.rstrip("/") + "/ready", timeout=10) as response:
+            body = response.read(4097)
+            return (
+                response.status == 200
+                and len(body) <= 4096
+                and json.loads(body) == {"status": "ready"}
+            )
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", required=True)
     parser.add_argument("--region", required=True)
     parser.add_argument("--revision", required=True)
     args = parser.parse_args()
-    passed = verify(args.project, args.region, args.revision)
+    passed = verify(args.project, args.region, args.revision) and verify_readiness(
+        os.environ.get("CGM_CANDIDATE_URL", "")
+    )
     print(
-        "Candidate writer and quality tooling check: " + ("PASS" if passed else "FAIL")
+        "Candidate writer, quality tooling and readiness check: "
+        + ("PASS" if passed else "FAIL")
     )
     return 0 if passed else 1
 

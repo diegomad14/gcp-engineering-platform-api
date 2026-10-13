@@ -1,5 +1,7 @@
 """Tests for health check endpoint."""
 
+import json
+
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -48,3 +50,34 @@ def test_cloud_run_terminal_condition_ready():
         )
     )
     assert _is_ready(service)
+
+
+def test_ready_validates_authoritative_catalog_without_disclosing_contents(monkeypatch):
+    loader = health.log_catalog.load_catalog
+    monkeypatch.setattr(
+        health.log_catalog,
+        "load_catalog",
+        lambda: loader(health.log_catalog.CATALOG_PATH),
+    )
+    response = client.get("/ready")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
+
+
+def test_ready_rejects_conflicting_repository_defaults_but_liveness_survives(
+    tmp_path, monkeypatch
+):
+    source = json.loads(health.log_catalog.CATALOG_PATH.read_text())
+    entries = source["services"][:2]
+    entries[1]["repository"] = entries[0]["repository"]
+    entries[0]["release"] = {"executor": "github_actions"}
+    entries[1]["release"] = {"executor": "cloud_build"}
+    path = tmp_path / "PRIVATE-invalid-catalog.json"
+    path.write_text(json.dumps({"services": entries}))
+    loader = health.log_catalog.load_catalog
+    monkeypatch.setattr(health.log_catalog, "load_catalog", lambda: loader(path))
+    response = client.get("/ready")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Platform is not ready"}
+    assert "PRIVATE" not in response.text
+    assert client.get("/health").status_code == 200
