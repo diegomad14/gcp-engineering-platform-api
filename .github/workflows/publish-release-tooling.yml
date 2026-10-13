@@ -13,7 +13,6 @@ on:
           - release-executor
           - release-planner
           - quality-python
-          - artemis-locked-quality
           - quality-go
           - quality
           - all
@@ -53,22 +52,11 @@ jobs:
           set -euo pipefail
           gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
-          if [[ "$COMPONENT" == artemis-locked-quality ]]; then
-            # Publish this fixed reviewed overlay before activating the new
-            # manifest and its matching image digests in the controller.
-            git apply --check docker/quality-executor/artemis-locked-profile.patch
-            git apply docker/quality-executor/artemis-locked-profile.patch
-            echo '8334bb2a4e9aed51810eedc728e15f3b949ed07d0c01a6aecb5968724e7cea46  src/eng_platform_api/release_quality_profiles.json' | sha256sum --check
-          fi
-
           build_and_push() {
             local name="$1"
             local dockerfile="$2"
             local context="${3:-.}"
             local tag="$REGISTRY/$name:$SOURCE_SHA"
-            if [[ "$COMPONENT" == artemis-locked-quality ]]; then
-              tag="$tag-artemis-locked-quality"
-            fi
             docker build --pull --file "$dockerfile" --tag "$tag" "$context"
             if [[ "$name" == quality-python ]]; then
               python3 docker/quality-executor/smoke_python_isolation.py "$tag"
@@ -100,18 +88,18 @@ jobs:
 
           : > "$RUNNER_TEMP/tooling-digests"
           if [[ "$COMPONENT" == all || "$COMPONENT" == quality || \
-                "$COMPONENT" == quality-python || "$COMPONENT" == artemis-locked-quality ]]; then
+                "$COMPONENT" == quality-python ]]; then
             build_and_push quality-python docker/quality-executor/Dockerfile.python
           fi
           if [[ "$COMPONENT" == all || "$COMPONENT" == quality || "$COMPONENT" == quality-go ]]; then
             build_and_push quality-go docker/quality-executor/Dockerfile.go
           fi
-          if [[ "$COMPONENT" == all || "$COMPONENT" == quality || "$COMPONENT" == artemis-locked-quality ]]; then
+          if [[ "$COMPONENT" == all || "$COMPONENT" == quality ]]; then
             build_and_push quality-node docker/quality-executor/Dockerfile.node
           fi
           if [[ "$COMPONENT" == all || \
                 "$COMPONENT" == quality || \
-                "$COMPONENT" == release-planner || "$COMPONENT" == artemis-locked-quality ]]; then
+                "$COMPONENT" == release-planner ]]; then
             build_and_push release-planner docker/release-planner/Dockerfile
           fi
           if [[ "$COMPONENT" == all || "$COMPONENT" == release-executor ]]; then

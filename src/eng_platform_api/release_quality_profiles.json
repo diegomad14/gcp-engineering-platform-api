@@ -107,7 +107,7 @@
       "postgres": true,
       "container_smoke": false,
       "commands": {
-        "install": "python -m pip install --no-build-isolation -e \".[dev,sqlserver,postgresql]\" \"ruff==0.15.22\"",
+        "install": "python scripts/install_locked_dependencies.py --profile test",
         "tests": "python -m pytest -q --cov=. --cov-report=json:quality-reports/coverage.json",
         "build": "",
         "lint": "ruff check . --output-format json --output-file quality-reports/ruff.json",
