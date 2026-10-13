@@ -13,12 +13,14 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from ..services.metadata_scope import cache_identity
 from ..models import (
     DeploymentCreateRequest,
+    DeploymentRollbackRequest,
     DeploymentItem,
     DeploymentList,
     DeploymentOverview,
     DeploymentOverviewItem,
-    ReleaseTag,
     ReleaseTagPage,
+    ReleaseExecutionRequest,
+    ReleaseExecutionView,
 )
 from ..security import require_deployer
 from ..services import (
@@ -26,9 +28,11 @@ from ..services import (
     cloud_build,
     deployment_executions,
     deployment_store,
-    github_actions_quota,
+    github_actions_quota as github_actions_quota,
     github_deployments,
     release_authorization_store,
+    release_orchestrator,
+    release_executions,
 )
 from ..services import deployment_commands
 from .quality import get_quality_report
@@ -88,59 +92,13 @@ def _start_cloud_build(service, item: DeploymentItem, *, reason: str) -> Deploym
 
 
 def _dispatch_deploy(service, tag, requested_by: str) -> DeploymentItem:
-    if github_actions_quota.should_use_cloud_build(
-        service.service_name, service.repository
-    ):
-        item = github_deployments.start_managed_deployment(
-            service=service, tag=tag, requested_by=requested_by
-        )
-        return _start_cloud_build(
-            service,
-            item,
-            reason=deployment_commands._cloud_build_preflight_reason(service),
-        )
-    try:
-        return github_deployments.start_deployment(
-            service=service, tag=tag, requested_by=requested_by
-        )
-    except github_deployments.GitHubDispatchError as exc:
-        if not (
-            github_actions_quota.deployment_fallback_enabled(service.service_name)
-            and github_actions_quota.is_quota_error(exc)
-        ):
-            raise
-        return _start_cloud_build(service, exc.item, reason="github_quota_dispatch")
+    return deployment_commands._dispatch_deploy(service, tag, requested_by)
 
 
 def _dispatch_rollback(
     service, target: DeploymentItem, requested_by: str
 ) -> DeploymentItem:
-    if github_actions_quota.should_use_cloud_build(
-        service.service_name, service.repository
-    ):
-        item = github_deployments.start_managed_deployment(
-            service=service,
-            tag=ReleaseTag(name=target.tag, sha=target.sha),
-            requested_by=requested_by,
-            kind="rollback",
-            target_revision=target.production_revision,
-        )
-        return _start_cloud_build(
-            service,
-            item,
-            reason=deployment_commands._cloud_build_preflight_reason(service),
-        )
-    try:
-        return github_deployments.start_rollback(
-            service=service, target=target, requested_by=requested_by
-        )
-    except github_deployments.GitHubDispatchError as exc:
-        if not (
-            github_actions_quota.deployment_fallback_enabled(service.service_name)
-            and github_actions_quota.is_quota_error(exc)
-        ):
-            raise
-        return _start_cloud_build(service, exc.item, reason="github_quota_dispatch")
+    return deployment_commands._dispatch_rollback(service, target, requested_by)
 
 
 def _retry_failed_dispatch(
@@ -206,6 +164,7 @@ def create_deployment(
     item = deployment_commands.start_deployment(
         service_name=service_name,
         tag_name=payload.tag,
+        provider=payload.provider,
         requested_by=requested_by,
         idempotency_key=idempotency_key,
         quality_validator=_require_release_quality,
@@ -232,12 +191,14 @@ def rollback_deployment(
     service_name: str,
     target_deployment_id: str,
     request: Request,
+    payload: DeploymentRollbackRequest | None = None,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
     requested_by = require_deployer(request)
     item = deployment_commands.start_rollback(
         service_name=service_name,
         target_deployment_id=target_deployment_id,
+        provider=payload.provider if payload else None,
         requested_by=requested_by,
         idempotency_key=idempotency_key,
         quality_validator=_require_release_quality,
@@ -372,17 +333,50 @@ def _refresh(item: DeploymentItem) -> DeploymentItem:
             )
         return refreshed
     item = github_deployments.refresh(item)
-    if item.status != "FAILED" or not item.github_run_id:
-        return item
-    try:
-        run = (
-            github_deployments.github_client()
-            .get_repo(item.repository)
-            .get_workflow_run(item.github_run_id)
-        )
-        if github_actions_quota.is_reactive_quota_failure(run, item):
-            service = _service_or_404(item.service_name)
-            return _start_cloud_build(service, item, reason="github_quota_startup")
-    except Exception:
-        pass
     return item
+
+
+@router.post(
+    "/services/{service_name}/release-executions",
+    response_model=ReleaseExecutionView,
+    status_code=202,
+)
+def create_release_execution(
+    service_name: str, payload: ReleaseExecutionRequest, request: Request
+):
+    return release_orchestrator.start_release(
+        service_name=service_name,
+        head_sha=payload.head_sha,
+        base_sha=payload.base_sha,
+        provider=payload.provider,
+        requested_by=require_deployer(request),
+    )
+
+
+@router.get(
+    "/services/{service_name}/release-executions",
+    response_model=list[ReleaseExecutionView],
+)
+def list_release_executions(service_name: str):
+    require_managed_service_name(service_name)
+    service = catalog.get_service(service_name)
+    if service is None or not service.repository:
+        raise HTTPException(404, "Unknown release service")
+    return [
+        item
+        for item in release_executions.list_for_repository(
+            service.repository, limit=100
+        )
+        if item.get("service_name") == service_name
+    ]
+
+
+@router.post(
+    "/services/{service_name}/release-executions/{execution_id}/cancel",
+    response_model=ReleaseExecutionView,
+)
+def cancel_release_execution(service_name: str, execution_id: str, request: Request):
+    require_deployer(request)
+    return release_orchestrator.cancel_release(
+        service_name=service_name, execution_id=execution_id
+    )

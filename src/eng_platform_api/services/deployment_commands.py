@@ -10,15 +10,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import uuid
 from collections.abc import Callable
+from functools import wraps
 from typing import Any
 
 from fastapi import HTTPException
 
 from ..config import config
-from ..models import DeploymentItem, ReleaseTag
+from ..models import DeploymentItem, ReleaseTag, ExecutionProvider
 from ..routers.quality import get_quality_report
 from . import (
     catalog,
+    provider_selection,
     cloud_build,
     deployment_executions,
     deployment_store,
@@ -31,6 +33,7 @@ from . import (
 )
 
 from .resource_access import require_managed, require_managed_service_name
+from .cloud_build_policy import require_new_builds
 
 _GITHUB_UNAVAILABLE = "GitHub unavailable"
 
@@ -62,7 +65,12 @@ def _open_billing_circuit(service, *, reason: str, evidence: str = "") -> None:
         repository=service.repository,
         evidence=evidence,
     )
-    if config.release_orchestrator.private_executor_mode == "cloud_build":
+    if not config.cloud_build.new_builds_enabled:
+        return
+    if config.release_orchestrator.private_executor_mode in {
+        "cloud_build",
+        "github_actions",
+    }:
         # A late real rejection must not suppress another reserved GitHub job.
         return
     for repository in {
@@ -80,13 +88,28 @@ def _open_billing_circuit(service, *, reason: str, evidence: str = "") -> None:
             pass
 
 
-def _service_or_404(service_name: str):
+def _service_or_404(service_name: str, provider: ExecutionProvider | None = None):
     require_managed_service_name(service_name)
     service = catalog.get_service(service_name)
     if service is None:
         raise HTTPException(status_code=404, detail=f"Unknown service '{service_name}'")
     if not service.repository:
         raise HTTPException(status_code=409, detail="Service has no GitHub repository")
+    if provider:
+        readiness_service = service.model_copy(
+            update={
+                "deployment": service.deployment.model_copy(
+                    update={"executor": provider}
+                )
+            }
+        )
+        selected_blockers = catalog.deployment_blockers(readiness_service)
+        service = service.model_copy(
+            update={
+                "deployment_ready": not selected_blockers,
+                "deployment_blockers": selected_blockers,
+            }
+        )
     if not service.deployment_ready:
         blockers = (
             "; ".join(service.deployment_blockers) or "service is not deployment-ready"
@@ -133,13 +156,20 @@ def _active_deployment(service_name: str) -> DeploymentItem | None:
             item
             for item in deployment_store.list_for_service(service_name, limit=100)
             if item.status not in github_deployments.TERMINAL_STATUSES
+            or (deployment_executions.get(item.id) or {}).get("status")
+            in {"GITHUB_UNCERTAIN", "GITHUB_DISPATCHING"}
         ),
         None,
     )
 
 
 def _require_matching_idempotency(
-    existing: DeploymentItem, service_name: str, tag: str, kind: str
+    existing: DeploymentItem,
+    service_name: str,
+    tag: str,
+    kind: str,
+    target_deployment_id: str = "",
+    target_revision: str = "",
 ) -> None:
     if (
         existing.service_name != service_name
@@ -150,13 +180,31 @@ def _require_matching_idempotency(
             status_code=409,
             detail="Idempotency-Key was already used for another deployment",
         )
+    if kind == "rollback" and (
+        existing.production_revision != target_revision
+        or (
+            existing.rollback_target_deployment_id
+            and existing.rollback_target_deployment_id != target_deployment_id
+        )
+    ):
+        raise HTTPException(
+            409, "Idempotency-Key keeps its original rollback target and revision"
+        )
 
 
 def start_cloud_build(service, item: DeploymentItem, *, reason: str) -> DeploymentItem:
     service = require_managed(service)
     require_managed_service_name(item.service_name)
+    require_new_builds()
     try:
         execution = deployment_executions.get(item.id)
+        if (
+            item.provider_selection
+            and item.provider_selection.effective != "cloud_build"
+        ):
+            raise cloud_build.CloudBuildError(
+                "Reserved GitHub operation cannot switch to Cloud Build"
+            )
         if execution and execution.get("provider") == "github_actions":
             release_authorization_store.revoke(
                 str(execution.get("authorization_jti", ""))
@@ -195,64 +243,81 @@ def _cloud_build_preflight_reason(service) -> str:
     return "github_quota_preflight"
 
 
-def _dispatch_deploy(service, tag: ReleaseTag, requested_by: str) -> DeploymentItem:
-    if github_actions_quota.should_use_cloud_build(
-        service.service_name, service.repository
-    ):
-        reason = _cloud_build_preflight_reason(service)
-        item = github_deployments.start_managed_deployment(
-            service=service, tag=tag, requested_by=requested_by
-        )
-        return start_cloud_build(service, item, reason=reason)
-    try:
-        return github_deployments.start_deployment(
-            service=service, tag=tag, requested_by=requested_by
-        )
-    except github_deployments.GitHubDispatchError as exc:
-        if not (
-            github_actions_quota.deployment_fallback_enabled(service.service_name)
-            and github_actions_quota.is_quota_error(exc)
+def _selection(service, requested: ExecutionProvider | None):
+    current = provider_selection.current()
+    if current is not None:
+        return current
+    legacy: ExecutionProvider = "github_actions"
+    if requested is None and service.deployment.executor == "auto":
+        if github_actions_quota.should_use_cloud_build(
+            service.service_name, service.repository
         ):
+            legacy = "cloud_build"
+    return provider_selection.select(
+        service, requested, operation="deploy", legacy_provider=legacy
+    )
+
+
+def _dispatch_deploy(
+    service,
+    tag: ReleaseTag,
+    requested_by: str,
+    provider: ExecutionProvider | None = None,
+) -> DeploymentItem:
+    selection = _selection(service, provider)
+    with provider_selection.using(selection):
+        if selection.effective == "cloud_build":
+            require_new_builds()
+            item = github_deployments.start_managed_deployment(
+                service=service, tag=tag, requested_by=requested_by
+            )
+            item.provider_selection = selection
+            deployment_store.persist_before_dispatch(item)
+            return start_cloud_build(service, item, reason="selected_provider")
+        try:
+            item = github_deployments.start_deployment(
+                service=service, tag=tag, requested_by=requested_by
+            )
+        except github_deployments.GitHubDispatchError as exc:
+            exc.item.provider_selection = selection
             raise
-        _open_billing_circuit(
-            service,
-            reason="github_actions_billing_rejection",
-            evidence=str(getattr(exc, "dispatch_error_detail", ""))[:1000],
-        )
-        return start_cloud_build(service, exc.item, reason="github_quota_dispatch")
+        item.provider_selection = selection
+        return item
 
 
 def _dispatch_rollback(
-    service, target: DeploymentItem, requested_by: str
+    service,
+    target: DeploymentItem,
+    requested_by: str,
+    provider: ExecutionProvider | None = None,
 ) -> DeploymentItem:
-    if github_actions_quota.should_use_cloud_build(
-        service.service_name, service.repository
-    ):
-        reason = _cloud_build_preflight_reason(service)
-        item = github_deployments.start_managed_deployment(
-            service=service,
-            tag=ReleaseTag(name=target.tag, sha=target.sha),
-            requested_by=requested_by,
-            kind="rollback",
-            target_revision=target.production_revision,
-        )
-        return start_cloud_build(service, item, reason=reason)
-    try:
-        return github_deployments.start_rollback(
-            service=service, target=target, requested_by=requested_by
-        )
-    except github_deployments.GitHubDispatchError as exc:
-        if not (
-            github_actions_quota.deployment_fallback_enabled(service.service_name)
-            and github_actions_quota.is_quota_error(exc)
-        ):
+    selection = _selection(service, provider)
+    with provider_selection.using(selection):
+        if selection.effective == "cloud_build":
+            require_new_builds()
+            item = github_deployments.start_managed_deployment(
+                service=service,
+                tag=ReleaseTag(name=target.tag, sha=target.sha),
+                requested_by=requested_by,
+                kind="rollback",
+                target_revision=target.production_revision,
+            )
+            item.provider_selection = selection
+            item.production_revision = target.production_revision
+            item.rollback_target_deployment_id = target.id
+            deployment_store.persist_before_dispatch(item)
+            return start_cloud_build(service, item, reason="selected_provider")
+        try:
+            item = github_deployments.start_rollback(
+                service=service, target=target, requested_by=requested_by
+            )
+        except github_deployments.GitHubDispatchError as exc:
+            exc.item.provider_selection = selection
             raise
-        _open_billing_circuit(
-            service,
-            reason="github_actions_billing_rejection",
-            evidence=str(getattr(exc, "dispatch_error_detail", ""))[:1000],
-        )
-        return start_cloud_build(service, exc.item, reason="github_quota_dispatch")
+        item.provider_selection = selection
+        item.production_revision = target.production_revision
+        item.rollback_target_deployment_id = target.id
+        return item
 
 
 def _retry_failed_dispatch(
@@ -272,36 +337,36 @@ def _retry_failed_dispatch(
         )
     try:
         execution = deployment_executions.get(existing.id)
-        provider = execution.get("provider") if execution else None
+        if execution and execution.get("status") in {
+            "GITHUB_UNCERTAIN",
+            "GITHUB_DISPATCHING",
+            "GITHUB_ACCEPTED",
+        }:
+            raise HTTPException(
+                409,
+                "GitHub dispatch is pending or uncertain; reconcile before retrying",
+            )
+        provider = (
+            existing.provider_selection.effective
+            if existing.provider_selection
+            else execution.get("provider")
+            if execution
+            else None
+        )
         if provider in {"github_actions", "cloud_build"}:
             use_cloud_build = provider == "cloud_build"
-        elif config.release_orchestrator.private_executor_mode == "cloud_build":
+        else:
             raise HTTPException(
                 status_code=409,
                 detail="Existing deployment provider requires reconciliation",
             )
-        else:
-            use_cloud_build = github_actions_quota.should_use_cloud_build(
-                service.service_name, service.repository
-            )
         if use_cloud_build:
-            reason = _cloud_build_preflight_reason(service)
-            retried = start_cloud_build(service, existing, reason=reason)
+            retried = start_cloud_build(service, existing, reason="original_provider")
         else:
             retried = github_deployments.retry_dispatch(
                 service=service, item=existing, target_revision=target_revision
             )
     except github_deployments.GitHubDispatchError as exc:
-        if github_actions_quota.deployment_fallback_enabled(
-            service.service_name
-        ) and github_actions_quota.is_quota_error(exc):
-            _open_billing_circuit(
-                service,
-                reason="github_actions_billing_rejection",
-                evidence=str(getattr(exc, "dispatch_error_detail", ""))[:1000],
-            )
-            retried = start_cloud_build(service, exc.item, reason="retry_billing")
-            return deployment_store.save(retried, key)
         deployment_store.save(exc.item, key)
         raise HTTPException(status_code=502, detail=detail) from exc
     except executor_circuits.CircuitRecoveryRequired as exc:
@@ -358,20 +423,51 @@ def reconcile_stalled_dispatches(*, limit: int = 50) -> dict[str, Any]:
     return {"reconciled": len(results), "items": results}
 
 
+def _guard_command(command):
+    @wraps(command)
+    def guarded(*, service_name, **kwargs):
+        require_managed_service_name(service_name)
+        key = kwargs.get("idempotency_key") or str(uuid.uuid4())
+        kwargs["idempotency_key"] = key
+        with (
+            deployment_store.command_guard("idempotency:" + key),
+            deployment_store.command_guard(service_name),
+        ):
+            return command(service_name=service_name, **kwargs)
+
+    return guarded
+
+
+@_guard_command
 def start_deployment(
     *,
     service_name: str,
     tag_name: str,
     requested_by: str,
     idempotency_key: str | None = None,
+    provider: ExecutionProvider | None = None,
     quality_validator: Callable[[object, str], None] | None = None,
 ) -> DeploymentItem:
     """Create one eligible tagged release deployment through the private selector."""
-    service = _service_or_404(service_name)
     key = idempotency_key or str(uuid.uuid4())
     existing = deployment_store.find_by_idempotency_key(key)
+    recorded_provider = (
+        existing.provider_selection.effective
+        if existing and existing.provider_selection
+        else (deployment_executions.get(existing.id) or {}).get("provider")
+        if existing
+        else provider
+    )
+    service = _service_or_404(service_name, recorded_provider)
     if existing is not None:
         _require_matching_idempotency(existing, service_name, tag_name, "deploy")
+        provider_selection.require_same(
+            existing.provider_selection,
+            provider,
+            legacy_provider=(deployment_executions.get(existing.id) or {}).get(
+                "provider"
+            ),
+        )
         if existing.status == "FAILED" and existing.current_stage == "dispatch":
             return _retry_failed_dispatch(
                 service,
@@ -395,7 +491,31 @@ def start_deployment(
             raise HTTPException(status_code=409, detail=tag.reason)
         (quality_validator or _require_release_quality)(service, tag.sha)
         _require_orchestrated_release(service, tag)
-        return deployment_store.save(_dispatch_deploy(service, tag, requested_by), key)
+        chosen = _selection(service, provider)
+        if chosen.effective == "cloud_build":
+            require_new_builds()
+        # Persist before even creating the external GitHub Deployment object.
+        # A crash/save error leaves this nonterminal admission closed.
+        deployment_store.save(
+            DeploymentItem(
+                id="intent-" + str(uuid.uuid4()),
+                service_name=service_name,
+                repository=service.repository,
+                tag=tag.name,
+                sha=tag.sha,
+                requested_by=requested_by,
+                provider_selection=chosen,
+                status="QUEUED",
+                current_stage="dispatch_pending",
+                created_at=_iso_now(),
+                updated_at=_iso_now(),
+            ),
+            key,
+        )
+        with deployment_store.using_command_key(key), provider_selection.using(chosen):
+            return deployment_store.save(
+                _dispatch_deploy(service, tag, requested_by, provider), key
+            )
     except HTTPException:
         raise
     except github_deployments.GitHubDispatchError as exc:
@@ -414,16 +534,27 @@ def start_deployment(
         raise HTTPException(status_code=502, detail=_GITHUB_UNAVAILABLE) from exc
 
 
+@_guard_command
 def start_rollback(
     *,
     service_name: str,
     target_deployment_id: str,
     requested_by: str,
     idempotency_key: str | None = None,
+    provider: ExecutionProvider | None = None,
     quality_validator: Callable[[object, str], None] | None = None,
 ) -> DeploymentItem:
     """Recover a recorded production revision through the same private selector."""
-    service = _service_or_404(service_name)
+    key = idempotency_key or str(uuid.uuid4())
+    existing = deployment_store.find_by_idempotency_key(key)
+    recorded_provider = (
+        existing.provider_selection.effective
+        if existing and existing.provider_selection
+        else (deployment_executions.get(existing.id) or {}).get("provider")
+        if existing
+        else provider
+    )
+    service = _service_or_404(service_name, recorded_provider)
     target = deployment_store.get(target_deployment_id)
     if target is None or target.service_name != service_name:
         raise HTTPException(
@@ -434,10 +565,22 @@ def start_rollback(
             status_code=409,
             detail="Can only roll back to a previously succeeded production revision",
         )
-    key = idempotency_key or str(uuid.uuid4())
-    existing = deployment_store.find_by_idempotency_key(key)
     if existing is not None:
-        _require_matching_idempotency(existing, service_name, target.tag, "rollback")
+        _require_matching_idempotency(
+            existing,
+            service_name,
+            target.tag,
+            "rollback",
+            target.id,
+            target.production_revision,
+        )
+        provider_selection.require_same(
+            existing.provider_selection,
+            provider,
+            legacy_provider=(deployment_executions.get(existing.id) or {}).get(
+                "provider"
+            ),
+        )
         if existing.status == "FAILED" and existing.current_stage == "dispatch":
             return _retry_failed_dispatch(
                 service,
@@ -455,9 +598,34 @@ def start_rollback(
             detail=f"Deployment '{active.tag}' is already active for this service (id: {active.id})",
         )
     try:
-        return deployment_store.save(
-            _dispatch_rollback(service, target, requested_by), key
+        chosen = _selection(service, provider)
+        if chosen.effective == "cloud_build":
+            require_new_builds()
+        deployment_store.save(
+            DeploymentItem(
+                id="intent-" + str(uuid.uuid4()),
+                service_name=service_name,
+                repository=service.repository,
+                tag=target.tag,
+                sha=target.sha,
+                kind="rollback",
+                production_revision=target.production_revision,
+                rollback_target_deployment_id=target.id,
+                requested_by=requested_by,
+                provider_selection=chosen,
+                status="QUEUED",
+                current_stage="dispatch_pending",
+                created_at=_iso_now(),
+                updated_at=_iso_now(),
+            ),
+            key,
         )
+        with deployment_store.using_command_key(key), provider_selection.using(chosen):
+            return deployment_store.save(
+                _dispatch_rollback(service, target, requested_by, provider), key
+            )
+    except HTTPException:
+        raise
     except github_deployments.GitHubDispatchError as exc:
         try:
             deployment_store.save(exc.item, key)

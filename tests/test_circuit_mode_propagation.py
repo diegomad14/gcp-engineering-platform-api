@@ -17,6 +17,9 @@ REPOSITORY = "owner/private"
 
 @pytest.fixture
 def propagation(monkeypatch):
+    # Retained auto-mode behavior is tested under an explicitly approved future activation.
+    monkeypatch.setattr(orchestrator.config.cloud_build, "enabled", True)
+    monkeypatch.setattr(orchestrator.config.cloud_build, "new_builds_enabled", True)
     now = [1000.0]
     monkeypatch.setattr(circuits.time, "time", lambda: now[0])
     monkeypatch.setattr(orchestrator.config.github, "billing_owner", "")
@@ -217,3 +220,38 @@ def test_malformed_propagation_metadata_is_repaired_without_changing_provider(
     assert propagation.set_mode.call_count == 2
     assert circuits.get("owner")["state"] == "open"
     assert circuits.get("owner")["mode_propagation"]["retry_after"] == 1600.0
+
+
+def test_paused_circuit_cannot_propagate_cloud_build_hints(propagation, monkeypatch):
+    monkeypatch.setattr(orchestrator.config.cloud_build, "new_builds_enabled", False)
+    _open()
+    assert circuits.is_open("owner")
+    assert orchestrator._provider(propagation.service) == "cloud_build"
+    propagation.catalog.assert_not_called()
+    propagation.set_mode.assert_not_called()
+
+
+def test_explicit_repository_github_default_ignores_billing_circuit(propagation):
+    _open()
+    propagation.service.release.executor = "github_actions"
+    propagation.catalog.reset_mock()
+    propagation.private.reset_mock()
+    propagation.set_mode.reset_mock()
+    assert orchestrator._provider(propagation.service) == "github_actions"
+    propagation.catalog.assert_not_called()
+    propagation.private.assert_not_called()
+    propagation.set_mode.assert_not_called()
+
+
+def test_global_github_policy_never_propagates_cloud_build_hints(
+    propagation, monkeypatch
+):
+    monkeypatch.setattr(
+        orchestrator.config.release_orchestrator,
+        "private_executor_mode",
+        "github_actions",
+    )
+    _open()
+    assert orchestrator._provider(propagation.service) == "github_actions"
+    propagation.catalog.assert_not_called()
+    propagation.set_mode.assert_not_called()

@@ -89,6 +89,7 @@ def _configure(
         "operation": "main_release",
         "head_sha": HEAD,
         "base_sha": BASE,
+        "provider": "github_actions",
     }
     monkeypatch.setattr(orchestrator, "_reserve", lambda **_: (execution, True))
     monkeypatch.setattr(orchestrator, "_start_checks", mock.Mock())
@@ -136,7 +137,9 @@ def test_legacy_semantic_release_billing_requires_paired_skipped_platform_run(
     )
 
     assert result["execution_id"] == execution["execution_id"]
-    submit.assert_called_once()
+    assert result["provider"] == "github_actions"
+    assert result["status"] == "failed"
+    submit.assert_not_called()
     execution_mode.assert_called_once_with(REPOSITORY)
 
 

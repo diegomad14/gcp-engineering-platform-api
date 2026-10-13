@@ -151,6 +151,11 @@ def _mutate(execution_id: str, callback):
 def _validate_changes(current: dict[str, Any], changes: dict[str, Any]) -> None:
     if current.get("ticket_id") == QUALITY_BOOTSTRAP_TICKET_ID:
         raise ValueError("Quality bootstrap global ticket is immutable")
+    if (current.get("provider_selection") or {}).get("locked") and any(
+        key in changes and changes[key] != current.get(key)
+        for key in ("provider", "provider_selection", "trigger_event")
+    ):
+        raise ValueError("Reserved release provider selection is immutable")
     if _IDENTITY_FIELDS.intersection(changes):
         raise ValueError("Release execution identity fields are immutable")
     if any(key.startswith("bootstrap_") for key in changes):
@@ -366,6 +371,9 @@ def reserve_quality_bootstrap(
     ).hexdigest()
     if request_hash != binding["build_request_hash"]:
         raise ValueError("Quality bootstrap build request hash mismatch")
+    from .cloud_build_policy import require_new_builds
+
+    require_new_builds()
     collection = _persistent_bootstrap_collection()
     now = _now()
 
@@ -396,6 +404,10 @@ def reserve_quality_bootstrap(
             return None
         if current is None:
             raise KeyError(execution_id)
+        if (current.get("provider_selection") or {}).get("locked"):
+            raise ValueError(
+                "Reserved release provider is immutable; bootstrap cannot change it"
+            )
         if (
             current.get("status") != "waiting_github"
             or current.get("provider") != "github_actions"
@@ -733,6 +745,8 @@ def reserve(
     planner_hash: str = "",
     provider: ReleaseProvider = "github_actions",
     delivery_id: str = "",
+    provider_selection: dict | None = None,
+    trigger_event: str = "",
 ) -> tuple[dict[str, Any], bool]:
     """Reserve intent before dispatch; the fingerprint is also the stable ID."""
     expected_fingerprint = fingerprint(
@@ -768,6 +782,8 @@ def reserve(
         if provider == "github_actions"
         else "submission_pending",
         "delivery_id": delivery_id,
+        "provider_selection": provider_selection,
+        "trigger_event": trigger_event,
         "event_sequence": 0,
         "created_at": now,
         "updated_at": now,
@@ -855,6 +871,8 @@ def transition_to_cloud_build(execution_id: str, *, reason: str) -> tuple[dict, 
             current = _memory.get(execution_id)
             if current is None:
                 raise KeyError(execution_id)
+            if (current.get("provider_selection") or {}).get("locked"):
+                raise ValueError("Reserved release provider is immutable")
             if current.get("bootstrap_ticket_id"):
                 raise ValueError("Quality bootstrap provider cannot be reset")
             if current.get("provider") == "cloud_build":
@@ -863,6 +881,9 @@ def transition_to_cloud_build(execution_id: str, *, reason: str) -> tuple[dict, 
                 raise ValueError("Release execution provider transition is invalid")
             if current.get("status") not in {"received", "waiting_github"}:
                 raise ValueError("Release execution is no longer fallback eligible")
+            from .cloud_build_policy import require_new_builds
+
+            require_new_builds()
             current.update(changes)
             return dict(current), True
 
@@ -876,6 +897,8 @@ def transition_to_cloud_build(execution_id: str, *, reason: str) -> tuple[dict, 
         if not snapshot.exists:
             raise KeyError(execution_id)
         current = snapshot.to_dict()
+        if (current.get("provider_selection") or {}).get("locked"):
+            raise ValueError("Reserved release provider is immutable")
         if current.get("bootstrap_ticket_id"):
             raise ValueError("Quality bootstrap provider cannot be reset")
         if current.get("provider") == "cloud_build":
@@ -884,6 +907,9 @@ def transition_to_cloud_build(execution_id: str, *, reason: str) -> tuple[dict, 
             raise ValueError("Release execution provider transition is invalid")
         if current.get("status") not in {"received", "waiting_github"}:
             raise ValueError("Release execution is no longer fallback eligible")
+        from .cloud_build_policy import require_new_builds
+
+        require_new_builds()
         txn.update(document, changes)
         current.update(changes)
         return current, True
@@ -1304,6 +1330,9 @@ def stage_planner_retry(
     previous_planner_image: str = "",
 ) -> dict[str, Any]:
     """Reserve a narrowly gated planner-only recovery after identity checks."""
+    from .cloud_build_policy import require_new_builds
+
+    require_new_builds()
     if not failed_build_id:
         raise ValueError("Failed Cloud Build identity is required")
     current = get(execution_id)

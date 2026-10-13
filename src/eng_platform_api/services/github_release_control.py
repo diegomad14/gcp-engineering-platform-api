@@ -338,3 +338,17 @@ def installation_read_token(repository: str) -> tuple[str, str]:
         },
     )
     return str(payload["token"]), str(payload["expires_at"])
+
+
+def dispatch_release(execution: dict[str, Any]) -> None:
+    """Dispatch the canonical main workflow; the reservation fences its OIDC run."""
+    workflow = (
+        github_client()
+        .get_repo(execution["repository"])
+        .get_workflow("eng-platform-release.yml")
+    )
+    accepted = workflow.create_dispatch(
+        ref="main", inputs={"execution_id": execution["execution_id"]}
+    )
+    if accepted is False:
+        raise RuntimeError("GitHub did not accept the release dispatch")

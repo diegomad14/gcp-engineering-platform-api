@@ -10,11 +10,7 @@ from ..config import config
 
 
 def _collection():
-    if (
-        not config.cloud_build.enabled
-        or not config.cloud_build.execution_collection
-        or config.mock_mode
-    ):
+    if not config.cloud_build.execution_collection or config.mock_mode:
         return None
     from google.cloud import firestore
 
@@ -49,11 +45,14 @@ def reserve(
     kind: str,
     reason: str = "",
     authorization_jti: str = "",
+    provider_selection: dict | None = None,
+    github_execution_config: str = "",
 ) -> dict[str, Any]:
     """Persist intent before an external call and never overwrite its identity."""
     record = {
         "deployment_id": deployment_id,
         "provider": provider,
+        "provider_selection": provider_selection,
         "fingerprint": fingerprint,
         "service_name": service_name,
         "repository": repository,
@@ -66,6 +65,22 @@ def reserve(
         "event_sequence": 0,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    if github_execution_config:
+        record["github_execution_config"] = github_execution_config
+
+    def bind_context(existing):
+        if not github_execution_config:
+            return False
+        if existing.get("provider") != "github_actions":
+            raise ValueError("GitHub engine context cannot bind another provider")
+        previous = existing.get("github_execution_config")
+        if previous and previous != github_execution_config:
+            raise ValueError("Deployment engine configuration cannot change")
+        if not previous:
+            existing["github_execution_config"] = github_execution_config
+            return True
+        return False
+
     collection = _collection()
     if collection is None:
         with _memory_lock:
@@ -73,6 +88,7 @@ def reserve(
             if existing:
                 if existing["fingerprint"] != fingerprint:
                     raise ValueError("Deployment execution identity cannot change")
+                bind_context(existing)
                 return dict(existing)
             _memory[deployment_id] = record
             return dict(record)
@@ -87,6 +103,8 @@ def reserve(
             value = current.to_dict()
             if value.get("fingerprint") != fingerprint:
                 raise ValueError("Deployment execution identity cannot change")
+            if bind_context(value):
+                txn.set(document, value)
             return value
         txn.set(document, record)
         return record
@@ -109,10 +127,16 @@ def transition_provider(
             current = _memory.get(deployment_id)
             if current is None:
                 raise KeyError(deployment_id)
+            if (current.get("provider_selection") or {}).get("locked"):
+                raise ValueError("Reserved deployment provider is immutable")
             if current.get("provider") == to_provider:
                 return dict(current)
             if current.get("provider") != from_provider:
                 raise ValueError("Deployment execution provider transition is invalid")
+            if to_provider == "cloud_build":
+                from .cloud_build_policy import require_new_builds
+
+                require_new_builds()
             current.update(changes)
             return dict(current)
 
@@ -126,10 +150,16 @@ def transition_provider(
         if not snapshot.exists:
             raise KeyError(deployment_id)
         current = snapshot.to_dict()
+        if (current.get("provider_selection") or {}).get("locked"):
+            raise ValueError("Reserved deployment provider is immutable")
         if current.get("provider") == to_provider:
             return current
         if current.get("provider") != from_provider:
             raise ValueError("Deployment execution provider transition is invalid")
+        if to_provider == "cloud_build":
+            from .cloud_build_policy import require_new_builds
+
+            require_new_builds()
         txn.update(document, changes)
         current.update(changes)
         return current
@@ -180,11 +210,33 @@ def save(deployment_id: str, **changes: Any) -> dict[str, Any]:
         with _memory_lock:
             if deployment_id not in _memory:
                 raise KeyError(deployment_id)
-            _memory[deployment_id].update(changes)
-            return dict(_memory[deployment_id])
+            current = _memory[deployment_id]
+            _validate_selection(current, changes)
+            current.update(changes)
+            return dict(current)
     document = collection.document(deployment_id)
-    document.set(changes, merge=True)
-    return document.get().to_dict()
+    from google.cloud.firestore import transactional
+
+    @transactional
+    def write(txn):
+        snapshot = document.get(transaction=txn)
+        if not snapshot.exists:
+            raise KeyError(deployment_id)
+        current = snapshot.to_dict()
+        _validate_selection(current, changes)
+        txn.update(document, changes)
+        current.update(changes)
+        return current
+
+    return write(document._client.transaction())
+
+
+def _validate_selection(current: dict, changes: dict) -> None:
+    if (current.get("provider_selection") or {}).get("locked") and any(
+        key in changes and changes[key] != current.get(key)
+        for key in ("provider", "provider_selection")
+    ):
+        raise ValueError("Reserved deployment provider is immutable")
 
 
 def accept_event(
@@ -244,3 +296,35 @@ def monthly_cloud_build_minutes(month: str) -> float:
         ),
         3,
     )
+
+
+def claim_github_dispatch(deployment_id: str) -> bool:
+    """An uncertain dispatch cannot be retried; only a verified rejection can."""
+    collection = _collection()
+
+    def eligible(record):
+        return record.get("provider") == "github_actions" and record.get("status") in {
+            "SUBMISSION_PENDING",
+            "GITHUB_REJECTED",
+        }
+
+    if collection is None:
+        with _memory_lock:
+            current = _memory.get(deployment_id)
+            if not current or not eligible(current):
+                return False
+            current["status"] = "GITHUB_DISPATCHING"
+            return True
+    document = collection.document(deployment_id)
+    from google.cloud.firestore import transactional
+
+    @transactional
+    def claim(txn):
+        snapshot = document.get(transaction=txn)
+        record = snapshot.to_dict() if snapshot.exists else {}
+        if not eligible(record):
+            return False
+        txn.update(document, {"status": "GITHUB_DISPATCHING"})
+        return True
+
+    return claim(document._client.transaction())

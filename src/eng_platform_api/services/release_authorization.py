@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import time
 import uuid
 from typing import Any
@@ -80,6 +81,7 @@ def issue(
     execution_mode: str = "github-actions",
     configuration_hash: str = "",
     capability_issued: bool = False,
+    workflow_continuation: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     require_managed_service_name(service_name)
     now = int(time.time())
@@ -125,6 +127,17 @@ def issue(
         claims["execution_repository"] = execution_repository
     if capability_issued:
         claims["capability_issued"] = True
+    if workflow_continuation:
+        if (
+            not service_name.startswith("cgm-artemis-")
+            or kind not in {"deploy", "rollback"}
+            or execution_repository
+            or audience != AUDIENCE
+            or execution_mode != "github-actions"
+            or not re.fullmatch(r"[0-9a-f]{64}", claims.get("configuration_hash", ""))
+        ):
+            raise ReleaseAuthorizationError("Invalid platform continuation capability")
+        claims["workflow_continuation"] = True
     header = {"alg": "EdDSA", "typ": "JWT", "kid": "release-v1"}
     signing_input = f"{_json_segment(header)}.{_json_segment(claims)}".encode()
     token = f"{signing_input.decode()}.{_b64encode(_private_key().sign(signing_input))}"
@@ -133,6 +146,16 @@ def issue(
 
 def verify(
     token: str, expected: dict[str, str], *, audience: str = AUDIENCE
+) -> dict[str, Any]:
+    return _verify(token, expected, audience=audience)
+
+
+def _verify(
+    token: str,
+    expected: dict[str, str],
+    *,
+    audience: str = AUDIENCE,
+    continuation: bool = False,
 ) -> dict[str, Any]:
     try:
         header_segment, payload_segment, signature_segment = token.split(".")
@@ -156,7 +179,11 @@ def verify(
         or not isinstance(claims.get("iat"), int)
         or not isinstance(claims.get("exp"), int)
         or claims["iat"] > now + 30
-        or claims["exp"] < now
+        or (
+            claims["exp"] < now
+            and not (continuation and claims.get("workflow_continuation") is True)
+        )
+        or claims["exp"] <= claims["iat"]
         or claims["exp"] - claims["iat"] > TOKEN_TTL_SECONDS
         or not claims.get("jti")
     ):
@@ -165,3 +192,23 @@ def verify(
         if str(claims.get(key, "")) != value:
             raise ReleaseAuthorizationError(f"Release authorization mismatch: {key}")
     return claims
+
+
+def verify_continuation(
+    token: str, expected: dict[str, str]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Expired tickets only continue their durable, already-consumed operation."""
+    claims = _verify(token, expected, continuation=True)
+    if claims.get("workflow_continuation") is not True:
+        raise ReleaseAuthorizationError("Ticket does not authorize continuation")
+    from . import release_authorization_store
+
+    consumed = release_authorization_store.get(str(claims["jti"]), require_durable=True)
+    if (
+        not consumed
+        or consumed.get("revoked")
+        or consumed.get("workflow_continuation") is not True
+        or consumed.get("exp") != claims["exp"]
+    ):
+        raise ReleaseAuthorizationError("Continuation requires a consumed ticket")
+    return claims, consumed

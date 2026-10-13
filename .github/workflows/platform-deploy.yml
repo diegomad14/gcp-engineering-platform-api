@@ -15,6 +15,7 @@ on:
       health_path: {required: true, type: string}
       profile_sha256: {required: true, type: string}
       platform_authorization: {required: true, type: string}
+      execution_config: {required: false, type: string, default: '{}'}
 
 permissions: {contents: read, deployments: write, id-token: write}
 
@@ -24,6 +25,7 @@ concurrency:
 
 jobs:
   release:
+    if: ${{ !startsWith(inputs.service_name, 'cgm-artemis-') }}
     # Always GitHub-hosted. Cloud Build selection is private to the API.
     runs-on: ubuntu-latest
     steps:
@@ -47,6 +49,39 @@ jobs:
           for name in RELEASE_SIGNING_PUBLIC_KEY RELEASE_WIF_PROVIDER RELEASE_SERVICE_ACCOUNT; do
             test -n "${!name}" || { echo "Required release configuration is missing: $name" >&2; exit 1; }
           done
+      - name: Validate bounded runtime execution configuration
+        env:
+          RELEASE_SERVICE: ${{ inputs.service_name }}
+          EXECUTION_CONFIG: ${{ inputs.execution_config }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_SERVICE" != cgm-artemis-* ]]; then
+            jq -se 'length == 1 and (.[0] | type == "object" and length == 0)' \
+              <<<"$EXECUTION_CONFIG" >/dev/null
+            exit 0
+          fi
+          jq -se --arg service "$RELEASE_SERVICE" '
+            def safe_string($pattern):
+              type == "string" and test($pattern) and (test("[[:cntrl:]]") | not);
+            def safe_list($pattern):
+              type == "array" and all(.[]; safe_string($pattern));
+            length == 1 and (.[0] |
+              type == "object"
+              and keys == ["dockerfile_path", "evidence_bucket", "paired_web_sha",
+                           "private_runtime", "quality_evidence_services",
+                           "repository_aliases", "runtime_kind"]
+              and (.runtime_kind == "cloud_run_service" or .runtime_kind == "cloud_run_job")
+              and (.evidence_bucket | safe_string("^[a-z0-9][a-z0-9._-]{2,222}$"))
+              and (.private_runtime | type == "boolean")
+              and (.dockerfile_path |
+                   safe_string("^[A-Za-z0-9_./-]+$")
+                   and (startswith("/") | not)
+                   and (split("/") | all(. != "..")))
+              and (.quality_evidence_services | safe_list("^[a-z][a-z0-9-]*$"))
+              and (.repository_aliases | safe_list("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"))
+              and (.paired_web_sha | safe_string("^([0-9a-f]{40})?$"))
+              and ($service != "cgm-artemis-api" or (.paired_web_sha | length == 40))
+            )' <<<"$EXECUTION_CONFIG" >/dev/null
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ inputs.tag }}
@@ -74,6 +109,49 @@ jobs:
           kind: deploy
           platform_api_url: ${{ vars.ENG_PLATFORM_API_URL }}
           signing_public_key: ${{ vars.ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY }}
+      - name: Bind verified runtime execution configuration
+        env:
+          RELEASE_SERVICE: ${{ inputs.service_name }}
+          EXECUTION_CONFIG: ${{ inputs.execution_config }}
+          EXECUTION_AUTHORIZATION: ${{ inputs.platform_authorization }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_SERVICE" != cgm-artemis-* ]]; then
+            exit 0
+          fi
+          # The preceding pinned action verified this ticket's signature and identity.
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import os
+          import sys
+
+          canonical = json.dumps(
+              json.loads(os.environ["EXECUTION_CONFIG"]),
+              sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+          ).encode("ascii")
+          expected = hashlib.sha256(canonical).hexdigest()
+          parts = os.environ["EXECUTION_AUTHORIZATION"].split(".")
+          try:
+              if len(parts) != 3:
+                  raise ValueError("Malformed ticket")
+              payload = parts[1] + "=" * (-len(parts[1]) % 4)
+              claims = json.loads(base64.urlsafe_b64decode(payload))
+          except (ValueError, TypeError):
+              sys.exit("Verified ticket configuration is unavailable")
+          if claims.get("configuration_hash") != expected:
+              sys.exit("Runtime configuration does not match the verified platform ticket")
+          PY
+          jq -r '
+            ["CGM_RUNTIME_KIND=" + .runtime_kind,
+             "CGM_EVIDENCE_BUCKET=" + .evidence_bucket,
+             "CGM_PRIVATE_RUNTIME=" + (.private_runtime | tostring),
+             "CGM_DOCKERFILE_PATH=" + .dockerfile_path,
+             "CGM_QUALITY_EVIDENCE_SERVICES=" + (.quality_evidence_services | join(",")),
+             "CGM_REPOSITORY_ALIASES=" + (.repository_aliases | join(",")),
+             "CGM_PAIRED_WEB_SHA=" + .paired_web_sha] | .[]
+          ' <<<"$EXECUTION_CONFIG" >> "$GITHUB_ENV"
       - name: Require exact OSS quality evidence
         uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-quality@ac9d68554c8b6332013785a5bcf451eabfee93ec
         with:
@@ -140,6 +218,9 @@ jobs:
             --env CGM_DEPLOYMENT_ID --env CGM_OPERATION --env CGM_REPOSITORY \
             --env CGM_REQUEST_FINGERPRINT --env CGM_PROFILE --env CGM_PROFILE_SHA256 \
             --env CGM_PLATFORM_API_URL \
+            --env CGM_RUNTIME_KIND --env CGM_EVIDENCE_BUCKET --env CGM_PRIVATE_RUNTIME \
+            --env CGM_DOCKERFILE_PATH --env CGM_QUALITY_EVIDENCE_SERVICES \
+            --env CGM_REPOSITORY_ALIASES --env CGM_PAIRED_WEB_SHA \
             --env CGM_IMAGE \
             "$RELEASE_EXECUTOR_IMAGE" --service "$CGM_SERVICE"
       - name: Publish deployment result
@@ -163,3 +244,661 @@ jobs:
             -f state="$state" -f description="$description" \
             -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             "${args[@]}" >/dev/null
+  verify-release:
+    if: ${{ startsWith(inputs.service_name, 'cgm-artemis-') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      sha: ${{ steps.release.outputs.sha }}
+      executor_image: ${{ steps.executor.outputs.image }}
+    steps:
+    - name: Validate release executor configuration
+      env:
+        RELEASE_EXECUTOR_IMAGE: ${{ vars.ENG_PLATFORM_RELEASE_EXECUTOR_IMAGE }}
+        PLATFORM_API_URL: ${{ vars.ENG_PLATFORM_API_URL }}
+        RELEASE_SIGNING_PUBLIC_KEY: ${{ vars.ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY }}
+        RELEASE_WIF_PROVIDER: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
+        RELEASE_SERVICE_ACCOUNT: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+      run: |
+        set -euo pipefail
+        [[ "$RELEASE_EXECUTOR_IMAGE" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || {
+          echo 'Release executor must be pinned by a complete SHA-256 digest' >&2
+          exit 1
+        }
+        [[ "$PLATFORM_API_URL" == https://* ]] || {
+          echo 'Engineering Platform API URL must use HTTPS' >&2
+          exit 1
+        }
+        for name in RELEASE_SIGNING_PUBLIC_KEY RELEASE_WIF_PROVIDER RELEASE_SERVICE_ACCOUNT; do
+          test -n "${!name}" || { echo "Required release configuration is missing: $name" >&2; exit 1; }
+        done
+        echo "image=$RELEASE_EXECUTOR_IMAGE" >> "$GITHUB_OUTPUT"
+      id: executor
+    - name: Validate bounded runtime execution configuration
+      env:
+        RELEASE_SERVICE: ${{ inputs.service_name }}
+        EXECUTION_CONFIG: ${{ inputs.execution_config }}
+      run: |
+        set -euo pipefail
+        if [[ "$RELEASE_SERVICE" != cgm-artemis-* ]]; then
+          jq -se 'length == 1 and (.[0] | type == "object" and length == 0)' \
+            <<<"$EXECUTION_CONFIG" >/dev/null
+          exit 0
+        fi
+        jq -se --arg service "$RELEASE_SERVICE" '
+          def safe_string($pattern):
+            type == "string" and test($pattern) and (test("[[:cntrl:]]") | not);
+          def safe_list($pattern):
+            type == "array" and all(.[]; safe_string($pattern));
+          length == 1 and (.[0] |
+            type == "object"
+            and keys == ["dockerfile_path", "evidence_bucket", "paired_web_sha",
+                         "private_runtime", "quality_evidence_services",
+                         "repository_aliases", "runtime_kind"]
+            and (.runtime_kind == "cloud_run_service" or .runtime_kind == "cloud_run_job")
+            and (.evidence_bucket | safe_string("^[a-z0-9][a-z0-9._-]{2,222}$"))
+            and (.private_runtime | type == "boolean")
+            and (.dockerfile_path |
+                 safe_string("^[A-Za-z0-9_./-]+$")
+                 and (startswith("/") | not)
+                 and (split("/") | all(. != "..")))
+            and (.quality_evidence_services | safe_list("^[a-z][a-z0-9-]*$"))
+            and (.repository_aliases | safe_list("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"))
+            and (.paired_web_sha | safe_string("^([0-9a-f]{40})?$"))
+            and ($service != "cgm-artemis-api" or (.paired_web_sha | length == 40))
+          )' <<<"$EXECUTION_CONFIG" >/dev/null
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        ref: ${{ inputs.tag }}
+    - name: Resolve and verify release identity
+      id: release
+      env:
+        EXPECTED_TAG: ${{ inputs.tag }}
+        DEPLOYMENT_ID: ${{ inputs.github_deployment_id }}
+      run: |
+        set -euo pipefail
+        sha="$(git rev-parse HEAD)"
+        test "$(git rev-parse "$EXPECTED_TAG^{commit}")" = "$sha"
+        fingerprint="$(printf '%s' "$DEPLOYMENT_ID|${GITHUB_REPOSITORY}|$EXPECTED_TAG|$sha|deploy" | sha256sum | cut -d' ' -f1)"
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
+        echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+    - name: Verify Engineering Platform authorization
+      uses: ./.github/actions/verify-release-authorization
+      with:
+        token: ${{ inputs.platform_authorization }}
+        repository: ${{ github.repository }}
+        service_name: ${{ inputs.service_name }}
+        tag: ${{ inputs.tag }}
+        sha: ${{ steps.release.outputs.sha }}
+        github_deployment_id: ${{ inputs.github_deployment_id }}
+        kind: deploy
+        platform_api_url: ${{ vars.ENG_PLATFORM_API_URL }}
+        signing_public_key: ${{ vars.ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY }}
+    - name: Bind verified runtime execution configuration
+      env:
+        RELEASE_SERVICE: ${{ inputs.service_name }}
+        EXECUTION_CONFIG: ${{ inputs.execution_config }}
+        EXECUTION_AUTHORIZATION: ${{ inputs.platform_authorization }}
+      run: |
+        set -euo pipefail
+        if [[ "$RELEASE_SERVICE" != cgm-artemis-* ]]; then
+          exit 0
+        fi
+        # The preceding pinned action verified this ticket's signature and identity.
+        python3 - <<'PY'
+        import base64
+        import hashlib
+        import json
+        import os
+        import sys
+
+        canonical = json.dumps(
+            json.loads(os.environ["EXECUTION_CONFIG"]),
+            sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        ).encode("ascii")
+        expected = hashlib.sha256(canonical).hexdigest()
+        parts = os.environ["EXECUTION_AUTHORIZATION"].split(".")
+        try:
+            if len(parts) != 3:
+                raise ValueError("Malformed ticket")
+            payload = parts[1] + "=" * (-len(parts[1]) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(payload))
+        except (ValueError, TypeError):
+            sys.exit("Verified ticket configuration is unavailable")
+        if claims.get("configuration_hash") != expected:
+            sys.exit("Runtime configuration does not match the verified platform ticket")
+        PY
+        jq -r '
+          ["CGM_RUNTIME_KIND=" + .runtime_kind,
+           "CGM_EVIDENCE_BUCKET=" + .evidence_bucket,
+           "CGM_PRIVATE_RUNTIME=" + (.private_runtime | tostring),
+           "CGM_DOCKERFILE_PATH=" + .dockerfile_path,
+           "CGM_QUALITY_EVIDENCE_SERVICES=" + (.quality_evidence_services | join(",")),
+           "CGM_REPOSITORY_ALIASES=" + (.repository_aliases | join(",")),
+           "CGM_PAIRED_WEB_SHA=" + .paired_web_sha] | .[]
+        ' <<<"$EXECUTION_CONFIG" >> "$GITHUB_ENV"
+    - name: Require exact OSS quality evidence
+      uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-quality@ac9d68554c8b6332013785a5bcf451eabfee93ec
+      with:
+        platform-api-url: ${{ vars.ENG_PLATFORM_API_URL }}
+        service-name: ${{ inputs.service_name }}
+        commit-sha: ${{ steps.release.outputs.sha }}
+        wait-seconds: '0'
+  candidate:
+    if: ${{ inputs.service_name == 'cgm-artemis-api' || inputs.service_name == 'cgm-artemis-web' }}
+    needs: verify-release
+    runs-on: ubuntu-latest
+    environment: candidate
+    outputs:
+      candidate_sha256: ${{ steps.receipt.outputs.sha256 }}
+      artifact_id: ${{ steps.candidate-artifact.outputs.artifact-id }}
+    steps:
+    - name: Validate release executor configuration
+      env:
+        RELEASE_EXECUTOR_IMAGE: ${{ needs.verify-release.outputs.executor_image }}
+        PLATFORM_API_URL: ${{ vars.ENG_PLATFORM_API_URL }}
+        RELEASE_SIGNING_PUBLIC_KEY: ${{ vars.ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY }}
+        RELEASE_WIF_PROVIDER: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
+        RELEASE_SERVICE_ACCOUNT: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+      run: |
+        set -euo pipefail
+        [[ "$RELEASE_EXECUTOR_IMAGE" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || {
+          echo 'Release executor must be pinned by a complete SHA-256 digest' >&2
+          exit 1
+        }
+        [[ "$PLATFORM_API_URL" == https://* ]] || {
+          echo 'Engineering Platform API URL must use HTTPS' >&2
+          exit 1
+        }
+        for name in RELEASE_SIGNING_PUBLIC_KEY RELEASE_WIF_PROVIDER RELEASE_SERVICE_ACCOUNT; do
+          test -n "${!name}" || { echo "Required release configuration is missing: $name" >&2; exit 1; }
+        done
+    - name: Validate bounded runtime execution configuration
+      env:
+        RELEASE_SERVICE: ${{ inputs.service_name }}
+        EXECUTION_CONFIG: ${{ inputs.execution_config }}
+      run: |
+        set -euo pipefail
+        if [[ "$RELEASE_SERVICE" != cgm-artemis-* ]]; then
+          jq -se 'length == 1 and (.[0] | type == "object" and length == 0)' \
+            <<<"$EXECUTION_CONFIG" >/dev/null
+          exit 0
+        fi
+        jq -se --arg service "$RELEASE_SERVICE" '
+          def safe_string($pattern):
+            type == "string" and test($pattern) and (test("[[:cntrl:]]") | not);
+          def safe_list($pattern):
+            type == "array" and all(.[]; safe_string($pattern));
+          length == 1 and (.[0] |
+            type == "object"
+            and keys == ["dockerfile_path", "evidence_bucket", "paired_web_sha",
+                         "private_runtime", "quality_evidence_services",
+                         "repository_aliases", "runtime_kind"]
+            and (.runtime_kind == "cloud_run_service" or .runtime_kind == "cloud_run_job")
+            and (.evidence_bucket | safe_string("^[a-z0-9][a-z0-9._-]{2,222}$"))
+            and (.private_runtime | type == "boolean")
+            and (.dockerfile_path |
+                 safe_string("^[A-Za-z0-9_./-]+$")
+                 and (startswith("/") | not)
+                 and (split("/") | all(. != "..")))
+            and (.quality_evidence_services | safe_list("^[a-z][a-z0-9-]*$"))
+            and (.repository_aliases | safe_list("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"))
+            and (.paired_web_sha | safe_string("^([0-9a-f]{40})?$"))
+            and ($service != "cgm-artemis-api" or (.paired_web_sha | length == 40))
+          )' <<<"$EXECUTION_CONFIG" >/dev/null
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        ref: ${{ inputs.tag }}
+    - name: Resolve and verify release identity
+      id: release
+      env:
+        EXPECTED_TAG: ${{ inputs.tag }}
+        DEPLOYMENT_ID: ${{ inputs.github_deployment_id }}
+      run: |
+        set -euo pipefail
+        sha="$(git rev-parse HEAD)"
+        test "$(git rev-parse "$EXPECTED_TAG^{commit}")" = "$sha"
+        fingerprint="$(printf '%s' "$DEPLOYMENT_ID|${GITHUB_REPOSITORY}|$EXPECTED_TAG|$sha|deploy" | sha256sum | cut -d' ' -f1)"
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
+        echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+    - name: Verify Engineering Platform authorization
+      uses: ./.github/actions/verify-release-authorization
+      with:
+        token: ${{ inputs.platform_authorization }}
+        repository: ${{ github.repository }}
+        service_name: ${{ inputs.service_name }}
+        tag: ${{ inputs.tag }}
+        sha: ${{ steps.release.outputs.sha }}
+        github_deployment_id: ${{ inputs.github_deployment_id }}
+        kind: deploy
+        platform_api_url: ${{ vars.ENG_PLATFORM_API_URL }}
+        signing_public_key: ${{ vars.ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY }}
+        mode: continue
+        stage: candidate
+    - name: Bind verified runtime execution configuration
+      env:
+        RELEASE_SERVICE: ${{ inputs.service_name }}
+        EXECUTION_CONFIG: ${{ inputs.execution_config }}
+        EXECUTION_AUTHORIZATION: ${{ inputs.platform_authorization }}
+      run: |
+        set -euo pipefail
+        if [[ "$RELEASE_SERVICE" != cgm-artemis-* ]]; then
+          exit 0
+        fi
+        # The preceding pinned action verified this ticket's signature and identity.
+        python3 - <<'PY'
+        import base64
+        import hashlib
+        import json
+        import os
+        import sys
+
+        canonical = json.dumps(
+            json.loads(os.environ["EXECUTION_CONFIG"]),
+            sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        ).encode("ascii")
+        expected = hashlib.sha256(canonical).hexdigest()
+        parts = os.environ["EXECUTION_AUTHORIZATION"].split(".")
+        try:
+            if len(parts) != 3:
+                raise ValueError("Malformed ticket")
+            payload = parts[1] + "=" * (-len(parts[1]) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(payload))
+        except (ValueError, TypeError):
+            sys.exit("Verified ticket configuration is unavailable")
+        if claims.get("configuration_hash") != expected:
+            sys.exit("Runtime configuration does not match the verified platform ticket")
+        PY
+        jq -r '
+          ["CGM_RUNTIME_KIND=" + .runtime_kind,
+           "CGM_EVIDENCE_BUCKET=" + .evidence_bucket,
+           "CGM_PRIVATE_RUNTIME=" + (.private_runtime | tostring),
+           "CGM_DOCKERFILE_PATH=" + .dockerfile_path,
+           "CGM_QUALITY_EVIDENCE_SERVICES=" + (.quality_evidence_services | join(",")),
+           "CGM_REPOSITORY_ALIASES=" + (.repository_aliases | join(",")),
+           "CGM_PAIRED_WEB_SHA=" + .paired_web_sha] | .[]
+        ' <<<"$EXECUTION_CONFIG" >> "$GITHUB_ENV"
+    - name: Require exact OSS quality evidence
+      uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-quality@ac9d68554c8b6332013785a5bcf451eabfee93ec
+      with:
+        platform-api-url: ${{ vars.ENG_PLATFORM_API_URL }}
+        service-name: ${{ inputs.service_name }}
+        commit-sha: ${{ steps.release.outputs.sha }}
+        wait-seconds: '0'
+    - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+      with:
+        workload_identity_provider: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
+        service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+    - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f
+    - name: Mark deployment in progress
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        DEPLOYMENT_ID: ${{ inputs.github_deployment_id }}
+      run: |
+        gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+          -f state=in_progress \
+          -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+          -f description='Central release engine started' >/dev/null
+    - name: Execute the pinned central engine
+      env:
+        RELEASE_EXECUTOR_IMAGE: ${{ needs.verify-release.outputs.executor_image }}
+        CGM_SERVICE: ${{ inputs.service_name }}
+        CGM_RELEASE_TAG: ${{ inputs.tag }}
+        CGM_RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        CGM_PROJECT_ID: ${{ inputs.project_id }}
+        CGM_REGION: ${{ inputs.region }}
+        CGM_IMAGE_NAME: ${{ inputs.image_name }}
+        CGM_ARTIFACT_REPOSITORY: ${{ inputs.artifact_repository }}
+        CGM_BUILD_CONTEXT: ${{ inputs.build_context }}
+        CGM_HEALTH_PATH: ${{ inputs.health_path }}
+        CGM_DEPLOYMENT_ID: ${{ inputs.github_deployment_id }}
+        CGM_OPERATION: deploy
+        CGM_REPOSITORY: ${{ github.repository }}
+        CGM_REQUEST_FINGERPRINT: ${{ steps.release.outputs.fingerprint }}
+        CGM_PROFILE: ${{ inputs.service_name }}
+        CGM_PROFILE_SHA256: ${{ inputs.profile_sha256 }}
+        CGM_PLATFORM_API_URL: ${{ vars.ENG_PLATFORM_API_URL }}
+        CGM_IMAGE: ${{ inputs.region }}-docker.pkg.dev/${{ inputs.project_id }}/${{ inputs.artifact_repository }}/${{
+          inputs.image_name }}:${{ inputs.tag }}
+        CGM_RELEASE_PHASE: candidate
+        CGM_CANDIDATE_SHA256: ''
+      run: |
+        set -euo pipefail
+        # Fixed, source-tagged controller maintenance under the verified
+        # deployment ticket and existing WIF. Never accepts caller config.
+        if [ "$CGM_SERVICE" = eng-platform-api ]; then
+          test "$CGM_REPOSITORY" = diegomad14/gcp-engineering-platform-api
+          test "$CGM_PROJECT_ID" = cgm-assistant-prod
+          test "$CGM_REGION" = us-central1
+          test "$CGM_PROFILE_SHA256" = b29b8c450169374047dcddbb019eb27264ceeabf41272306199eb0d70632dbf0
+          PYTHONPATH=src python3 -m eng_platform_api.prepare_quality_tooling
+        fi
+        gcloud auth configure-docker "$CGM_REGION-docker.pkg.dev" --quiet
+        if [ "$CGM_RELEASE_PHASE" != full ]; then
+          # Inspect code without invoking the engine entrypoint or mounting credentials.
+          actual_engine_sha256="$(docker run --rm --network none --cap-drop ALL \
+            --security-opt no-new-privileges --read-only \
+            --entrypoint /usr/bin/sha256sum "$RELEASE_EXECUTOR_IMAGE" \
+            /opt/eng-platform/release_executor.py | cut -d' ' -f1)"
+          test "$actual_engine_sha256" = 0a03ff42a2d5c7932db0ffb0ab17f79483daceb2534847dcf620df80a057b20c || {
+            echo 'Release engine does not implement the approved staged contract' >&2
+            exit 1
+          }
+        fi
+        credential_file="$(basename "$GOOGLE_APPLICATION_CREDENTIALS")"
+        docker run --rm --network host \
+          --volume "$PWD:/workspace" --volume /var/run/docker.sock:/var/run/docker.sock \
+          --user "$(id -u):$(id -g)" --group-add "$(stat -c %g /var/run/docker.sock)" \
+          --env HOME=/tmp --env CLOUDSDK_CONFIG=/tmp/gcloud \
+          --workdir /workspace --env GOOGLE_APPLICATION_CREDENTIALS="/workspace/$credential_file" \
+          --env CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="/workspace/$credential_file" \
+          --env CGM_SERVICE --env CGM_RELEASE_TAG --env CGM_RELEASE_SHA \
+          --env CGM_PROJECT_ID --env CGM_REGION --env CGM_IMAGE_NAME \
+          --env CGM_ARTIFACT_REPOSITORY --env CGM_BUILD_CONTEXT --env CGM_HEALTH_PATH \
+          --env CGM_DEPLOYMENT_ID --env CGM_OPERATION --env CGM_REPOSITORY \
+          --env CGM_REQUEST_FINGERPRINT --env CGM_PROFILE --env CGM_PROFILE_SHA256 \
+          --env CGM_PLATFORM_API_URL \
+          --env CGM_RUNTIME_KIND --env CGM_EVIDENCE_BUCKET --env CGM_PRIVATE_RUNTIME \
+          --env CGM_DOCKERFILE_PATH --env CGM_QUALITY_EVIDENCE_SERVICES \
+          --env CGM_REPOSITORY_ALIASES --env CGM_PAIRED_WEB_SHA \
+          --env CGM_RELEASE_PHASE --env CGM_CANDIDATE_SHA256 \
+          --env CGM_IMAGE \
+          "$RELEASE_EXECUTOR_IMAGE" --service "$CGM_SERVICE"
+    - name: Publish validated candidate evidence
+      id: receipt
+      run: |
+        set -euo pipefail
+        test -f .eng-platform-candidate.json
+        sha="$(sha256sum .eng-platform-candidate.json | cut -d' ' -f1)"
+        echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+    - name: Retain this run candidate
+      id: candidate-artifact
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: candidate-${{ inputs.github_deployment_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .eng-platform-candidate.json
+        include-hidden-files: true
+        if-no-files-found: error
+        retention-days: 7
+    - name: Publish candidate failure
+      if: ${{ failure() || cancelled() }}
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        DEPLOYMENT_ID: ${{ inputs.github_deployment_id }}
+        JOB_STATUS: ${{ job.status }}
+      run: |
+        set -euo pipefail
+        state=$([ "$JOB_STATUS" = success ] && echo success || echo failure)
+        description=$([ "$JOB_STATUS" = success ] && echo 'Central release engine succeeded' || echo 'Central release engine failed')
+        args=()
+        if [ -f .eng-platform-release-result.json ]; then
+          revision="$(jq -r '.production_revision // empty' .eng-platform-release-result.json)"
+          production_url="$(jq -r '.production_url // empty' .eng-platform-release-result.json)"
+          test -z "$revision" || description="production_revision=$revision"
+          test -z "$production_url" || args+=(-f "environment_url=$production_url")
+        fi
+        gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+          -f state="$state" -f description="$description" \
+          -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+          "${args[@]}" >/dev/null
+  promote:
+    if: ${{ always() && needs.verify-release.result == 'success' && (needs.candidate.result == 'success' || (startsWith(inputs.service_name,
+      'cgm-artemis-') && inputs.service_name != 'cgm-artemis-api' && inputs.service_name != 'cgm-artemis-web'))
+      }}
+    needs:
+    - verify-release
+    - candidate
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+    - name: Validate release executor configuration
+      env:
+        RELEASE_EXECUTOR_IMAGE: ${{ needs.verify-release.outputs.executor_image }}
+        PLATFORM_API_URL: ${{ vars.ENG_PLATFORM_API_URL }}
+        RELEASE_SIGNING_PUBLIC_KEY: ${{ vars.ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY }}
+        RELEASE_WIF_PROVIDER: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
+        RELEASE_SERVICE_ACCOUNT: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+      run: |
+        set -euo pipefail
+        [[ "$RELEASE_EXECUTOR_IMAGE" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || {
+          echo 'Release executor must be pinned by a complete SHA-256 digest' >&2
+          exit 1
+        }
+        [[ "$PLATFORM_API_URL" == https://* ]] || {
+          echo 'Engineering Platform API URL must use HTTPS' >&2
+          exit 1
+        }
+        for name in RELEASE_SIGNING_PUBLIC_KEY RELEASE_WIF_PROVIDER RELEASE_SERVICE_ACCOUNT; do
+          test -n "${!name}" || { echo "Required release configuration is missing: $name" >&2; exit 1; }
+        done
+    - name: Validate bounded runtime execution configuration
+      env:
+        RELEASE_SERVICE: ${{ inputs.service_name }}
+        EXECUTION_CONFIG: ${{ inputs.execution_config }}
+      run: |
+        set -euo pipefail
+        if [[ "$RELEASE_SERVICE" != cgm-artemis-* ]]; then
+          jq -se 'length == 1 and (.[0] | type == "object" and length == 0)' \
+            <<<"$EXECUTION_CONFIG" >/dev/null
+          exit 0
+        fi
+        jq -se --arg service "$RELEASE_SERVICE" '
+          def safe_string($pattern):
+            type == "string" and test($pattern) and (test("[[:cntrl:]]") | not);
+          def safe_list($pattern):
+            type == "array" and all(.[]; safe_string($pattern));
+          length == 1 and (.[0] |
+            type == "object"
+            and keys == ["dockerfile_path", "evidence_bucket", "paired_web_sha",
+                         "private_runtime", "quality_evidence_services",
+                         "repository_aliases", "runtime_kind"]
+            and (.runtime_kind == "cloud_run_service" or .runtime_kind == "cloud_run_job")
+            and (.evidence_bucket | safe_string("^[a-z0-9][a-z0-9._-]{2,222}$"))
+            and (.private_runtime | type == "boolean")
+            and (.dockerfile_path |
+                 safe_string("^[A-Za-z0-9_./-]+$")
+                 and (startswith("/") | not)
+                 and (split("/") | all(. != "..")))
+            and (.quality_evidence_services | safe_list("^[a-z][a-z0-9-]*$"))
+            and (.repository_aliases | safe_list("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"))
+            and (.paired_web_sha | safe_string("^([0-9a-f]{40})?$"))
+            and ($service != "cgm-artemis-api" or (.paired_web_sha | length == 40))
+          )' <<<"$EXECUTION_CONFIG" >/dev/null
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        ref: ${{ inputs.tag }}
+    - name: Resolve and verify release identity
+      id: release
+      env:
+        EXPECTED_TAG: ${{ inputs.tag }}
+        DEPLOYMENT_ID: ${{ inputs.github_deployment_id }}
+      run: |
+        set -euo pipefail
+        sha="$(git rev-parse HEAD)"
+        test "$(git rev-parse "$EXPECTED_TAG^{commit}")" = "$sha"
+        fingerprint="$(printf '%s' "$DEPLOYMENT_ID|${GITHUB_REPOSITORY}|$EXPECTED_TAG|$sha|deploy" | sha256sum | cut -d' ' -f1)"
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
+        echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+    - name: Verify Engineering Platform authorization
+      uses: ./.github/actions/verify-release-authorization
+      with:
+        token: ${{ inputs.platform_authorization }}
+        repository: ${{ github.repository }}
+        service_name: ${{ inputs.service_name }}
+        tag: ${{ inputs.tag }}
+        sha: ${{ steps.release.outputs.sha }}
+        github_deployment_id: ${{ inputs.github_deployment_id }}
+        kind: deploy
+        platform_api_url: ${{ vars.ENG_PLATFORM_API_URL }}
+        signing_public_key: ${{ vars.ENG_PLATFORM_RELEASE_SIGNING_PUBLIC_KEY }}
+        mode: continue
+        stage: promote
+    - name: Bind verified runtime execution configuration
+      env:
+        RELEASE_SERVICE: ${{ inputs.service_name }}
+        EXECUTION_CONFIG: ${{ inputs.execution_config }}
+        EXECUTION_AUTHORIZATION: ${{ inputs.platform_authorization }}
+      run: |
+        set -euo pipefail
+        if [[ "$RELEASE_SERVICE" != cgm-artemis-* ]]; then
+          exit 0
+        fi
+        # The preceding pinned action verified this ticket's signature and identity.
+        python3 - <<'PY'
+        import base64
+        import hashlib
+        import json
+        import os
+        import sys
+
+        canonical = json.dumps(
+            json.loads(os.environ["EXECUTION_CONFIG"]),
+            sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        ).encode("ascii")
+        expected = hashlib.sha256(canonical).hexdigest()
+        parts = os.environ["EXECUTION_AUTHORIZATION"].split(".")
+        try:
+            if len(parts) != 3:
+                raise ValueError("Malformed ticket")
+            payload = parts[1] + "=" * (-len(parts[1]) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(payload))
+        except (ValueError, TypeError):
+            sys.exit("Verified ticket configuration is unavailable")
+        if claims.get("configuration_hash") != expected:
+            sys.exit("Runtime configuration does not match the verified platform ticket")
+        PY
+        jq -r '
+          ["CGM_RUNTIME_KIND=" + .runtime_kind,
+           "CGM_EVIDENCE_BUCKET=" + .evidence_bucket,
+           "CGM_PRIVATE_RUNTIME=" + (.private_runtime | tostring),
+           "CGM_DOCKERFILE_PATH=" + .dockerfile_path,
+           "CGM_QUALITY_EVIDENCE_SERVICES=" + (.quality_evidence_services | join(",")),
+           "CGM_REPOSITORY_ALIASES=" + (.repository_aliases | join(",")),
+           "CGM_PAIRED_WEB_SHA=" + .paired_web_sha] | .[]
+        ' <<<"$EXECUTION_CONFIG" >> "$GITHUB_ENV"
+    - name: Require exact OSS quality evidence
+      uses: diegomad14/gcp-engineering-platform-api/.github/actions/verify-quality@ac9d68554c8b6332013785a5bcf451eabfee93ec
+      with:
+        platform-api-url: ${{ vars.ENG_PLATFORM_API_URL }}
+        service-name: ${{ inputs.service_name }}
+        commit-sha: ${{ steps.release.outputs.sha }}
+        wait-seconds: '0'
+    - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+      with:
+        workload_identity_provider: ${{ vars.GCP_RELEASE_WIF_PROVIDER }}
+        service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+    - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f
+    - name: Mark deployment in progress
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        DEPLOYMENT_ID: ${{ inputs.github_deployment_id }}
+      run: |
+        gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+          -f state=in_progress \
+          -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+          -f description='Central release engine started' >/dev/null
+    - name: Download the validated candidate from this run
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        artifact-ids: ${{ needs.candidate.outputs.artifact_id }}
+        path: .
+        merge-multiple: true
+      if: ${{ inputs.service_name == 'cgm-artemis-api' || inputs.service_name == 'cgm-artemis-web' }}
+    - name: Verify candidate evidence checksum
+      env:
+        EXPECTED_CANDIDATE_SHA256: ${{ needs.candidate.outputs.candidate_sha256 }}
+      run: |
+        set -euo pipefail
+        [[ "$EXPECTED_CANDIDATE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+        actual="$(sha256sum .eng-platform-candidate.json | cut -d' ' -f1)"
+        test "$actual" = "$EXPECTED_CANDIDATE_SHA256"
+      if: ${{ inputs.service_name == 'cgm-artemis-api' || inputs.service_name == 'cgm-artemis-web' }}
+    - name: Execute the pinned central engine
+      env:
+        RELEASE_EXECUTOR_IMAGE: ${{ needs.verify-release.outputs.executor_image }}
+        CGM_SERVICE: ${{ inputs.service_name }}
+        CGM_RELEASE_TAG: ${{ inputs.tag }}
+        CGM_RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        CGM_PROJECT_ID: ${{ inputs.project_id }}
+        CGM_REGION: ${{ inputs.region }}
+        CGM_IMAGE_NAME: ${{ inputs.image_name }}
+        CGM_ARTIFACT_REPOSITORY: ${{ inputs.artifact_repository }}
+        CGM_BUILD_CONTEXT: ${{ inputs.build_context }}
+        CGM_HEALTH_PATH: ${{ inputs.health_path }}
+        CGM_DEPLOYMENT_ID: ${{ inputs.github_deployment_id }}
+        CGM_OPERATION: deploy
+        CGM_REPOSITORY: ${{ github.repository }}
+        CGM_REQUEST_FINGERPRINT: ${{ steps.release.outputs.fingerprint }}
+        CGM_PROFILE: ${{ inputs.service_name }}
+        CGM_PROFILE_SHA256: ${{ inputs.profile_sha256 }}
+        CGM_PLATFORM_API_URL: ${{ vars.ENG_PLATFORM_API_URL }}
+        CGM_IMAGE: ${{ inputs.region }}-docker.pkg.dev/${{ inputs.project_id }}/${{ inputs.artifact_repository }}/${{
+          inputs.image_name }}:${{ inputs.tag }}
+        CGM_RELEASE_PHASE: ${{ (inputs.service_name == 'cgm-artemis-api' || inputs.service_name == 'cgm-artemis-web')
+          && 'promote' || 'full' }}
+        CGM_CANDIDATE_SHA256: ${{ needs.candidate.outputs.candidate_sha256 }}
+      run: |
+        set -euo pipefail
+        # Fixed, source-tagged controller maintenance under the verified
+        # deployment ticket and existing WIF. Never accepts caller config.
+        if [ "$CGM_SERVICE" = eng-platform-api ]; then
+          test "$CGM_REPOSITORY" = diegomad14/gcp-engineering-platform-api
+          test "$CGM_PROJECT_ID" = cgm-assistant-prod
+          test "$CGM_REGION" = us-central1
+          test "$CGM_PROFILE_SHA256" = b29b8c450169374047dcddbb019eb27264ceeabf41272306199eb0d70632dbf0
+          PYTHONPATH=src python3 -m eng_platform_api.prepare_quality_tooling
+        fi
+        gcloud auth configure-docker "$CGM_REGION-docker.pkg.dev" --quiet
+        if [ "$CGM_RELEASE_PHASE" != full ]; then
+          # Inspect code without invoking the engine entrypoint or mounting credentials.
+          actual_engine_sha256="$(docker run --rm --network none --cap-drop ALL \
+            --security-opt no-new-privileges --read-only \
+            --entrypoint /usr/bin/sha256sum "$RELEASE_EXECUTOR_IMAGE" \
+            /opt/eng-platform/release_executor.py | cut -d' ' -f1)"
+          test "$actual_engine_sha256" = 0a03ff42a2d5c7932db0ffb0ab17f79483daceb2534847dcf620df80a057b20c || {
+            echo 'Release engine does not implement the approved staged contract' >&2
+            exit 1
+          }
+        fi
+        credential_file="$(basename "$GOOGLE_APPLICATION_CREDENTIALS")"
+        docker run --rm --network host \
+          --volume "$PWD:/workspace" --volume /var/run/docker.sock:/var/run/docker.sock \
+          --user "$(id -u):$(id -g)" --group-add "$(stat -c %g /var/run/docker.sock)" \
+          --env HOME=/tmp --env CLOUDSDK_CONFIG=/tmp/gcloud \
+          --workdir /workspace --env GOOGLE_APPLICATION_CREDENTIALS="/workspace/$credential_file" \
+          --env CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="/workspace/$credential_file" \
+          --env CGM_SERVICE --env CGM_RELEASE_TAG --env CGM_RELEASE_SHA \
+          --env CGM_PROJECT_ID --env CGM_REGION --env CGM_IMAGE_NAME \
+          --env CGM_ARTIFACT_REPOSITORY --env CGM_BUILD_CONTEXT --env CGM_HEALTH_PATH \
+          --env CGM_DEPLOYMENT_ID --env CGM_OPERATION --env CGM_REPOSITORY \
+          --env CGM_REQUEST_FINGERPRINT --env CGM_PROFILE --env CGM_PROFILE_SHA256 \
+          --env CGM_PLATFORM_API_URL \
+          --env CGM_RUNTIME_KIND --env CGM_EVIDENCE_BUCKET --env CGM_PRIVATE_RUNTIME \
+          --env CGM_DOCKERFILE_PATH --env CGM_QUALITY_EVIDENCE_SERVICES \
+          --env CGM_REPOSITORY_ALIASES --env CGM_PAIRED_WEB_SHA \
+          --env CGM_RELEASE_PHASE --env CGM_CANDIDATE_SHA256 \
+          --env CGM_IMAGE \
+          "$RELEASE_EXECUTOR_IMAGE" --service "$CGM_SERVICE"
+    - name: Publish deployment result
+      if: always()
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        DEPLOYMENT_ID: ${{ inputs.github_deployment_id }}
+        JOB_STATUS: ${{ job.status }}
+      run: |
+        set -euo pipefail
+        state=$([ "$JOB_STATUS" = success ] && echo success || echo failure)
+        description=$([ "$JOB_STATUS" = success ] && echo 'Central release engine succeeded' || echo 'Central release engine failed')
+        args=()
+        if [ -f .eng-platform-release-result.json ]; then
+          revision="$(jq -r '.production_revision // empty' .eng-platform-release-result.json)"
+          production_url="$(jq -r '.production_url // empty' .eng-platform-release-result.json)"
+          test -z "$revision" || description="production_revision=$revision"
+          test -z "$production_url" || args+=(-f "environment_url=$production_url")
+        fi
+        gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+          -f state="$state" -f description="$description" \
+          -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+          "${args[@]}" >/dev/null

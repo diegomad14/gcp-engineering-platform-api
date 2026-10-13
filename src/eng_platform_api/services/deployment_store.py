@@ -10,6 +10,12 @@ from __future__ import annotations
 import json
 import os
 import threading
+import hashlib
+import uuid
+import fcntl
+import tempfile
+from contextvars import ContextVar
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -23,6 +29,79 @@ _COLLECTION = os.getenv("ENG_PLATFORM_DEPLOYMENT_FIRESTORE_COLLECTION", "")
 # A single Firestore IN query supports at most 30 comparison values.
 _FIRESTORE_IN_QUERY_LIMIT = 30
 _lock = threading.RLock()
+_command_key: ContextVar[str] = ContextVar("deployment_command_key", default="")
+
+
+@contextmanager
+def using_command_key(key: str):
+    token = _command_key.set(key)
+    try:
+        yield
+    finally:
+        _command_key.reset(token)
+
+
+def persist_before_dispatch(item: DeploymentItem) -> None:
+    """Bind the durable admission to its external object before any dispatch."""
+    key = _command_key.get()
+    if key:
+        save(item, key)
+
+
+@contextmanager
+def command_guard(service_name: str):
+    """Serialize the check/reserve/dispatch boundary across replicas.
+
+    A crashed Firestore owner leaves the fence closed for investigation rather
+    than letting a lease timeout create a second remote build.
+    """
+    collection = _firestore_collection()
+    if collection is None:
+        lock_path = _path().with_name(
+            _path().name
+            + "."
+            + hashlib.sha256(service_name.encode()).hexdigest()
+            + ".command.lock"
+        )
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a") as stream:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        return
+    from google.cloud.firestore import transactional
+    from fastapi import HTTPException
+
+    document = collection._client.collection(_COLLECTION + "_command_locks").document(
+        hashlib.sha256(service_name.encode()).hexdigest()
+    )
+    owner = uuid.uuid4().hex
+    transaction = collection._client.transaction()
+
+    @transactional
+    def claim(txn):
+        current = document.get(transaction=txn)
+        if current.exists and (current.to_dict() or {}).get("owner"):
+            raise HTTPException(
+                409,
+                "Deployment command is pending; provider and dispatch require reconciliation",
+            )
+        txn.set(document, {"owner": owner, "service_name": service_name})
+
+    claim(transaction)
+    try:
+        yield
+    finally:
+        # No TTL or force acquisition: uncertain/crashed dispatch stays fenced.
+        @transactional
+        def release(txn):
+            snapshot = document.get(transaction=txn)
+            if snapshot.exists and (snapshot.to_dict() or {}).get("owner") == owner:
+                txn.delete(document)
+
+        release(collection._client.transaction())
 
 
 def _path() -> Path:
@@ -35,19 +114,48 @@ def _path() -> Path:
 
 def _local_load() -> list[dict[str, Any]]:
     path = _path()
-    if not path.exists():
-        return []
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return payload if isinstance(payload, list) else []
-    except (OSError, json.JSONDecodeError):
+        if not isinstance(payload, list):
+            raise ValueError("Invalid deployment snapshot")
+        return payload
+    except FileNotFoundError:
         return []
+    except (OSError, ValueError):
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            503, "Deployment state is unavailable; reconcile before retrying"
+        ) from None
 
 
 def _local_save(items: list[dict[str, Any]]) -> None:
     path = _path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(items, indent=2), encoding="utf-8")
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".deployments-")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(items, stream, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+@contextmanager
+def _local_write_guard():
+    """Protect the entire snapshot read/modify/write across services/processes."""
+    with _lock:
+        path = _path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Lock a stable separate inode: atomic replacement changes the JSON inode.
+        with path.with_name(path.name + ".store.lock").open("a") as stream:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 @lru_cache(maxsize=4)
@@ -74,6 +182,9 @@ def _firestore_collection():
 def save(item: DeploymentItem, idempotency_key: str) -> DeploymentItem:
     collection = _firestore_collection()
     if collection is not None:
+        previous_intent = (
+            find_by_idempotency_key(idempotency_key) if idempotency_key else None
+        )
         document = collection.document(item.id)
         existing = document.get()
         previous_key = (
@@ -86,15 +197,24 @@ def save(item: DeploymentItem, idempotency_key: str) -> DeploymentItem:
             "idempotency_key": idempotency_key or previous_key,
         }
         document.set(record)
+        # The new binding is durable first. A failed cleanup leaves a closed
+        # admission for reconciliation, never permission for another dispatch.
+        if previous_intent and previous_intent.id != item.id:
+            collection.document(previous_intent.id).delete()
         return item
-    with _lock:
+    with _local_write_guard():
         current = _local_load()
         previous = next((r for r in current if r.get("id") == item.id), {})
         record = {
             **item.model_dump(),
             "idempotency_key": idempotency_key or previous.get("idempotency_key", ""),
         }
-        records = [r for r in current if r.get("id") != item.id]
+        records = [
+            r
+            for r in current
+            if r.get("id") != item.id
+            and (not idempotency_key or r.get("idempotency_key") != idempotency_key)
+        ]
         records.append(record)
         _local_save(records)
     return item

@@ -32,6 +32,7 @@ from .services import (
     release_orchestrator,
     release_quality_bootstrap,
 )
+from .models import ReleaseExecutionView
 from .services.mcp_auth import _SCOPES, provider
 from .services import mcp_grants, log_catalog
 from .services import database_jobs, database_views, database_registry, database_console
@@ -65,7 +66,7 @@ mcp = _ScopedFastMCP(
         "Use eng-platform for platform insight, tagged deployments, rollbacks, cost alerts "
         "and read-only PostgreSQL queries. Queries are asynchronous; poll status and "
         "read individual pages, never automatically retrieve every page. "
-        "The platform, not the client, chooses its executor."
+        "Choose an execution provider or inherit the service default. Existing operations keep their provider."
     ),
     auth_server_provider=provider,
     streamable_http_path="/mcp",
@@ -317,9 +318,13 @@ def list_releases(service_name: str = "", limit: int = 20) -> dict[str, Any]:
 
 @mcp.tool()
 def start_deployment(
-    service_name: str, tag: str, reason: str, idempotency_key: str
+    service_name: str,
+    tag: str,
+    reason: str,
+    idempotency_key: str,
+    provider: Literal["github_actions", "cloud_build"] | None = None,
 ) -> dict[str, Any]:
-    """Start one eligible tagged deployment. Executor choice stays private to the backend."""
+    """Start one tagged deployment with an optional explicit provider; errors never switch providers."""
     if not reason.strip() or not idempotency_key.strip():
         raise HTTPException(
             status_code=422, detail="reason and idempotency_key are required"
@@ -329,6 +334,7 @@ def start_deployment(
         "tag": tag,
         "reason": reason,
         "idempotency_key": idempotency_key,
+        "provider": provider,
     }
     return _mutate(
         "start_deployment",
@@ -339,6 +345,7 @@ def start_deployment(
             tag_name=tag,
             requested_by=subject,
             idempotency_key=idempotency_key,
+            provider=provider,
         ),
     )
 
@@ -481,7 +488,11 @@ def list_deployments(service_name: str, limit: int = 20) -> dict[str, Any]:
 
 @mcp.tool()
 def start_rollback(
-    service_name: str, deployment_id: str, reason: str, idempotency_key: str
+    service_name: str,
+    deployment_id: str,
+    reason: str,
+    idempotency_key: str,
+    provider: Literal["github_actions", "cloud_build"] | None = None,
 ) -> dict[str, Any]:
     """Start a rollback to one recorded successful production deployment."""
     if not reason.strip() or not idempotency_key.strip():
@@ -493,6 +504,7 @@ def start_rollback(
         "deployment_id": deployment_id,
         "reason": reason,
         "idempotency_key": idempotency_key,
+        "provider": provider,
     }
     return _mutate(
         "start_rollback",
@@ -503,6 +515,7 @@ def start_rollback(
             target_deployment_id=deployment_id,
             requested_by=subject,
             idempotency_key=idempotency_key,
+            provider=provider,
         ),
     )
 
@@ -948,5 +961,39 @@ def purge_database_workspace(database_id: str, workspace_id: str) -> dict[str, A
         {"database_id": database_id, "workspace_id": workspace_id},
         lambda principal: database_jobs.purge_workspace(
             principal, database_id, workspace_id
+        ),
+    )
+
+
+@mcp.tool()
+def start_release(
+    service_name: str,
+    head_sha: str,
+    base_sha: str,
+    reason: str,
+    provider: Literal["github_actions", "cloud_build"] | None = None,
+) -> dict[str, Any]:
+    """Start main release quality and publication with an optional provider; never deploys the service."""
+    if not reason.strip():
+        raise HTTPException(422, "reason is required")
+    payload = {
+        "service_name": service_name,
+        "head_sha": head_sha,
+        "base_sha": base_sha,
+        "reason": reason,
+        "provider": provider,
+    }
+    return _mutate(
+        "start_release",
+        payload,
+        "eng-platform.access",
+        lambda subject: ReleaseExecutionView.model_validate(
+            release_orchestrator.start_release(
+                service_name=service_name,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                provider=provider,
+                requested_by=subject,
+            )
         ),
     )

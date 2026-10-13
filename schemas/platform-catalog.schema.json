@@ -7,6 +7,7 @@
           "default": "auto",
           "enum": [
             "auto",
+            "github_actions",
             "cloud_build"
           ],
           "title": "Executor",
@@ -304,6 +305,9 @@
         },
         "quality": {
           "$ref": "#/$defs/CatalogQuality"
+        },
+        "release": {
+          "$ref": "#/$defs/ServiceReleaseConfig"
         },
         "deployment": {
           "$ref": "#/$defs/CatalogDeployment"
@@ -694,6 +698,29 @@
       },
       "title": "ObservationQuality",
       "type": "object"
+    },
+    "ServiceReleaseConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "executor": {
+          "anyOf": [
+            {
+              "enum": [
+                "github_actions",
+                "cloud_build"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Executor"
+        }
+      },
+      "title": "ServiceReleaseConfig",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -725,9 +752,6 @@
   "required": [
     "services"
   ],
-  "title": "Platform Service Catalog",
-  "type": "object",
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/diegomad14/gcp-engineering-platform-api/schemas/platform-catalog.schema.json",
-  "description": "Generated from log_catalog.CatalogDocument. service_name must also be globally unique; see local validator."
+  "title": "CatalogDocument",
+  "type": "object"
 }

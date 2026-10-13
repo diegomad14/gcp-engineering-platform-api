@@ -2,6 +2,12 @@ name: Engineering Platform Release
 run-name: eng-platform-release-${{ github.sha }}
 
 on:
+  workflow_dispatch:
+    inputs:
+      execution_id:
+        description: Reserved platform release execution
+        required: true
+        type: string
   push:
     branches: [main]
 
@@ -15,7 +21,7 @@ concurrency:
 
 jobs:
   release:
-    if: ${{ vars.ENG_PLATFORM_RELEASE_ORCHESTRATOR_ENABLED == 'true' && vars.ENG_PLATFORM_CI_EXECUTOR != 'cloud_build' }}
+    if: ${{ vars.ENG_PLATFORM_RELEASE_ORCHESTRATOR_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || vars.ENG_PLATFORM_CI_EXECUTOR != 'cloud_build') }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -28,6 +34,7 @@ jobs:
       - name: Resolve authorized execution
         id: execution
         env:
+          REQUESTED_EXECUTION_ID: ${{ inputs.execution_id }}
           PLATFORM_API_URL: ${{ vars.ENG_PLATFORM_API_URL }}
         run: |
           set -euo pipefail
@@ -46,6 +53,9 @@ jobs:
             [ "$attempt" = 20 ] && { jq -r .detail "$control_dir/execution.json"; exit 1; }
             sleep 3
           done
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            [ "$(jq -r .execution_id "$control_dir/execution.json")" = "$REQUESTED_EXECUTION_ID" ] || exit 1
+          fi
           for key in execution_id fingerprint base_sha profile_hash executor_image planner_image planner_hash; do
             value="$(jq -er --arg key "$key" '.[$key]' "$control_dir/execution.json")"
             printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"

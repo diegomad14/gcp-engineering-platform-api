@@ -30,17 +30,26 @@ def consume_authorization(
     payload: ReleaseAuthorizationConsumeRequest, request: Request
 ):
     try:
-        claims = release_authorization.verify(
-            payload.token,
-            {
-                "repository": payload.repository,
-                "service_name": payload.service_name,
-                "tag": payload.tag,
-                "sha": payload.sha,
-                "github_deployment_id": payload.github_deployment_id,
-                "kind": payload.kind,
-            },
-        )
+        expected = {
+            "repository": payload.repository,
+            "service_name": payload.service_name,
+            "tag": payload.tag,
+            "sha": payload.sha,
+            "github_deployment_id": payload.github_deployment_id,
+            "kind": payload.kind,
+        }
+        previous = None
+        if payload.mode == "continue":
+            claims, previous = release_authorization.verify_continuation(
+                payload.token, expected
+            )
+        else:
+            if payload.stage:
+                raise release_authorization.ReleaseAuthorizationError(
+                    "Consumption cannot select an approval stage"
+                )
+            claims = release_authorization.verify(payload.token, expected)
+        continuation = claims.get("workflow_continuation") is True
         if claims.get("mcp_grant_id"):
             if claims.get("mcp_authority_policy") != mcp_grants.POLICY:
                 raise release_authorization.ReleaseAuthorizationError(
@@ -49,13 +58,15 @@ def consume_authorization(
             mcp_grants.validate(claims["mcp_grant_id"], claims.get("requested_by"))
         identity = {}
         # Legacy callers omit this field; central callers must bind it server-side.
-        if (claims.get("execution_repository") or payload.target_revision) and (
-            claims.get("target_revision", "") != payload.target_revision
-        ):
+        if (
+            continuation
+            or claims.get("execution_repository")
+            or payload.target_revision
+        ) and (claims.get("target_revision", "") != payload.target_revision):
             raise release_authorization.ReleaseAuthorizationError(
                 "Rollback target mismatch"
             )
-        if claims.get("execution_repository"):
+        if continuation or claims.get("execution_repository"):
             if (
                 not claims.get("mcp_grant_id")
                 and claims.get("requested_by", "").lower()
@@ -68,28 +79,56 @@ def consume_authorization(
                 raise release_authorization.ReleaseAuthorizationError(
                     "Configuration mismatch"
                 )
-            identity = workflow_identity.verify(
-                request.headers.get("x-github-oidc", ""),
-                claims["execution_repository"],
-                payload.kind,
-            )
+            if continuation:
+                if not payload.service_name.startswith("cgm-artemis-") or claims.get(
+                    "execution_repository"
+                ):
+                    raise release_authorization.ReleaseAuthorizationError(
+                        "Invalid platform continuation capability"
+                    )
+                identity = workflow_identity.verify_platform(
+                    request.headers.get("x-github-oidc", ""),
+                    payload.repository,
+                    payload.kind,
+                    payload.tag,
+                    payload.sha,
+                    mode=payload.mode,
+                    stage=payload.stage,
+                )
+            else:
+                identity = workflow_identity.verify(
+                    request.headers.get("x-github-oidc", ""),
+                    claims["execution_repository"],
+                    payload.kind,
+                )
         require_managed_service_name(payload.service_name)
+        context = {
+            **expected,
+            "exp": claims["exp"],
+            "requested_by": claims.get("requested_by", ""),
+            "configuration_hash": claims.get("configuration_hash", ""),
+            "target_revision": payload.target_revision,
+            "mcp_grant_id": claims.get("mcp_grant_id", ""),
+            "mcp_authority_policy": claims.get("mcp_authority_policy", ""),
+        }
+        if payload.mode == "continue":
+            if (
+                previous is None
+                or any(previous.get(key) != value for key, value in context.items())
+                or previous.get("workflow_identity") != identity
+            ):
+                raise release_authorization.ReleaseAuthorizationError(
+                    "Continuation does not match the consumed operation"
+                )
+            return ReleaseAuthorizationConsumeResponse(jti=str(claims["jti"]))
         consumed = release_authorization_store.consume(
             str(claims["jti"]),
             {
-                "repository": payload.repository,
-                "service_name": payload.service_name,
-                "tag": payload.tag,
-                "sha": payload.sha,
-                "github_deployment_id": payload.github_deployment_id,
-                "kind": payload.kind,
-                "exp": claims["exp"],
+                **context,
                 "workflow_identity": identity,
-                "requested_by": claims.get("requested_by", ""),
-                "configuration_hash": claims.get("configuration_hash", ""),
-                "target_revision": payload.target_revision,
+                "workflow_continuation": continuation,
             },
-            require_durable=bool(claims.get("execution_repository")),
+            require_durable=continuation or bool(claims.get("execution_repository")),
         )
     except HTTPException:
         raise

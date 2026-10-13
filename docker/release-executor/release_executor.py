@@ -12,6 +12,7 @@ import json
 import os
 import pathlib
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1123,6 +1124,478 @@ def verify_artemis_web() -> None:
             raise RuntimeError("API paired web commit does not match serving revision")
 
 
+_CANDIDATE_FILE = ".eng-platform-candidate.json"
+_CANDIDATE_LIMIT = 65_536
+_PHASE_CONFIGURATION = (
+    "CGM_PROJECT_ID",
+    "CGM_REGION",
+    "CGM_IMAGE",
+    "CGM_BUILD_CONTEXT",
+    "CGM_HEALTH_PATH",
+    "CGM_RUNTIME_KIND",
+    "CGM_EVIDENCE_BUCKET",
+    "CGM_PRIVATE_RUNTIME",
+    "CGM_DOCKERFILE_PATH",
+    "CGM_QUALITY_EVIDENCE_SERVICES",
+    "CGM_REPOSITORY_ALIASES",
+    "CGM_PAIRED_WEB_SHA",
+    "CGM_PLATFORM_API_URL",
+)
+
+
+def release_phase() -> str:
+    phase = os.getenv("CGM_RELEASE_PHASE", "full").strip() or "full"
+    if phase not in {"full", "candidate", "promote"}:
+        raise RuntimeError("unsupported release phase")
+    if phase != "full" and (
+        os.getenv("BUILD_ID", "").strip()
+        or env("CGM_OPERATION") != "deploy"
+        or env("CGM_SERVICE") not in {"cgm-artemis-api", "cgm-artemis-web"}
+        or env("CGM_PROFILE") != env("CGM_SERVICE")
+        or os.getenv("CGM_RUNTIME_KIND") != "cloud_run_service"
+    ):
+        raise RuntimeError("staged release requires an Artemis GitHub service deploy")
+    return phase
+
+
+def _canonical(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _phase_identity() -> dict[str, str]:
+    return {
+        name: env(name)
+        for name in (
+            "CGM_DEPLOYMENT_ID",
+            "CGM_REPOSITORY",
+            "CGM_SERVICE",
+            "CGM_RELEASE_SHA",
+            "CGM_RELEASE_TAG",
+            "CGM_REQUEST_FINGERPRINT",
+            "CGM_PROFILE",
+            "CGM_PROFILE_SHA256",
+        )
+    }
+
+
+def _phase_configuration() -> dict[str, str]:
+    return {name: os.getenv(name, "") for name in _PHASE_CONFIGURATION}
+
+
+def _revision_document(revision: str) -> dict:
+    payload = json.loads(
+        run(
+            "gcloud",
+            "run",
+            "revisions",
+            "describe",
+            revision,
+            "--region",
+            env("CGM_REGION"),
+            "--project",
+            env("CGM_PROJECT_ID"),
+            "--format=json",
+        )
+    )
+    if (
+        not isinstance(payload, dict)
+        or payload.get("metadata", {}).get("name") != revision
+        or not isinstance(payload.get("spec", {}).get("containers"), list)
+        or len(payload["spec"]["containers"]) != 1
+    ):
+        raise RuntimeError("release revision identity or configuration is invalid")
+    return payload
+
+
+def _previous_runtime(traffic: dict[str, int]) -> dict[str, dict[str, str]]:
+    result = {}
+    for revision in traffic:
+        document = _revision_document(revision)
+        values = {
+            row["name"]: row.get("value", "")
+            for row in document["spec"]["containers"][0].get("env", [])
+            if row.get("name")
+            in {"APP_RELEASE_SHA", "APP_RELEASE_SCOPE", "APP_RELEASE_RESOURCE"}
+        }
+        result[revision] = {
+            "sha": values.get("APP_RELEASE_SHA", ""),
+            "scope": values.get("APP_RELEASE_SCOPE", ""),
+            "resource": values.get("APP_RELEASE_RESOURCE", ""),
+            "spec_sha256": hashlib.sha256(_canonical(document["spec"])).hexdigest(),
+        }
+    return result
+
+
+def _cloud_run_url(url: str) -> None:
+    parsed = urllib.parse.urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or not parsed.hostname.endswith(".run.app")
+        or parsed.username
+        or parsed.password
+        or parsed.port
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise RuntimeError("candidate URL is not the assigned Cloud Run endpoint")
+
+
+def _anonymous_private_check(url: str) -> None:
+    _cloud_run_url(url)
+    target = url.rstrip("/") + "/" + env("CGM_HEALTH_PATH").lstrip("/")
+    try:
+        with urllib.request.urlopen(urllib.request.Request(target), timeout=30):
+            pass
+    except urllib.error.HTTPError as exc:
+        if exc.code in {401, 403}:
+            return
+    raise RuntimeError("private runtime accepts or cannot verify anonymous access")
+
+
+def _verify_private_boundary(url: str) -> None:
+    if os.getenv("CGM_PRIVATE_RUNTIME") != "true":
+        return
+    document = json.loads(
+        run(
+            "gcloud",
+            "run",
+            "services",
+            "describe",
+            env("CGM_SERVICE"),
+            "--region",
+            env("CGM_REGION"),
+            "--project",
+            env("CGM_PROJECT_ID"),
+            "--format=json",
+        )
+    )
+    annotations = document.get("metadata", {}).get("annotations", {})
+    template_annotations = (
+        document.get("spec", {})
+        .get("template", {})
+        .get("metadata", {})
+        .get("annotations", {})
+    )
+    if document.get("invokerIamDisabled") or any(
+        str(values.get("run.googleapis.com/invoker-iam-disabled", "false")).lower()
+        != "false"
+        for values in (annotations, template_annotations)
+    ):
+        raise RuntimeError("private runtime has its invoker IAM check disabled")
+    policy = json.loads(
+        run(
+            "gcloud",
+            "run",
+            "services",
+            "get-iam-policy",
+            env("CGM_SERVICE"),
+            "--region",
+            env("CGM_REGION"),
+            "--project",
+            env("CGM_PROJECT_ID"),
+            "--format=json",
+        )
+    )
+    if any(
+        row.get("role") == "roles/run.invoker"
+        and {"allUsers", "allAuthenticatedUsers"}.intersection(row.get("members", []))
+        for row in policy.get("bindings", [])
+    ):
+        raise RuntimeError("private runtime has a public invoker binding")
+    _anonymous_private_check(url)
+
+
+def _candidate_facts(image: str, revision: str, url: str) -> str:
+    if not re.fullmatch(
+        re.escape(env("CGM_IMAGE").rsplit(":", 1)[0]) + r"@sha256:[0-9a-f]{64}", image
+    ):
+        raise RuntimeError("candidate image is not the authorized immutable artifact")
+    if not revision.startswith(env("CGM_SERVICE") + "-") or not re.fullmatch(
+        r"[a-z][a-z0-9-]{0,62}", revision
+    ):
+        raise RuntimeError("candidate revision does not belong to the service")
+    _cloud_run_url(url)
+    document = _revision_document(revision)
+    labels = document.get("metadata", {}).get("labels", {})
+    status = document.get("status", {})
+    if (
+        labels.get("serving.knative.dev/service") != env("CGM_SERVICE")
+        or labels.get("commit-sha") != env("CGM_RELEASE_SHA")
+        or document["spec"]["containers"][0].get("image") != image
+        or status.get("imageDigest") not in {image, image.rsplit("@", 1)[1]}
+        or not any(
+            row.get("type") == "Ready" and row.get("status") == "True"
+            for row in status.get("conditions", [])
+        )
+    ):
+        raise RuntimeError("live candidate identity, image or readiness does not match")
+    traffic = (
+        json.loads(
+            run(
+                "gcloud",
+                "run",
+                "services",
+                "describe",
+                env("CGM_SERVICE"),
+                "--region",
+                env("CGM_REGION"),
+                "--project",
+                env("CGM_PROJECT_ID"),
+                "--format=json(status.traffic)",
+            )
+        )
+        .get("status", {})
+        .get("traffic", [])
+    )
+    matches = [
+        row
+        for row in traffic
+        if row.get("tag") == "c-" + env("CGM_REQUEST_FINGERPRINT")[:12]
+    ]
+    if (
+        len(matches) != 1
+        or matches[0].get("revisionName") != revision
+        or matches[0].get("url") != url
+    ):
+        raise RuntimeError("live candidate tag and URL do not match continuation")
+    return hashlib.sha256(_canonical(document["spec"])).hexdigest()
+
+
+def stage_candidate(image: str) -> dict[str, str]:
+    service, region, project = (
+        env("CGM_SERVICE"),
+        env("CGM_REGION"),
+        env("CGM_PROJECT_ID"),
+    )
+    previous = _traffic(service, region, project)
+    previous_runtime = _previous_runtime(previous)
+    verify_artemis_web()
+    _verify_private_boundary(_service_url(service, region, project))
+    candidate, url = _deploy_candidate(image, service, region, project)
+    _verify_private_boundary(url)
+    spec_hash = _candidate_facts(image, candidate, url)
+    emit("validate-candidate", "running")
+    if independent_runtime():
+        runtime_ready(url, candidate=True)
+    else:
+        _smoke(url)
+        run_hooks("candidate_hooks")
+    if _traffic(service, region, project) != previous:
+        raise RuntimeError("production traffic changed during candidate preparation")
+    continuation = {
+        "schema_version": 1,
+        "identity": _phase_identity(),
+        "configuration": _phase_configuration(),
+        "image_digest": image,
+        "candidate_revision": candidate,
+        "candidate_url": url,
+        "candidate_spec_sha256": spec_hash,
+        "previous_traffic": previous,
+        "previous_runtime": previous_runtime,
+    }
+    payload = _canonical(continuation)
+    if len(payload) > _CANDIDATE_LIMIT:
+        raise RuntimeError("candidate continuation exceeds the size limit")
+    path = ROOT / _CANDIDATE_FILE
+    with path.open("xb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    path.chmod(0o444)
+    checksum = hashlib.sha256(payload).hexdigest()
+    emit(
+        "validate-candidate",
+        "succeeded",
+        candidate_revision=candidate,
+        candidate_url=url,
+    )
+    return {
+        "phase": "candidate",
+        "candidate_revision": candidate,
+        "candidate_url": url,
+        "image_digest": image,
+        "candidate_sha256": checksum,
+    }
+
+
+def _unique_continuation(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for name, value in pairs:
+        if name in result:
+            raise ValueError("duplicate candidate continuation field")
+        result[name] = value
+    return result
+
+
+def _load_continuation() -> dict:
+    checksum = env("CGM_CANDIDATE_SHA256")
+    if not re.fullmatch(r"[0-9a-f]{64}", checksum):
+        raise RuntimeError(
+            "candidate checksum must come from the trusted candidate job"
+        )
+    with os.fdopen(
+        os.open(ROOT / _CANDIDATE_FILE, os.O_RDONLY | os.O_NOFOLLOW), "rb"
+    ) as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise RuntimeError("candidate continuation must be a regular file")
+        payload = stream.read(_CANDIDATE_LIMIT + 1)
+    if (
+        len(payload) > _CANDIDATE_LIMIT
+        or hashlib.sha256(payload).hexdigest() != checksum
+    ):
+        raise RuntimeError("candidate continuation checksum or size does not match")
+    try:
+        continuation = json.loads(payload, object_pairs_hook=_unique_continuation)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise RuntimeError("candidate continuation JSON is invalid") from exc
+    fields = {
+        "schema_version",
+        "identity",
+        "configuration",
+        "image_digest",
+        "candidate_revision",
+        "candidate_url",
+        "candidate_spec_sha256",
+        "previous_traffic",
+        "previous_runtime",
+    }
+    if (
+        not isinstance(continuation, dict)
+        or set(continuation) != fields
+        or type(continuation["schema_version"]) is not int
+        or continuation["schema_version"] != 1
+        or continuation["identity"] != _phase_identity()
+        or continuation["configuration"] != _phase_configuration()
+    ):
+        raise RuntimeError(
+            "candidate continuation identity or configuration does not match"
+        )
+    traffic = continuation["previous_traffic"]
+    if (
+        not isinstance(traffic, dict)
+        or not traffic
+        or any(
+            not isinstance(revision, str)
+            or not revision.startswith(env("CGM_SERVICE") + "-")
+            or not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", revision)
+            or type(weight) is not int
+            or not 0 < weight <= 100
+            for revision, weight in traffic.items()
+        )
+        or sum(traffic.values()) != 100
+        or not isinstance(continuation["previous_runtime"], dict)
+        or set(continuation["previous_runtime"]) != set(traffic)
+        or any(
+            not isinstance(continuation[key], str)
+            for key in (
+                "image_digest",
+                "candidate_revision",
+                "candidate_url",
+                "candidate_spec_sha256",
+            )
+        )
+    ):
+        raise RuntimeError("candidate continuation runtime snapshot is invalid")
+    return continuation
+
+
+def promote_candidate() -> dict[str, str]:
+    continuation = _load_continuation()
+    service, region, project = (
+        env("CGM_SERVICE"),
+        env("CGM_REGION"),
+        env("CGM_PROJECT_ID"),
+    )
+    previous = continuation["previous_traffic"]
+    previous_runtime = continuation["previous_runtime"]
+    candidate, url, image = (
+        continuation["candidate_revision"],
+        continuation["candidate_url"],
+        continuation["image_digest"],
+    )
+    if (
+        _traffic(service, region, project) != previous
+        or _previous_runtime(previous) != previous_runtime
+    ):
+        raise RuntimeError(
+            "production traffic or configuration changed after candidate validation"
+        )
+    if _candidate_facts(image, candidate, url) != continuation["candidate_spec_sha256"]:
+        raise RuntimeError("candidate revision configuration changed after validation")
+    _verify_private_boundary(url)
+    verify_artemis_web()
+    if independent_runtime():
+        runtime_ready(url, candidate=True)
+    else:
+        _smoke(url)
+        run_hooks("candidate_hooks")
+    granted, promoted = False, False
+    try:
+        if independent_runtime():
+            granted = True
+            runtime_grant("authorize", env("CGM_RELEASE_SHA"))
+            runtime_ready(url)
+        run_hooks("pre_promote_hooks")
+        emit("promote", "running")
+        promoted = True  # A timeout can happen after Cloud Run committed traffic.
+        _set_traffic(service, region, project, {candidate: 100})
+        emit("promote", "succeeded", production_revision=candidate)
+        production = _service_url(service, region, project)
+        emit("validate-production", "running")
+        _verify_private_boundary(production)
+        if independent_runtime():
+            runtime_ready(production)
+            for row in previous_runtime.values():
+                if row["scope"] == "runtime-v1" and row["sha"] != env(
+                    "CGM_RELEASE_SHA"
+                ):
+                    runtime_grant("retire", row["sha"])
+        else:
+            _smoke(production)
+            run_hooks("post_promote_hooks")
+        emit(
+            "validate-production",
+            "succeeded",
+            production_revision=candidate,
+            production_url=production,
+        )
+        return {
+            "candidate_revision": candidate,
+            "candidate_url": url,
+            "production_revision": candidate,
+            "production_url": production,
+            "image_digest": image,
+        }
+    except Exception as exc:
+        if promoted:
+            for row in previous_runtime.values():
+                if independent_runtime() and row["scope"] == "runtime-v1":
+                    runtime_grant("authorize", row["sha"])
+            _set_traffic(service, region, project, previous)
+            if _traffic(service, region, project) != previous:
+                raise RuntimeError(
+                    "staged release rollback traffic could not be verified"
+                ) from exc
+        if granted and env("CGM_RELEASE_SHA") not in {
+            row["sha"] for row in previous_runtime.values()
+        }:
+            runtime_grant("revoke", env("CGM_RELEASE_SHA"))
+        if promoted:
+            emit(
+                "rollback",
+                "succeeded",
+                production_revision=max(
+                    previous, key=lambda revision: previous[revision]
+                ),
+            )
+            raise AutomaticRollback(
+                "staged release failed; prior traffic was restored"
+            ) from exc
+        raise
+
+
 def deploy_runtime(image: str) -> dict[str, str]:
     service, region, project = (
         env("CGM_SERVICE"),
@@ -1724,6 +2197,7 @@ def write_summary(values: dict[str, str]) -> None:
 
 
 def main() -> None:
+    phase = release_phase()
     configure_runtime_home()
     verify_profile()
     assert_source()
@@ -1735,10 +2209,21 @@ def main() -> None:
     if env("CGM_OPERATION") == "rollback":
         write_summary(rollback())
         return
+    if phase == "promote":
+        write_summary(promote_candidate())
+        return
+    if phase == "candidate" and (
+        (ROOT / _CANDIDATE_FILE).exists() or (ROOT / _CANDIDATE_FILE).is_symlink()
+    ):
+        raise FileExistsError(
+            "candidate continuation already exists; reconcile before retry"
+        )
     emit("build", "running")
     image = image_for_tag()
     emit("build", "succeeded", image_digest=image)
-    if os.getenv("CGM_RUNTIME_KIND") == "cloud_run_job":
+    if phase == "candidate":
+        write_summary(stage_candidate(image))
+    elif os.getenv("CGM_RUNTIME_KIND") == "cloud_run_job":
         write_summary(deploy_job(image))
     else:
         write_summary(deploy(image))

@@ -23,6 +23,8 @@ from ..models import (
 )
 from . import (
     catalog,
+    github_execution_config,
+    provider_selection,
     deployment_executions,
     deployment_store,
     release_authorization,
@@ -104,9 +106,17 @@ class GitHubDispatchError(RuntimeError):
 
 
 def _reserve_github_execution(
-    item: DeploymentItem, service: CatalogService, authorization_jti: str
+    item: DeploymentItem,
+    service: CatalogService,
+    authorization_jti: str,
+    *,
+    engine_config: str = "",
 ) -> None:
-    if not config.cloud_build.enabled:
+    if (
+        not config.cloud_build.enabled
+        and item.provider_selection is None
+        and not github_execution_config.requires_execution_config(service)
+    ):
         return
     from . import cloud_build
 
@@ -121,7 +131,64 @@ def _reserve_github_execution(
         kind=item.kind,
         reason="github_dispatch",
         authorization_jti=authorization_jti,
+        provider_selection=item.provider_selection.model_dump()
+        if item.provider_selection
+        else None,
+        github_execution_config=engine_config,
     )
+
+
+def _engine_inputs(service: CatalogService, item: DeploymentItem) -> dict[str, str]:
+    context = github_execution_config.execution_config_for(service, item)
+    execution = deployment_executions.get(item.id)
+    if context and execution and not execution.get("github_execution_config"):
+        deployment_executions.reserve(
+            item.id,
+            provider="github_actions",
+            fingerprint=execution["fingerprint"],
+            service_name=item.service_name,
+            repository=item.repository,
+            sha=item.sha,
+            tag=item.tag,
+            kind=item.kind,
+            github_execution_config=context,
+        )
+    return {"execution_config": context} if context else {}
+
+
+def _engine_authorization(inputs: dict[str, str]) -> dict[str, Any]:
+    if "execution_config" not in inputs:
+        return {}
+    import json
+
+    return {
+        "configuration": json.loads(inputs["execution_config"]),
+        "workflow_continuation": True,
+    }
+
+
+def _claim_selected_dispatch(item: DeploymentItem) -> None:
+    if item.provider_selection and not deployment_executions.claim_github_dispatch(
+        item.id
+    ):
+        raise ValueError(
+            "GitHub dispatch is already pending or uncertain; reconcile before retrying"
+        )
+
+
+def _record_selected_dispatch(
+    item: DeploymentItem, error: BaseException | None = None
+) -> None:
+    if not item.provider_selection:
+        return
+    status = "GITHUB_ACCEPTED"
+    if error:
+        status = (
+            "GITHUB_REJECTED"
+            if getattr(error, "status", 0) in {400, 401, 402, 403, 404, 422, 429}
+            else "GITHUB_UNCERTAIN"
+        )
+    deployment_executions.save(item.id, status=status)
 
 
 def _revoke_rejected_authorization(authorization_jti: str) -> None:
@@ -319,6 +386,7 @@ def start_deployment(
     if config.mock_mode:
         deployment_id = str(int(datetime.now(timezone.utc).timestamp() * 1000))
         return DeploymentItem(
+            provider_selection=provider_selection.current(),
             id=deployment_id,
             service_name=service_name,
             repository=repository,
@@ -342,6 +410,7 @@ def start_deployment(
         payload={"service_name": service_name, "tag": tag.name},
     )
     item = DeploymentItem(
+        provider_selection=provider_selection.current(),
         id=str(github_deployment.id),
         service_name=service_name,
         repository=repository,
@@ -355,6 +424,7 @@ def start_deployment(
         updated_at=now,
         github_deployment_id=github_deployment.id,
     )
+    engine_inputs = _engine_inputs(service, item)
     authorization, claims = release_authorization.issue(
         repository=repository,
         service_name=service_name,
@@ -363,10 +433,17 @@ def start_deployment(
         github_deployment_id=github_deployment.id,
         requested_by=requested_by,
         kind="deploy",
+        **_engine_authorization(engine_inputs),
     )
+    deployment_store.persist_before_dispatch(item)
     dispatch_attempted = False
     try:
-        _reserve_github_execution(item, service, str(claims["jti"]))
+        _reserve_github_execution(
+            item,
+            service,
+            str(claims["jti"]),
+            engine_config=engine_inputs.get("execution_config", ""),
+        )
         github_deployment.create_status(
             state="queued",
             description="Queued by Engineering Platform",
@@ -374,8 +451,9 @@ def start_deployment(
         workflow = repo.get_workflow(
             service.deployment.workflow_file or config.github.deployment_workflow
         )
+        _claim_selected_dispatch(item)
         dispatch_attempted = True
-        workflow.create_dispatch(
+        accepted = workflow.create_dispatch(
             ref=tag.name,
             inputs={
                 "service_name": service_name,
@@ -389,9 +467,15 @@ def start_deployment(
                 "health_path": service.deployment.health_path,
                 "profile_sha256": profile_for(service).fingerprint(),
                 "platform_authorization": authorization,
+                **engine_inputs,
             },
         )
+        if accepted is False:
+            raise ValueError("GitHub refused the workflow dispatch")
+        _record_selected_dispatch(item)
     except Exception as exc:
+        if dispatch_attempted:
+            _record_selected_dispatch(item, exc)
         _revoke_rejected_authorization(str(claims["jti"]))
         item.status = "FAILED"
         item.current_stage = "dispatch"
@@ -424,6 +508,7 @@ def start_rollback(
     if config.mock_mode:
         deployment_id = str(int(datetime.now(timezone.utc).timestamp() * 1000))
         return DeploymentItem(
+            provider_selection=provider_selection.current(),
             id=deployment_id,
             service_name=service_name,
             repository=repository,
@@ -451,6 +536,7 @@ def start_rollback(
         payload={"service_name": service_name, "tag": target.tag},
     )
     item = DeploymentItem(
+        provider_selection=provider_selection.current(),
         id=str(github_deployment.id),
         service_name=service_name,
         repository=repository,
@@ -465,7 +551,9 @@ def start_rollback(
         updated_at=now,
         github_deployment_id=github_deployment.id,
         production_revision=target.production_revision,
+        rollback_target_deployment_id=target.id,
     )
+    engine_inputs = _engine_inputs(service, item)
     authorization, claims = release_authorization.issue(
         repository=repository,
         service_name=service_name,
@@ -475,17 +563,25 @@ def start_rollback(
         requested_by=requested_by,
         kind="rollback",
         target_revision=target.production_revision,
+        **_engine_authorization(engine_inputs),
     )
+    deployment_store.persist_before_dispatch(item)
     dispatch_attempted = False
     try:
-        _reserve_github_execution(item, service, str(claims["jti"]))
+        _reserve_github_execution(
+            item,
+            service,
+            str(claims["jti"]),
+            engine_config=engine_inputs.get("execution_config", ""),
+        )
         github_deployment.create_status(
             state="queued",
             description="Rollback queued by Engineering Platform",
         )
         workflow = repo.get_workflow(config.github.rollback_workflow)
+        _claim_selected_dispatch(item)
         dispatch_attempted = True
-        workflow.create_dispatch(
+        accepted = workflow.create_dispatch(
             ref="main",
             inputs={
                 "service_name": service_name,
@@ -498,9 +594,15 @@ def start_rollback(
                 "target_sha": target.sha,
                 "platform_authorization": authorization,
                 "profile_sha256": profile_for(service).fingerprint(),
+                **engine_inputs,
             },
         )
+        if accepted is False:
+            raise ValueError("GitHub refused the workflow dispatch")
+        _record_selected_dispatch(item)
     except Exception as exc:
+        if dispatch_attempted:
+            _record_selected_dispatch(item, exc)
         _revoke_rejected_authorization(str(claims["jti"]))
         item.status = "FAILED"
         item.current_stage = "dispatch"
@@ -526,6 +628,7 @@ def start_rollback(
 def _retry_workflow_and_inputs(
     repo: Any, service: CatalogService, item: DeploymentItem, target_revision: str
 ) -> tuple[Any, dict[str, str]]:
+    engine_inputs = _engine_inputs(service, item)
     authorization, claims = release_authorization.issue(
         repository=item.repository,
         service_name=item.service_name,
@@ -535,11 +638,10 @@ def _retry_workflow_and_inputs(
         requested_by=item.requested_by,
         kind=item.kind,
         target_revision=item.production_revision or target_revision,
+        **_engine_authorization(engine_inputs),
     )
-    if config.cloud_build.enabled and deployment_executions.get(item.id):
-        deployment_executions.save(
-            item.id, authorization_jti=str(claims["jti"]), status="GITHUB_RETRY"
-        )
+    if deployment_executions.get(item.id):
+        deployment_executions.save(item.id, authorization_jti=str(claims["jti"]))
     if item.kind == "rollback":
         revision = item.production_revision or target_revision
         if not revision:
@@ -556,6 +658,7 @@ def _retry_workflow_and_inputs(
             "target_sha": item.sha,
             "platform_authorization": authorization,
             "profile_sha256": profile_for(service).fingerprint(),
+            **engine_inputs,
         }
         item.production_revision = revision
         return workflow, inputs
@@ -574,6 +677,7 @@ def _retry_workflow_and_inputs(
         "health_path": service.deployment.health_path,
         "platform_authorization": authorization,
         "profile_sha256": profile_for(service).fingerprint(),
+        **engine_inputs,
     }
     return workflow, inputs
 
@@ -596,6 +700,7 @@ def start_managed_deployment(
     stages = default_stages(kind)
     if config.mock_mode:
         return DeploymentItem(
+            provider_selection=provider_selection.current(),
             id=str(int(datetime.now(timezone.utc).timestamp() * 1000)),
             service_name=service.service_name,
             repository=service.repository,
@@ -624,6 +729,7 @@ def start_managed_deployment(
         state="queued", description="Queued by Engineering Platform"
     )
     return DeploymentItem(
+        provider_selection=provider_selection.current(),
         id=str(deployment.id),
         service_name=service.service_name,
         repository=service.repository,
@@ -651,6 +757,8 @@ def retry_dispatch(
 
     The existing GitHub Deployment is reused so the retry preserves the
     platform id, release SHA/tag and idempotency correlation.
+    Failed lookups restore the prior admission because dispatch was not attempted;
+    an uncertain dispatch response keeps the claim closed until reconciliation.
     """
     service = require_managed(service)
     require_managed_service_name(item.service_name)
@@ -664,11 +772,23 @@ def retry_dispatch(
     ):
         raise ValueError("Failed dispatch does not match the selected service")
 
-    repo = github_client().get_repo(item.repository)
-    github_deployment = repo.get_deployment(item.github_deployment_id)
+    execution = deployment_executions.get(item.id)
+    if not execution or execution.get("provider") != "github_actions":
+        raise ValueError("Original GitHub provider requires reconciliation")
+    if not item.provider_selection:
+        from ..models import ProviderSelection
+
+        item.provider_selection = ProviderSelection(
+            effective="github_actions", source="legacy_execution"
+        )
+    _claim_selected_dispatch(item)
+
     now = datetime.now(timezone.utc).isoformat()
     dispatch_attempted = False
+    github_deployment = None
     try:
+        repo = github_client().get_repo(item.repository)
+        github_deployment = repo.get_deployment(item.github_deployment_id)
         github_deployment.create_status(
             state="queued",
             description="Dispatch retry queued by Engineering Platform",
@@ -677,10 +797,17 @@ def retry_dispatch(
             repo, service, item, target_revision
         )
         dispatch_attempted = True
-        workflow.create_dispatch(
+        accepted = workflow.create_dispatch(
             ref="main" if item.kind == "rollback" else item.tag, inputs=inputs
         )
+        if accepted is False:
+            raise ValueError("GitHub refused the workflow dispatch")
+        _record_selected_dispatch(item)
     except Exception as exc:
+        if dispatch_attempted:
+            _record_selected_dispatch(item, exc)
+        else:
+            deployment_executions.save(item.id, status=str(execution["status"]))
         item.status = "FAILED"
         item.current_stage = "dispatch"
         item.updated_at = now
@@ -689,10 +816,11 @@ def retry_dispatch(
             if item.kind == "rollback"
             else GITHUB_WORKFLOW_DISPATCH_FAILED
         )
-        try:
-            github_deployment.create_status(state="failure", description=item.error)
-        except Exception:
-            item.error = f"{item.error}; status update failed"
+        if github_deployment is not None:
+            try:
+                github_deployment.create_status(state="failure", description=item.error)
+            except Exception:
+                item.error = f"{item.error}; status update failed"
         raise GitHubDispatchError(
             item,
             dispatch_error=exc if dispatch_attempted else None,

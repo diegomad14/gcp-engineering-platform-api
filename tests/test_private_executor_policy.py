@@ -31,7 +31,7 @@ def _service():
     )
 
 
-@pytest.mark.parametrize("mode", [None, "auto", "cloud_build"])
+@pytest.mark.parametrize("mode", [None, "auto", "github_actions", "cloud_build"])
 def test_config_loads_explicit_private_policy(mode):
     environment = {"ENG_PLATFORM_MOCK_MODE": "true"}
     if mode is not None:
@@ -43,7 +43,7 @@ def test_config_loads_explicit_private_policy(mode):
     assert ReleaseOrchestratorConfig().private_executor_mode == "cloud_build"
 
 
-@pytest.mark.parametrize("mode", ["", "github_actions", "unknown"])
+@pytest.mark.parametrize("mode", ["", "github", "unknown"])
 def test_config_rejects_invalid_private_policy(mode):
     with mock.patch.dict(
         os.environ,
@@ -269,7 +269,7 @@ def test_explicit_dispatch_uses_policy_reason(monkeypatch, kind):
         else:
             result = commands._dispatch_rollback(service, item, "operator")
     assert result is item
-    submit.assert_called_once_with(service, item, reason="explicit_executor_policy")
+    submit.assert_called_once_with(service, item, reason="selected_provider")
     opened.assert_not_called()
 
 
