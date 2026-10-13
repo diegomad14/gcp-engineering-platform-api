@@ -13,6 +13,7 @@ on:
           - release-executor
           - release-planner
           - quality-python
+          - artemis-locked-quality
           - quality-go
           - quality
           - all
@@ -52,11 +53,22 @@ jobs:
           set -euo pipefail
           gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
+          if [[ "$COMPONENT" == artemis-locked-quality ]]; then
+            # Publish this fixed reviewed overlay before activating the new
+            # manifest and its matching image digests in the controller.
+            git apply --check docker/quality-executor/artemis-locked-profile.patch
+            git apply docker/quality-executor/artemis-locked-profile.patch
+            echo '8334bb2a4e9aed51810eedc728e15f3b949ed07d0c01a6aecb5968724e7cea46  src/eng_platform_api/release_quality_profiles.json' | sha256sum --check
+          fi
+
           build_and_push() {
             local name="$1"
             local dockerfile="$2"
             local context="${3:-.}"
             local tag="$REGISTRY/$name:$SOURCE_SHA"
+            if [[ "$COMPONENT" == artemis-locked-quality ]]; then
+              tag="$tag-artemis-locked-quality"
+            fi
             docker build --pull --file "$dockerfile" --tag "$tag" "$context"
             if [[ "$name" == quality-python ]]; then
               python3 docker/quality-executor/smoke_python_isolation.py "$tag"
@@ -69,6 +81,14 @@ jobs:
                 -c 'import runpy, yaml; runpy.run_path("/opt/eng-platform/release_executor.py")'
               docker run --rm --entrypoint gcloud "$tag" --version >/dev/null
             fi
+            if [[ "$name" == quality-python || "$name" == quality-node ]]; then
+              local actual_manifest manifest_sha256
+              manifest_sha256="$(sha256sum src/eng_platform_api/release_quality_profiles.json | cut -d' ' -f1)"
+              actual_manifest="$(docker run --rm --network none --cap-drop ALL \
+                --security-opt no-new-privileges --read-only --entrypoint sha256sum \
+                "$tag" /opt/eng-platform/release_quality_profiles.json | cut -d' ' -f1)"
+              test "$actual_manifest" = "$manifest_sha256"
+            fi
             local push_output
             push_output="$(docker push "$tag")"
             printf '%s\n' "$push_output"
@@ -80,24 +100,28 @@ jobs:
 
           : > "$RUNNER_TEMP/tooling-digests"
           if [[ "$COMPONENT" == all || "$COMPONENT" == quality || \
-                "$COMPONENT" == quality-python ]]; then
+                "$COMPONENT" == quality-python || "$COMPONENT" == artemis-locked-quality ]]; then
             build_and_push quality-python docker/quality-executor/Dockerfile.python
           fi
           if [[ "$COMPONENT" == all || "$COMPONENT" == quality || "$COMPONENT" == quality-go ]]; then
             build_and_push quality-go docker/quality-executor/Dockerfile.go
           fi
-          if [[ "$COMPONENT" == all || "$COMPONENT" == quality ]]; then
+          if [[ "$COMPONENT" == all || "$COMPONENT" == quality || "$COMPONENT" == artemis-locked-quality ]]; then
             build_and_push quality-node docker/quality-executor/Dockerfile.node
           fi
           if [[ "$COMPONENT" == all || \
                 "$COMPONENT" == quality || \
-                "$COMPONENT" == release-planner ]]; then
+                "$COMPONENT" == release-planner || "$COMPONENT" == artemis-locked-quality ]]; then
             build_and_push release-planner docker/release-planner/Dockerfile
           fi
           if [[ "$COMPONENT" == all || "$COMPONENT" == release-executor ]]; then
             build_and_push eng-platform-release-executor \
               docker/release-executor/Dockerfile docker/release-executor
           fi
+
+          manifest_sha256="$(sha256sum src/eng_platform_api/release_quality_profiles.json | cut -d' ' -f1)"
+          printf 'source_sha=%s\ncomponent=%s\nmanifest_sha256=%s\n' \
+            "$SOURCE_SHA" "$COMPONENT" "$manifest_sha256" > "$RUNNER_TEMP/tooling-source"
 
           {
             echo '### Immutable release tooling'
@@ -107,3 +131,13 @@ jobs:
             cat "$RUNNER_TEMP/tooling-digests"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve immutable tooling publication evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-tooling-${{ github.sha }}-${{ inputs.component }}
+          path: |
+            ${{ runner.temp }}/tooling-digests
+            ${{ runner.temp }}/tooling-source
+          if-no-files-found: error
+          retention-days: 30
