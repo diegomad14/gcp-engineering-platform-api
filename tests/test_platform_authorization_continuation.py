@@ -81,10 +81,10 @@ def platform(monkeypatch):
     )
 
 
-def ticket(*, kind="deploy", enabled=True):
+def ticket(*, kind="deploy", enabled=True, service="cgm-artemis-api"):
     expected = {
-        "repository": "diegomad14/cgm-artemis-api",
-        "service_name": "cgm-artemis-api",
+        "repository": f"diegomad14/{service}",
+        "service_name": service,
         "tag": "v1.2.3",
         "sha": "a" * 40,
         "github_deployment_id": "123",
@@ -450,6 +450,94 @@ def test_signed_context_hash_cannot_be_changed_without_invalidating_ticket(platf
             body | {"token": ".".join(parts)},
             mode="continue",
             stage="promote",
+        ).status_code
+        == 401
+    )
+
+
+def immutable_claims(body, stage=""):
+    owner, name = body["repository"].split("/", 1)
+    reference = (
+        f"refs/tags/{body['tag']}" if body["kind"] == "deploy" else "refs/heads/main"
+    )
+    environment = "candidate" if stage == "candidate" else "production" if stage else ""
+    context = f"environment:{environment}" if environment else f"ref:{reference}"
+    repository_id = "1306114872" if name == "cgm-artemis-web" else "1306114845"
+    return {
+        "repository_owner": owner,
+        "repository_owner_id": "97854332",
+        "repository_id": repository_id,
+        "sub": f"repo:{owner}@97854332/{name}@{repository_id}:{context}",
+    }
+
+
+@pytest.mark.parametrize(
+    "kind,stage",
+    [("deploy", "candidate"), ("deploy", "promote"), ("rollback", "rollback")],
+)
+@pytest.mark.parametrize("service", ["cgm-artemis-api", "cgm-artemis-web"])
+def test_immutable_subject_consumes_and_continues_same_identity(
+    platform, kind, stage, service
+):
+    body, claims = ticket(kind=kind, service=service)
+    assert request(platform, body, changes=immutable_claims(body)).status_code == 200
+    stored = platform.database.entries[claims["jti"]]["workflow_identity"]
+    assert stored["repository_owner_id"] == "97854332"
+    assert stored["repository_id"] == immutable_claims(body)["repository_id"]
+    assert (
+        request(
+            platform,
+            body,
+            mode="continue",
+            stage=stage,
+            changes=immutable_claims(body, stage),
+        ).status_code
+        == 200
+    )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("repository_owner", "other"),
+        ("repository_owner_id", "999"),
+        ("repository_owner_id", ""),
+        ("repository_owner_id", "0"),
+        ("repository_owner_id", "01"),
+        ("repository_owner_id", 97854332),
+        ("repository_id", "999"),
+        ("repository_id", ""),
+        ("repository_id", "0"),
+        ("repository_id", "01"),
+        ("repository_id", True),
+        ("sub", "repo:diegomad14@97854332/other@1306114845:ref:refs/tags/v1.2.3"),
+        (
+            "sub",
+            "repo:diegomad14@97854332/cgm-artemis-api@1306114845:environment:production",
+        ),
+    ],
+)
+def test_inconsistent_immutable_subject_is_rejected_before_consumption(
+    platform, field, value
+):
+    body, claims = ticket()
+    changes = immutable_claims(body) | {field: value}
+    assert request(platform, body, changes=changes).status_code == 401
+    assert claims["jti"] not in platform.database.entries
+
+
+@pytest.mark.parametrize("field", ["repository_owner_id", "repository_id"])
+def test_immutable_continuation_cannot_change_identities(platform, field):
+    body, _ = ticket()
+    assert request(platform, body, changes=immutable_claims(body)).status_code == 200
+    changes = immutable_claims(body, "candidate")
+    changes[field] = "999"
+    changes["sub"] = changes["sub"].replace(
+        "@97854332" if field == "repository_owner_id" else "@1306114845", "@999"
+    )
+    assert (
+        request(
+            platform, body, mode="continue", stage="candidate", changes=changes
         ).status_code
         == 401
     )

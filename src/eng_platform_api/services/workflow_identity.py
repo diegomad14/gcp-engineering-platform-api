@@ -93,11 +93,21 @@ def verify_platform(
             raise ReleaseAuthorizationError("Invalid platform continuation stage")
     elif mode != "consume" or stage:
         raise ReleaseAuthorizationError("Invalid platform consumption stage")
-    subject = (
-        f"repo:{repository}:environment:{environment}"
-        if environment
-        else f"repo:{repository}:ref:{reference}"
-    )
+    context = f"environment:{environment}" if environment else f"ref:{reference}"
+    subjects = {f"repo:{repository}:{context}"}
+    owner, name = repository.split("/", 1)
+    owner_id = claims.get("repository_owner_id")
+    repository_id = claims.get("repository_id")
+    # GitHub's immutable format binds names and IDs inside the signed subject.
+    # Derive it only from verified claims; keep the exact repo/ref/workflow checks.
+    if (
+        claims.get("repository_owner") == owner
+        and isinstance(owner_id, str)
+        and re.fullmatch(r"[1-9][0-9]*", owner_id)
+        and isinstance(repository_id, str)
+        and re.fullmatch(r"[1-9][0-9]*", repository_id)
+    ):
+        subjects.add(f"repo:{owner}@{owner_id}/{name}@{repository_id}:{context}")
     if (
         kind not in {"deploy", "rollback"}
         or claims["repository"] != repository
@@ -105,7 +115,7 @@ def verify_platform(
         or claims["workflow_ref"] != expected
         or claims.get("job_workflow_ref", expected) != expected
         or claims["event_name"] != "workflow_dispatch"
-        or claims["sub"] != subject
+        or claims["sub"] not in subjects
         or claims.get("environment", "") != environment
         or not re.fullmatch(r"[0-9a-f]{40}", str(claims["sha"]))
         or (kind == "deploy" and claims["sha"] != release_sha)
@@ -113,7 +123,12 @@ def verify_platform(
         or not re.fullmatch(r"[1-9][0-9]*", str(claims["run_attempt"]))
     ):
         raise ReleaseAuthorizationError("Untrusted platform workflow")
-    return {
+    identity = {
         key: str(claims[key])
         for key in ("repository", "ref", "workflow_ref", "sha", "run_id", "run_attempt")
     }
+    if claims["sub"] != f"repo:{repository}:{context}":
+        identity.update(
+            repository_owner_id=str(owner_id), repository_id=str(repository_id)
+        )
+    return identity
