@@ -24,12 +24,13 @@ from eng_platform_api.services import (
     release_authorization,
 )
 
-ARTEMIS = [
-    name
-    for name in catalog.get_services().services
-    if name.service_name.startswith("cgm-artemis-")
+# Collection happens before the mock-mode fixture. Parametrize from the
+# synthetic catalog explicitly, without selecting a private runtime source.
+ARTEMIS_NAMES = [
+    row["service_name"]
+    for row in log_catalog.load_catalog(log_catalog.CATALOG_PATH)
+    if row["service_name"].startswith("cgm-artemis-")
 ]
-ARTEMIS_NAMES = [service.service_name for service in ARTEMIS]
 
 
 @pytest.fixture
