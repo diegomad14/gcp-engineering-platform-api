@@ -477,7 +477,7 @@ def test_claim_publish_rejects_pr_wrong_status_and_missing():
         executions.claim_publish("missing")
 
 
-def test_claim_source_token_is_cloud_build_only_and_one_time():
+def test_claim_source_token_requires_a_bound_provider_run_and_is_one_time():
     cloud, _ = _reserve(provider="cloud_build")
     executions.bind_build(cloud["execution_id"], build_id="build-1")
     assert (
@@ -1185,3 +1185,65 @@ def test_firestore_planner_retry_is_transactional_and_one_shot(firestore_collect
             failed_build_id="planner-build-1",
             planner_image="registry.example/release-planner@sha256:" + "a" * 64,
         )
+
+
+@pytest.mark.parametrize("storage", ["memory", "firestore"])
+def test_github_source_token_binds_verified_run_once(storage, request):
+    if storage == "firestore":
+        request.getfixturevalue("firestore_collection")
+    value, _ = _reserve()
+    identity = value["execution_id"]
+    assert not executions.claim_source_token(identity, provider_run_id="42")
+    executions.save(identity, status="waiting_github")
+    executions.admit_github_run(identity, provider_run_id="42")
+    assert not executions.claim_source_token(identity, provider_run_id="43")
+    assert executions.claim_source_token(identity, provider_run_id="42")
+    assert not executions.claim_source_token(identity, provider_run_id="42")
+    assert not executions.claim_source_token(identity, provider_run_id="43")
+    stored = executions.get(identity)
+    assert stored["source_token_provider_run_id"] == "42"
+    assert "source_token_build_id" not in stored
+    assert "source_token" not in stored
+
+
+def test_github_source_token_memory_concurrency_has_one_winner():
+    value, _ = _reserve()
+    identity = value["execution_id"]
+    executions.save(identity, status="waiting_github")
+    executions.admit_github_run(identity, provider_run_id="42")
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(
+            pool.map(
+                lambda _: executions.claim_source_token(identity, provider_run_id="42"),
+                range(16),
+            )
+        )
+    assert results.count(True) == 1
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "failed",
+        "quality_failed",
+        "quality_passed",
+        "released",
+        "superseded",
+        "no_release",
+        "unknown",
+    ],
+)
+@pytest.mark.parametrize("storage", ["memory", "firestore"])
+def test_github_source_token_rejects_completed_or_uncertain_execution(
+    status, storage, request
+):
+    if storage == "firestore":
+        collection = request.getfixturevalue("firestore_collection")
+    value, _ = _reserve()
+    identity = value["execution_id"]
+    executions.admit_github_run(identity, provider_run_id="42")
+    if storage == "firestore":
+        collection.document(identity).value["status"] = status
+    else:
+        executions._memory[identity]["status"] = status
+    assert not executions.claim_source_token(identity, provider_run_id="42")

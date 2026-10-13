@@ -162,3 +162,44 @@ def test_bot_format_command_uses_service_relative_paths(tmp_path, formatted):
     else:
         assert result.returncode != 0
         assert "Would reformat: app/module/with space.py" in result.stdout
+
+
+@pytest.mark.parametrize("coverage", [None, 0, 80, 91.25])
+@pytest.mark.parametrize("threshold", [None, 80, 80.0])
+def test_sealed_executor_report_hash_matches_api_numeric_serialization(
+    monkeypatch, coverage, threshold
+):
+    from eng_platform_api.models import QualityReportCreate
+    from eng_platform_api.services.quality_store import _report_hash
+    import importlib
+
+    monkeypatch.syspath_prepend(
+        str(Path(__file__).resolve().parents[1] / "docker/quality-executor")
+    )
+    engine = importlib.import_module("quality_executor")
+    report = {
+        "service_name": "eng-platform-api",
+        "repository": "owner/repository",
+        "commit_sha": "a" * 40,
+        "profile": "python",
+        "generated_at": "2026-10-13T00:00:00Z",
+        "coverage": coverage,
+        "coverage_threshold": threshold,
+        "differential_coverage": coverage,
+        "differential_threshold": threshold,
+        "checks": [
+            {
+                "name": "tests",
+                "category": "tests",
+                "status": "PASSED",
+                "duration_seconds": 0,
+            }
+        ],
+    }
+    normalized = engine._normalize_report(report)
+    assert normalized == QualityReportCreate.model_validate(normalized).model_dump(
+        mode="json"
+    )
+    assert engine._report_hash(report) == _report_hash(
+        QualityReportCreate.model_validate(report)
+    )

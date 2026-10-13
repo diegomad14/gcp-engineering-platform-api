@@ -1105,8 +1105,15 @@ def _claim_build_scoped_token(
         if current.get("build_id") != provider_run_id:
             return False
         previous = set(current.get("previous_build_ids") or [])
-    elif provider == "github_actions" and token_field == "event_token_provider_run_id":
+    elif provider == "github_actions" and token_field in {
+        "event_token_provider_run_id",
+        "source_token_provider_run_id",
+    }:
         if str(current.get("provider_run_id", "")) != provider_run_id:
+            return False
+        if token_field == "source_token_provider_run_id" and current.get(
+            "status"
+        ) not in {"waiting_github", "running_quality"}:
             return False
         previous = set()
     else:
@@ -1128,24 +1135,29 @@ def _claim_build_scoped_token(
 
 
 def claim_source_token(execution_id: str, *, provider_run_id: str) -> bool:
-    """Allow one repository-scoped read token per verified Cloud Build attempt."""
+    """Allow one repository-scoped read token per verified provider attempt."""
     now = _now()
     changes = {
         "source_token_issued_at": now,
-        "source_token_build_id": provider_run_id,
         "updated_at": now,
     }
     collection = _collection()
     if collection is None:
         with _lock:
             current = _memory.get(execution_id)
+            token_field = (
+                "source_token_build_id"
+                if current and current.get("provider") == "cloud_build"
+                else "source_token_provider_run_id"
+            )
             if current is None or not _claim_build_scoped_token(
                 current,
                 provider_run_id=provider_run_id,
-                token_field="source_token_build_id",
+                token_field=token_field,
                 issued_field="source_token_issued_at",
             ):
                 return False
+            changes[token_field] = provider_run_id
             current.update(changes)
             return True
     document = collection.document(execution_id)
@@ -1158,13 +1170,19 @@ def claim_source_token(execution_id: str, *, provider_run_id: str) -> bool:
         if not snapshot.exists:
             return False
         current = snapshot.to_dict()
+        token_field = (
+            "source_token_build_id"
+            if current.get("provider") == "cloud_build"
+            else "source_token_provider_run_id"
+        )
         if not _claim_build_scoped_token(
             current,
             provider_run_id=provider_run_id,
-            token_field="source_token_build_id",
+            token_field=token_field,
             issued_field="source_token_issued_at",
         ):
             return False
+        changes[token_field] = provider_run_id
         txn.update(document, changes)
         return True
 
