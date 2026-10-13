@@ -1111,6 +1111,10 @@ def _claim_build_scoped_token(
     }:
         if str(current.get("provider_run_id", "")) != provider_run_id:
             return False
+        if token_field == "source_token_provider_run_id" and current.get(
+            "status"
+        ) not in {"waiting_github", "running_quality"}:
+            return False
         previous = set()
     else:
         return False

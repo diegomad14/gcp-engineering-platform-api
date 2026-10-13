@@ -1219,3 +1219,31 @@ def test_github_source_token_memory_concurrency_has_one_winner():
             )
         )
     assert results.count(True) == 1
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "failed",
+        "quality_failed",
+        "quality_passed",
+        "released",
+        "superseded",
+        "no_release",
+        "unknown",
+    ],
+)
+@pytest.mark.parametrize("storage", ["memory", "firestore"])
+def test_github_source_token_rejects_completed_or_uncertain_execution(
+    status, storage, request
+):
+    if storage == "firestore":
+        collection = request.getfixturevalue("firestore_collection")
+    value, _ = _reserve()
+    identity = value["execution_id"]
+    executions.admit_github_run(identity, provider_run_id="42")
+    if storage == "firestore":
+        collection.document(identity).value["status"] = status
+    else:
+        executions._memory[identity]["status"] = status
+    assert not executions.claim_source_token(identity, provider_run_id="42")
