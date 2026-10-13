@@ -36,7 +36,6 @@ elif ! docker network create --internal "$network_name" >/dev/null 2>&1; then
 elif ! docker run --detach --rm \
     --name "$container_name" \
     --network "$network_name" \
-    --publish 127.0.0.1::8000 \
     --cap-drop ALL \
     --security-opt no-new-privileges \
     --read-only \
@@ -44,13 +43,16 @@ elif ! docker run --detach --rm \
     "$image_name" >"$log_file" 2>&1; then
   details="Unable to start the isolated API container."
 else
-  port="$(docker port "$container_name" 8000/tcp 2>/dev/null | sed -n '1s/.*://p')"
-  if [[ ! "$port" =~ ^[0-9]+$ ]]; then
-    details="Docker did not publish the API smoke port."
+  # An internal bridge may deliberately ignore published host ports. The Linux
+  # controller can probe its container IP without giving the image an external
+  # network, a published listener or a Docker socket.
+  address="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$container_name" 2>/dev/null)"
+  if [[ ! "$address" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    details="Docker did not assign the isolated API container an IPv4 address."
   else
     ready="false"
     for _ in $(seq 1 30); do
-      if curl --fail --silent --max-time 2 "http://127.0.0.1:${port}/health" >/dev/null; then
+      if curl --noproxy '*' --fail --silent --max-time 2 "http://${address}:8000/health" >/dev/null; then
         ready="true"
         break
       fi
@@ -58,8 +60,8 @@ else
     done
     if [[ "$ready" != "true" ]]; then
       details="API container did not become healthy."
-    elif ! curl --fail-with-body --silent --show-error --max-time 10 --request POST \
-      "http://127.0.0.1:${port}/api/service-factory/plan" \
+    elif ! curl --noproxy '*' --fail-with-body --silent --show-error --max-time 10 --request POST \
+      "http://${address}:8000/api/service-factory/plan" \
       --header 'Content-Type: application/json' \
       --data '{"repository":"test-org/test-repo","service_name":"test-api","service_type":"api","runtime":"python","gcp_project":"test-project","owner":"platform"}' \
       --output "$response_file" 2>>"$log_file"; then
