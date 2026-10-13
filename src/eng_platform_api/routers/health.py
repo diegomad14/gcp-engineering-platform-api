@@ -3,10 +3,10 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from ..config import config
 from ..models import HealthResponse, ServiceHealthItem, ServicesHealthResponse
-from ..services import catalog
+from ..services import catalog, log_catalog
 
 router = APIRouter(tags=["health"])
 
@@ -19,6 +19,16 @@ async def health_check():
         version="0.4.1",
         mock_mode=config.mock_mode,
     )
+
+
+@router.get("/ready")
+def readiness_check():
+    """Expose availability without disclosing private catalog contents."""
+    try:
+        log_catalog.load_catalog()
+    except log_catalog.CatalogUnavailable as exc:
+        raise HTTPException(status_code=503, detail="Platform is not ready") from exc
+    return {"status": "ready"}
 
 
 @router.get("/api/health/services", response_model=ServicesHealthResponse)

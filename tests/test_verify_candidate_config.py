@@ -235,9 +235,15 @@ def test_missing_inputs_never_query_cloud(args):
 
 
 @pytest.mark.parametrize(
-    "passed,exit_code,message", [(True, 0, "PASS"), (False, 1, "FAIL")]
+    "passed,ready,exit_code,message",
+    [
+        (True, True, 0, "PASS"),
+        (True, False, 1, "FAIL"),
+        (False, True, 1, "FAIL"),
+        (False, False, 1, "FAIL"),
+    ],
 )
-def test_cli_reports_only_fixed_result(passed, exit_code, message, capsys):
+def test_cli_reports_only_fixed_result(passed, ready, exit_code, message, capsys):
     with (
         mock.patch(
             "sys.argv",
@@ -252,11 +258,16 @@ def test_cli_reports_only_fixed_result(passed, exit_code, message, capsys):
             ],
         ),
         mock.patch.object(check, "verify", return_value=passed) as verify,
+        mock.patch.object(check, "verify_readiness", return_value=ready) as probe,
     ):
         assert check.main() == exit_code
         verify.assert_called_once_with("project", "region", REVISION)
+        if passed:
+            probe.assert_called_once()
+        else:
+            probe.assert_not_called()
     assert capsys.readouterr().out == (
-        f"Candidate writer and quality tooling check: {message}\n"
+        f"Candidate writer, quality tooling and readiness check: {message}\n"
     )
 
 
@@ -593,3 +604,63 @@ def test_candidate_rejects_ambiguous_executor_enrollment(rows):
             response([writer(), *pins(), routing(), *rows])
         )
         assert not check.verify("project", "region", REVISION)
+
+
+CANDIDATE_URL = "https://c-0123456789ab---eng-platform-api-pzzhmu7una-uc.a.run.app"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "",
+        "http://" + CANDIDATE_URL.split("//", 1)[1],
+        "https://example.com",
+        "https://localhost",
+        CANDIDATE_URL + "/other",
+        CANDIDATE_URL + "?token=PRIVATE",
+        CANDIDATE_URL + "#fragment",
+        CANDIDATE_URL.replace("https://", "https://user:PRIVATE@"),
+        CANDIDATE_URL + ":8443",
+    ],
+)
+def test_readiness_rejects_unbound_endpoints_without_network(url):
+    with mock.patch.object(check.urllib.request, "build_opener") as build:
+        assert not check.verify_readiness(url)
+        build.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "status,body,expected",
+    [
+        (200, b'{"status":"ready"}', True),
+        (503, b'{"status":"ready"}', False),
+        (200, b'{"status":"not_ready"}', False),
+        (200, b'{"status":"ready","private":"data"}', False),
+        (200, b"not-json", False),
+        (200, b" " * 4097, False),
+    ],
+)
+def test_readiness_requires_a_bounded_success_response(status, body, expected):
+    with mock.patch.object(check.urllib.request, "build_opener") as build:
+        response = build.return_value.open.return_value.__enter__.return_value
+        response.status = status
+        response.read.return_value = body
+        assert check.verify_readiness(CANDIDATE_URL) is expected
+        build.return_value.open.assert_called_once_with(
+            CANDIDATE_URL + "/ready", timeout=10
+        )
+        response.read.assert_called_once_with(4097)
+
+
+def test_readiness_transport_failure_and_redirect_fail_closed():
+    with mock.patch.object(check.urllib.request, "build_opener") as build:
+        build.return_value.open.side_effect = check.urllib.error.URLError(
+            "PRIVATE provider failure"
+        )
+        assert not check.verify_readiness(CANDIDATE_URL)
+    assert (
+        check._NoRedirect().redirect_request(
+            None, None, 302, "redirect", {}, "https://example.com"
+        )
+        is None
+    )
