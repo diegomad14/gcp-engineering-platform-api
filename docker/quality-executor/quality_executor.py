@@ -682,6 +682,30 @@ def _external_check(external_dir: Path) -> dict[str, Any]:
 
 def _normalize_report(report: dict[str, Any]) -> dict[str, Any]:
     value = json.loads(json.dumps(report, ensure_ascii=False))
+    # Match the API model's JSON types before sealing the report. JSON integers
+    # and floats hash differently even when they represent the same percentage.
+    for field in (
+        "coverage",
+        "coverage_threshold",
+        "differential_coverage",
+        "differential_threshold",
+    ):
+        if value.get(field) is not None:
+            value[field] = float(value[field])
+    for field, default in {
+        "branch": "",
+        "workflow_run_url": "",
+        "coverage": None,
+        "coverage_threshold": None,
+        "policy_version": "oss-v1",
+        "base_sha": "",
+        "differential_coverage": None,
+        "differential_threshold": None,
+        "changed_lines": None,
+        "covered_changed_lines": None,
+        "tool_versions": {},
+    }.items():
+        value.setdefault(field, default)
     checks = value.get("checks")
     if not isinstance(checks, list) or not checks:
         raise QualityExecutorError("Quality report does not contain checks")
@@ -690,7 +714,7 @@ def _normalize_report(report: dict[str, Any]) -> dict[str, Any]:
             raise QualityExecutorError("Quality report contains an invalid check")
         check.setdefault("findings", 0)
         check.setdefault("blocking_findings", 0)
-        check.setdefault("duration_seconds", 0.0)
+        check["duration_seconds"] = float(check.get("duration_seconds", 0.0))
         check.setdefault("details", "")
         check.setdefault("report_path", "")
     return value
