@@ -7,15 +7,15 @@ import json
 import logging
 import re
 import secrets
-from typing import Any
+from typing import Any, cast
 
 from fastapi import HTTPException
 
 from ..config import config
-from ..models import CatalogService
+from ..models import CatalogService, ExecutionProvider, ProviderSelection
 from . import (
     catalog,
-    deployment_commands,
+    provider_selection,
     deployment_executions,
     deployment_store,
     executor_circuits,
@@ -114,7 +114,12 @@ def _open_circuit(*, repository: str, run_id: str, reason: str, evidence: str) -
 
 
 def _propagate_open_circuit(owner: str, circuit: dict[str, Any]) -> None:
-    if config.release_orchestrator.private_executor_mode == "cloud_build":
+    if not config.cloud_build.new_builds_enabled:
+        return
+    if config.release_orchestrator.private_executor_mode in {
+        "cloud_build",
+        "github_actions",
+    }:
         # Preserve hints until existing GitHub reservations have drained.
         return
     # Never cache the provider decision or reopen from a stale read. Only the
@@ -132,6 +137,8 @@ def _propagate_open_circuit(owner: str, circuit: dict[str, Any]) -> None:
             service.repository
             for service in catalog.get_services().services
             if service.repository
+            and getattr(getattr(service, "release", None), "executor", None)
+            != "github_actions"
             and (
                 not config.cloud_build.repositories
                 or getattr(service, "service_name", "")
@@ -166,6 +173,10 @@ def _propagate_open_circuit(owner: str, circuit: dict[str, Any]) -> None:
 
 def _provider(service: CatalogService) -> str:
     service = require_managed(service)
+    if service.release.executor:
+        return service.release.executor
+    if config.release_orchestrator.private_executor_mode == "github_actions":
+        return "github_actions"
     try:
         private = github_release_control.repository_is_private(service.repository)
     except Exception as exc:
@@ -213,6 +224,8 @@ def _reserve(
     branch: str,
     delivery_id: str,
     provider: str,
+    selection: ProviderSelection | None = None,
+    trigger_event: str = "",
 ) -> tuple[dict[str, Any], bool]:
     service = require_managed(service)
     profile = profile_for(service)
@@ -244,6 +257,20 @@ def _reserve(
         # The original fingerprint and repository spelling are immutable.
         # A GitHub rename must not reserve another build for the same intent.
         return previous, False
+    chosen = selection or provider_selection.select(
+        service,
+        None,
+        operation="release",
+        legacy_provider=cast(ExecutionProvider, provider),
+    )
+    if chosen.effective != provider:
+        raise ReleaseOrchestratorError(
+            "Execution provider does not match the reserved selection"
+        )
+    if provider == "cloud_build":
+        from .cloud_build_policy import require_new_builds
+
+        require_new_builds()
     fingerprint_value = release_executions.fingerprint(
         repository=service.repository,
         service_name=service.service_name,
@@ -269,6 +296,8 @@ def _reserve(
         planner_hash=plan_hash,
         provider=provider,  # type: ignore[arg-type]
         delivery_id=delivery_id,
+        provider_selection=chosen.model_dump(),
+        trigger_event=trigger_event,
     )
 
 
@@ -493,7 +522,7 @@ def _close_circuit_from_probe(repository: str, payload_run: dict[str, Any]) -> b
         nonce=nonce,
     )
     if getattr(run, "conclusion", "") == "success" and started:
-        if settings.private_executor_mode == "cloud_build":
+        if settings.private_executor_mode in {"cloud_build", "github_actions"}:
             # A billing probe cannot override explicit executor policy or
             # suppress an older GitHub reservation during coordinated drain.
             # Repository hints are migrated separately after that drain.
@@ -595,18 +624,11 @@ def _handle_deployment_workflow_run(
             continue
         if not github_actions_quota.is_reactive_quota_failure(run, active):
             continue
-        _open_circuit(
-            repository=repository,
-            run_id=str(payload_run.get("id", "")),
-            reason="github_actions_billing_rejection",
-            evidence="deployment workflow rejected before starting",
-        )
-        submitted = deployment_commands.start_cloud_build(
-            service, active, reason="github_workflow_run_billing"
-        )
-        deployment_store.save(submitted, "")
+        active.status = "FAILED"
+        active.error = "GitHub Actions rejected the operation for billing or quota; provider remains GitHub Actions."
+        deployment_store.save(active, "")
         results.append(
-            {"execution_id": active.id, "status": submitted.status, "deployment": True}
+            {"execution_id": active.id, "status": active.status, "deployment": True}
         )
     return results
 
@@ -635,6 +657,10 @@ def handle_workflow_run(payload: dict[str, Any], *, delivery_id: str) -> list[di
     for execution in release_executions.list_for_repository(repository):
         if (
             execution.get("head_sha") != head_sha
+            or (
+                execution.get("trigger_event")
+                and execution["trigger_event"] != event_name
+            )
             or execution.get("provider") != "github_actions"
             or _is_terminal(execution)
             or not release_workflow_identity.matches_workflow_path(
@@ -661,21 +687,15 @@ def handle_workflow_run(payload: dict[str, Any], *, delivery_id: str) -> list[di
         if github_actions_quota.is_release_quota_failure(
             run, repository=repository, expected_sha=head_sha
         ):
-            _open_circuit(
-                repository=repository,
-                run_id=str(run_id),
-                reason="github_actions_billing_rejection",
-                evidence="zero-step workflow rejected by GitHub Billing",
+            results.append(
+                release_executions.save_for_provider(
+                    execution["execution_id"],
+                    expected_provider="github_actions",
+                    expected_run_id=str(run_id),
+                    status="failed",
+                    error="GitHub Actions rejected the operation for billing or quota; provider remains GitHub Actions.",
+                )
             )
-            transitioned, changed = release_executions.transition_to_cloud_build(
-                execution["execution_id"], reason="github_actions_billing_rejection"
-            )
-            if changed:
-                service = catalog.get_service(str(execution["service_name"]))
-                if service is None:
-                    raise ReleaseOrchestratorError("Release service disappeared")
-                transitioned = _submit_if_managed(transitioned, service)
-            results.append(transitioned)
             continue
         conclusion = str(run_payload.get("conclusion", ""))
         if conclusion == "success":
@@ -951,6 +971,11 @@ def reconcile_verified_github_run(
         branch="main" if operation == "main_release" else "recovered-pr",
         delivery_id=f"admin-reconcile-{run_id}",
         provider="github_actions",
+        selection=ProviderSelection(
+            effective="github_actions",
+            service_default=service.release.executor,
+            source="legacy_execution",
+        ),
     )
     if created:
         _start_checks(execution)
@@ -963,16 +988,11 @@ def reconcile_verified_github_run(
     if legacy_billing_recovery or github_actions_quota.is_release_quota_failure(
         run, repository=service.repository, expected_sha=head_sha
     ):
-        _open_circuit(
-            repository=service.repository,
-            run_id=str(run_id),
-            reason="github_actions_billing_rejection",
-            evidence="verified historical zero-step billing rejection",
+        return release_executions.save(
+            execution["execution_id"],
+            status="failed",
+            error="GitHub Actions billing rejected; original provider retained",
         )
-        execution, changed = release_executions.transition_to_cloud_build(
-            execution["execution_id"], reason="github_actions_billing_rejection"
-        )
-        return _submit_if_managed(execution, service) if changed else execution
     if getattr(run, "conclusion", "") == "success":
         return release_executions.save_for_provider(
             execution["execution_id"],
@@ -981,3 +1001,126 @@ def reconcile_verified_github_run(
             provider_terminal_success=True,
         )
     raise ReleaseOrchestratorError("GitHub run was not a Billing rejection")
+
+
+def start_release(
+    *,
+    service_name: str,
+    head_sha: str,
+    base_sha: str,
+    requested_by: str,
+    provider: ExecutionProvider | None = None,
+) -> dict[str, Any]:
+    """Reserve a main release once, then start only its selected executor."""
+    require_managed_service_name(service_name)
+    found = catalog.get_service(service_name)
+    if found is None:
+        raise HTTPException(404, "Unknown release service")
+    service = require_managed(found)
+    if not _service_enabled(service):
+        raise HTTPException(
+            409, "Release orchestration is not enabled for this service"
+        )
+    if (
+        not _SHA.fullmatch(head_sha)
+        or not _SHA.fullmatch(base_sha)
+        or head_sha == base_sha
+    ):
+        raise HTTPException(422, "Release requires distinct full head and base SHAs")
+    previous = release_executions.find(service.repository, head_sha, "main_release")
+    if previous:
+        if previous.get("base_sha") != base_sha:
+            raise HTTPException(409, "Existing release keeps its differential base")
+        provider_selection.require_same(
+            previous.get("provider_selection"),
+            provider,
+            legacy_provider=previous.get("provider"),
+        )
+        return previous
+    if not config.mock_mode:
+        if github_release_control.current_default_sha(service.repository) != head_sha:
+            raise HTTPException(
+                409, "Release SHA must match the current default branch"
+            )
+        if not github_release_control.is_fast_forward(
+            service.repository, base_sha, head_sha
+        ):
+            raise HTTPException(409, "Release base is not an ancestor of head")
+    legacy = "github_actions"
+    if provider is None and service.release.executor is None:
+        legacy = _provider(service)
+    selection = provider_selection.select(
+        service,
+        provider,
+        operation="release",
+        legacy_provider=cast(ExecutionProvider, legacy),
+    )
+    if selection.effective == "cloud_build":
+        from .cloud_build_policy import require_new_builds
+
+        require_new_builds()
+    execution, created = _reserve(
+        service=service,
+        operation="main_release",
+        head_sha=head_sha,
+        base_sha=base_sha,
+        branch="main",
+        delivery_id="operator:" + requested_by,
+        provider=selection.effective,
+        selection=selection,
+        trigger_event="workflow_dispatch",
+    )
+    provider_selection.require_same(
+        execution.get("provider_selection"),
+        provider,
+        legacy_provider=execution.get("provider"),
+    )
+    if not created or config.mock_mode:
+        return execution
+    try:
+        _start_checks(execution)
+        if selection.effective == "cloud_build":
+            return _submit_if_managed(execution, service)
+        github_release_control.dispatch_release(execution)
+    except Exception as exc:
+        release_executions.save(
+            execution["execution_id"],
+            status="failed",
+            error="Selected provider could not start; provider remains "
+            + selection.effective,
+        )
+        raise HTTPException(
+            502, "Selected provider could not start; no alternate provider was launched"
+        ) from exc
+    return release_executions.get(execution["execution_id"]) or execution
+
+
+def cancel_release(*, service_name: str, execution_id: str) -> dict[str, Any]:
+    require_managed_service_name(service_name)
+
+    def cancel(current):
+        if current.get("service_name") != service_name:
+            raise HTTPException(404, "Unknown release execution")
+        if _is_terminal(current):
+            return {}, current
+        if current.get("status") in {"submitting", "unknown"}:
+            raise HTTPException(
+                409, "Uncertain submission requires reconciliation before cancellation"
+            )
+        return {"status": "failed", "error": "Cancelled by operator"}, None
+
+    try:
+        execution = release_executions._mutate(execution_id, cancel)
+    except KeyError:
+        raise HTTPException(404, "Unknown release execution") from None
+    if execution.get("error") != "Cancelled by operator":
+        return execution
+    if execution.get("provider") == "github_actions" and execution.get(
+        "provider_run_id"
+    ):
+        github_release_control.workflow_run(
+            execution["repository"], int(execution["provider_run_id"])
+        ).cancel()
+    elif execution.get("provider") == "cloud_build" and execution.get("build_id"):
+        release_cloud_build.cancel(execution_id)
+    return execution

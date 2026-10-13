@@ -33,6 +33,7 @@ from ..models import (
     OperationalSecret,
     ServiceDeploymentConfig,
     ServiceQualityConfig,
+    ServiceReleaseConfig,
     ValidationTarget,
 )
 
@@ -111,6 +112,7 @@ class CatalogRecord(BaseModel):
     release_policy: str = "oss-v2"
     validation_targets: list[CatalogValidationTarget] = Field(default_factory=list)
     quality: CatalogQuality = Field(default_factory=CatalogQuality)
+    release: ServiceReleaseConfig = Field(default_factory=ServiceReleaseConfig)
     deployment: CatalogDeployment
     finops: CatalogFinOps = Field(default_factory=CatalogFinOps)
     operational_secrets: list[CatalogOperationalSecret] = Field(default_factory=list)
@@ -223,6 +225,23 @@ CatalogEntry = Annotated[
 class CatalogDocument(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     services: list[CatalogEntry] = Field(min_length=1, max_length=MAX_RESOURCES)
+
+    @model_validator(mode="after")
+    def repository_release_defaults_agree(self):
+        defaults = {}
+        for service in self.services:
+            if service.management_mode != "managed":
+                continue
+            repository = service.repository.casefold()
+            if (
+                repository in defaults
+                and defaults[repository] != service.release.executor
+            ):
+                raise ValueError(
+                    "Services sharing a repository require one CI/release default"
+                )
+            defaults[repository] = service.release.executor
+        return self
 
     @field_validator("services", mode="before")
     @classmethod

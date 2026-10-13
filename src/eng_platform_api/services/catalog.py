@@ -18,6 +18,7 @@ from ..config import config
 from .repository_identity import repository_id, same_repository
 from . import log_catalog
 from ..models import (
+    ExecutionProviderReadiness,
     CatalogResponse,
     CatalogService,
     FinOpsLabels,
@@ -25,6 +26,7 @@ from ..models import (
     ServiceDetail,
     ServiceDeploymentConfig,
     ServiceQualityConfig,
+    ServiceReleaseConfig,
     ServiceLogsCapability,
     ServiceTraffic,
     ValidationTarget,
@@ -64,6 +66,26 @@ def deployment_blockers(service: CatalogService) -> list[str]:
     ]
     if deployment.executor != "cloud_build":
         required_fields.append(("deployment.workflow_file", deployment.workflow_file))
+        from .github_execution_config import requires_execution_config
+
+        if requires_execution_config(service):
+            bucket = config.github.deployment_evidence_bucket
+            if not bucket:
+                blockers.append(
+                    "GitHub Artemis evidence bucket is required "
+                    "(ENG_PLATFORM_DEPLOYMENT_EVIDENCE_BUCKET or ENG_PLATFORM_QUALITY_BUCKET)"
+                )
+            elif not re.fullmatch(r"[a-z0-9][a-z0-9._-]{2,222}", bucket):
+                blockers.append(
+                    "GitHub Artemis evidence bucket must be a valid bucket name"
+                )
+            if service.service_name == "cgm-artemis-api" and not re.fullmatch(
+                r"[0-9a-f]{40}", config.release_orchestrator.artemis_web_sha
+            ):
+                blockers.append(
+                    "GitHub Artemis API requires a pinned paired web SHA "
+                    "(ENG_PLATFORM_ARTEMIS_WEB_SHA)"
+                )
     else:
         from .release_profiles import profile_for
 
@@ -162,6 +184,7 @@ def _catalog_service(cfg: dict) -> CatalogService:
             ValidationTarget(**vt) for vt in cfg.get("validation_targets", [])
         ],
         quality=ServiceQualityConfig(**quality_cfg),
+        release=ServiceReleaseConfig(**cfg.get("release", {})),
         deployment=ServiceDeploymentConfig(**deployment_cfg),
         finops=FinOpsLabels(**cfg.get("finops", {})),
         operational_secrets=cfg.get("operational_secrets", []),
@@ -172,8 +195,27 @@ def _catalog_service(cfg: dict) -> CatalogService:
         ),
     )
     blockers = deployment_blockers(service)
+    readiness = {}
+    for provider in ("github_actions", "cloud_build"):
+        candidate = service.model_copy(
+            update={
+                "deployment": service.deployment.model_copy(
+                    update={"executor": provider}
+                )
+            }
+        )
+        candidate_blockers = deployment_blockers(candidate)
+        if provider == "cloud_build" and not config.cloud_build.new_builds_enabled:
+            candidate_blockers.append("New Cloud Builds are paused by policy")
+        readiness[provider] = ExecutionProviderReadiness(
+            ready=not candidate_blockers, blockers=candidate_blockers
+        )
     return service.model_copy(
-        update={"deployment_ready": not blockers, "deployment_blockers": blockers}
+        update={
+            "deployment_ready": not blockers,
+            "deployment_blockers": blockers,
+            "deployment_provider_readiness": readiness,
+        }
     )
 
 

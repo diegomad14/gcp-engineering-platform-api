@@ -225,6 +225,17 @@ def submit(
     """Submit once.  Any uncertain response is recoverable by fingerprint."""
     service = require_managed(service)
     require_managed_service_name(item.service_name)
+    from .cloud_build_policy import require_new_builds
+
+    original = deployment_executions.get(item.id)
+    if (
+        original
+        and original.get("provider") == "cloud_build"
+        and original.get("build_id")
+    ):
+        item.logs_url = original.get("log_url", item.logs_url)
+        return item
+    require_new_builds()
     from . import mcp_grants
 
     mcp_grants.release_claims(item.requested_by)
@@ -234,6 +245,9 @@ def submit(
     existing = deployment_executions.reserve(
         item.id,
         provider="cloud_build",
+        provider_selection=item.provider_selection.model_dump()
+        if item.provider_selection
+        else None,
         fingerprint=request_fingerprint,
         service_name=item.service_name,
         repository=item.repository,
@@ -251,6 +265,7 @@ def submit(
     if not deployment_executions.claim_submission(item.id):
         raise CloudBuildError("Cloud Build submission is still being reconciled")
     location = f"projects/{config.cloud_build.project_id}/locations/{config.cloud_build.region}"
+    require_new_builds()
     try:
         response = _session().post(
             f"{_API}/{location}/builds", json=request, timeout=30

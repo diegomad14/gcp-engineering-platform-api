@@ -10,7 +10,8 @@ from eng_platform_api.config import config
 client = TestClient(app)
 
 
-def test_list_services():
+def test_list_services(monkeypatch):
+    monkeypatch.setattr(config.github, "deployment_evidence_bucket", "offline-evidence")
     response = client.get("/api/catalog/services")
     assert response.status_code == 200
     data = response.json()

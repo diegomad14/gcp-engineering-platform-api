@@ -918,3 +918,16 @@ def test_unbound_callback_rejects_different_list_id_before_binding_or_tokens(
     assert not current.get("build_id")
     assert not current.get("source_token_issued_at")
     assert not current.get("event_token_hash")
+
+
+def test_bootstrap_cannot_override_locked_github_intent(configured):
+    configured.execution["provider_selection"] = {
+        "effective": "github_actions",
+        "locked": True,
+    }
+    store._memory[configured.execution["execution_id"]] = configured.execution
+    with pytest.raises(ValueError, match="immutable"):
+        request(configured)
+    assert configured.execution["provider"] == "github_actions"
+    assert store.get_quality_bootstrap_ticket() is None
+    configured.session.post.assert_not_called()

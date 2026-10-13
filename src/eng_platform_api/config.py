@@ -62,6 +62,7 @@ class GitHubConfig:
     deployment_workflow: str = "platform-deploy.yml"
     rollback_workflow: str = "platform-rollback.yml"
     platform_api_url: str = ""
+    deployment_evidence_bucket: str = ""
     release_signing_private_key: str = ""
     release_signing_public_key: str = ""
     release_authorization_collection: str = "release_authorizations"
@@ -79,6 +80,9 @@ class CloudBuildConfig:
     """
 
     enabled: bool = False
+    # Independent of executor defaults and historical build reconciliation.
+    # Creating a build requires a future, explicitly approved activation.
+    new_builds_enabled: bool = False
     mode: str = "auto"
     project_id: str = ""
     region: str = "us-central1"
@@ -304,6 +308,11 @@ def load_config() -> PlatformConfig:
             "ENG_PLATFORM_GITHUB_ROLLBACK_WORKFLOW", "platform-rollback.yml"
         ),
         platform_api_url=os.getenv("ENG_PLATFORM_API_URL", "").rstrip("/"),
+        deployment_evidence_bucket=(
+            os.getenv("ENG_PLATFORM_DEPLOYMENT_EVIDENCE_BUCKET", "").strip()
+            or os.getenv("ENG_PLATFORM_QUALITY_BUCKET", "").strip()
+            or os.getenv("ENG_PLATFORM_CLOUD_BUILD_EVIDENCE_BUCKET", "").strip()
+        ),
         release_signing_private_key=os.getenv(
             "ENG_PLATFORM_RELEASE_SIGNING_PRIVATE_KEY", ""
         ).replace("\\n", "\n"),
@@ -348,6 +357,10 @@ def load_config() -> PlatformConfig:
 
     cloud_build = CloudBuildConfig(
         enabled=os.getenv("ENG_PLATFORM_CLOUD_BUILD_ENABLED", "false").lower()
+        == "true",
+        new_builds_enabled=os.getenv(
+            "ENG_PLATFORM_CLOUD_BUILD_NEW_BUILDS_ENABLED", "false"
+        ).lower()
         == "true",
         mode=os.getenv("ENG_PLATFORM_DEPLOY_EXECUTOR_MODE", "auto").strip(),
         project_id=os.getenv("ENG_PLATFORM_CLOUD_BUILD_PROJECT_ID", "").strip(),
@@ -499,46 +512,60 @@ def load_config() -> PlatformConfig:
         ),
         artemis_web_sha=os.getenv("ENG_PLATFORM_ARTEMIS_WEB_SHA", "").strip().lower(),
     )
-    if release_orchestrator.private_executor_mode not in {"auto", "cloud_build"}:
+    if release_orchestrator.private_executor_mode not in {
+        "auto",
+        "github_actions",
+        "cloud_build",
+    }:
         raise ValueError(
-            "ENG_PLATFORM_PRIVATE_EXECUTOR_MODE must be auto or cloud_build"
+            "ENG_PLATFORM_PRIVATE_EXECUTOR_MODE must be auto, github_actions or cloud_build"
         )
     if release_orchestrator.enabled:
         if not release_orchestrator.webhook_secret:
             raise ValueError(
                 "ENG_PLATFORM_GITHUB_WEBHOOK_SECRET is required for release orchestration"
             )
-        if not release_orchestrator.service_account:
-            raise ValueError("ENG_PLATFORM_RELEASE_QUALITY_SERVICE_ACCOUNT is required")
-        if not release_orchestrator.callback_service_account:
-            raise ValueError(
-                "ENG_PLATFORM_RELEASE_CALLBACK_SERVICE_ACCOUNT is required"
-            )
         if not release_orchestrator.reconciler_service_account:
             raise ValueError(
                 "ENG_PLATFORM_RELEASE_RECONCILER_SERVICE_ACCOUNT is required"
             )
-        if _service_account_subject(
-            release_orchestrator.callback_service_account
-        ) != _service_account_subject(release_orchestrator.service_account):
-            raise ValueError(
-                "Release callback and quality build service accounts must match"
-            )
-        if _service_account_subject(
-            release_orchestrator.reconciler_service_account
-        ) in {
-            _service_account_subject(release_orchestrator.service_account),
-            _service_account_subject(release_orchestrator.callback_service_account),
-        }:
-            raise ValueError(
-                "Release reconciler service account must be separate from the build identity"
-            )
-        if _service_account_subject(
-            release_orchestrator.service_account
-        ) == _service_account_subject(cloud_build.service_account):
-            raise ValueError(
-                "Release quality and deployment builds require separate service accounts"
-            )
+        if (
+            release_orchestrator.private_executor_mode != "github_actions"
+            or cloud_build.enabled
+        ):
+            if not release_orchestrator.service_account:
+                raise ValueError(
+                    "ENG_PLATFORM_RELEASE_QUALITY_SERVICE_ACCOUNT is required"
+                )
+            if not release_orchestrator.callback_service_account:
+                raise ValueError(
+                    "ENG_PLATFORM_RELEASE_CALLBACK_SERVICE_ACCOUNT is required"
+                )
+            if not release_orchestrator.reconciler_service_account:
+                raise ValueError(
+                    "ENG_PLATFORM_RELEASE_RECONCILER_SERVICE_ACCOUNT is required"
+                )
+            if _service_account_subject(
+                release_orchestrator.callback_service_account
+            ) != _service_account_subject(release_orchestrator.service_account):
+                raise ValueError(
+                    "Release callback and quality build service accounts must match"
+                )
+            if _service_account_subject(
+                release_orchestrator.reconciler_service_account
+            ) in {
+                _service_account_subject(release_orchestrator.service_account),
+                _service_account_subject(release_orchestrator.callback_service_account),
+            }:
+                raise ValueError(
+                    "Release reconciler service account must be separate from the build identity"
+                )
+            if _service_account_subject(
+                release_orchestrator.service_account
+            ) == _service_account_subject(cloud_build.service_account):
+                raise ValueError(
+                    "Release quality and deployment builds require separate service accounts"
+                )
         if not (github.app_id and github.installation_id and github.private_key):
             raise ValueError(
                 "GitHub App credentials are required for release orchestration"
@@ -547,10 +574,11 @@ def load_config() -> PlatformConfig:
             raise ValueError(
                 "ENG_PLATFORM_API_URL is required for release orchestration"
             )
-        if not cloud_build.enabled or not cloud_build.project_id:
-            raise ValueError("Cloud Build must be configured for release fallback")
-        if not cloud_build.evidence_bucket:
-            raise ValueError("Cloud Build evidence bucket is required")
+        if release_orchestrator.private_executor_mode != "github_actions":
+            if not cloud_build.enabled or not cloud_build.project_id:
+                raise ValueError("Cloud Build must be configured for release fallback")
+            if not cloud_build.evidence_bucket:
+                raise ValueError("Cloud Build evidence bucket is required")
         quality_bucket = os.getenv("ENG_PLATFORM_QUALITY_BUCKET", "").strip()
         if not quality_bucket:
             raise ValueError("Release orchestration requires a quality evidence bucket")
@@ -558,7 +586,10 @@ def load_config() -> PlatformConfig:
             set(release_orchestrator.enabled_services)
             | set(release_orchestrator.canary_services)
         ).difference(cloud_build.repositories)
-        if missing_repositories:
+        if (
+            missing_repositories
+            and release_orchestrator.private_executor_mode != "github_actions"
+        ):
             raise ValueError(
                 "Connected repositories are missing for release services: "
                 + ", ".join(sorted(missing_repositories))

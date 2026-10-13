@@ -15,7 +15,7 @@ from requests.adapters import HTTPAdapter
 from ..config import config
 from ..models import CatalogService
 from . import release_executions
-from .cloud_build_policy import economy_options, validate_submission
+from .cloud_build_policy import economy_options, require_new_builds, validate_submission
 from .quality_profiles import executor_image, planner_hash, profile_for
 
 from .resource_access import require_managed, require_managed_service_name
@@ -200,6 +200,7 @@ def submit_quality_bootstrap(
     reauthorize: Callable[[], Any],
 ) -> dict[str, Any]:
     """Only a reservation winner calls this once. No claim, retry or recovery POST."""
+    require_new_builds()
     if (
         execution.get("status") != "submitting"
         or execution.get("provider") != "cloud_build"
@@ -220,6 +221,7 @@ def submit_quality_bootstrap(
     ):
         raise ReleaseCloudBuildError("Bootstrap dispatch is already consumed")
     reauthorize()
+    require_new_builds()
     try:
         response = session.post(
             f"{_API}/{_location()}/builds",
@@ -911,10 +913,12 @@ def submit(execution_id: str, service: CatalogService) -> dict[str, Any]:
     recovered = _matching_build(execution)
     if recovered:
         return _bind(execution_id, recovered)
+    require_new_builds()
     request = build_request(execution, service)
     validate_submission(request)
     if not release_executions.claim_submission(execution_id):
         raise ReleaseCloudBuildError("Release build submission is being reconciled")
+    require_new_builds()
     try:
         response = _session().post(
             f"{_API}/{_location()}/builds", json=request, timeout=30

@@ -350,6 +350,8 @@ def _publish_if_allowed(execution: dict[str, Any]) -> dict[str, Any]:
 def _retry_planner_after_verified_step_failure(
     execution: dict[str, Any],
 ) -> dict[str, Any]:
+    if not config.cloud_build.enabled or not config.cloud_build.new_builds_enabled:
+        return execution
     retry_count = int(execution.get("planner_retry_count", 0) or 0)
     remediation = retry_count == 1
     contract_retry = retry_count == 2

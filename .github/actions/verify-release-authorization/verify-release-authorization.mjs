@@ -2,10 +2,18 @@ import crypto from "node:crypto";
 
 const env = process.env;
 const decode = (value) => Buffer.from(value, "base64url");
+const mode = env.AUTHORIZATION_MODE || "consume";
+const stage = env.AUTHORIZATION_STAGE || "";
 
 function fail(message) {
   console.error(message);
   process.exit(1);
+}
+
+if (!['consume', 'continue'].includes(mode)) fail("Invalid authorization mode");
+if ((mode === 'consume' && stage) ||
+    (mode === 'continue' && !['candidate', 'promote', 'rollback'].includes(stage))) {
+  fail("Invalid authorization stage");
 }
 
 const token = env.PLATFORM_AUTHORIZATION || "";
@@ -40,10 +48,14 @@ if (
   !Number.isInteger(claims.iat) ||
   !Number.isInteger(claims.exp) ||
   claims.iat > now + 30 ||
-  claims.exp < now ||
+  (claims.exp < now && !(mode === "continue" && claims.workflow_continuation === true)) ||
+  claims.exp <= claims.iat ||
   claims.exp - claims.iat > 300 ||
   !claims.jti
 ) fail("Expired platform release authorization");
+if (mode === "continue" && claims.workflow_continuation !== true) {
+  fail("Ticket does not authorize continuation");
+}
 
 const expected = {
   repository: env.EXPECTED_REPOSITORY,
@@ -63,7 +75,7 @@ if (env.EXPECTED_TARGET_REVISION && claims.target_revision !== env.EXPECTED_TARG
 }
 
 let oidc = "";
-if (claims.execution_repository) {
+if (claims.execution_repository || claims.workflow_continuation === true) {
   if (!env.ACTIONS_ID_TOKEN_REQUEST_URL || !env.ACTIONS_ID_TOKEN_REQUEST_TOKEN) {
     fail("GitHub OIDC permission is required");
   }
@@ -93,6 +105,8 @@ const response = await fetch(
       kind: env.EXPECTED_KIND,
       target_revision: env.EXPECTED_TARGET_REVISION || "",
       configuration_hash: claims.configuration_hash || "",
+      // Legacy consume stays compatible with the already-published API schema.
+      ...(claims.workflow_continuation === true ? { mode, stage } : {}),
     }),
   },
 );

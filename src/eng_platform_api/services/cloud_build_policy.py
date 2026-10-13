@@ -7,6 +7,20 @@ This validator applies only to new submissions, not historical inspection.
 
 from typing import Any
 
+from fastapi import HTTPException
+
+from ..config import config
+
+
+def require_new_builds() -> None:
+    """Fail before claims, provider handoff or POST; reads remain available."""
+    if not config.cloud_build.enabled or not config.cloud_build.new_builds_enabled:
+        raise HTTPException(
+            409,
+            "New Cloud Builds are paused by policy; no build was created. "
+            "Choose GitHub Actions for a new operation.",
+        )
+
 
 def economy_options(**extra: Any) -> dict[str, Any]:
     options = {"logging": "CLOUD_LOGGING_ONLY", **extra}

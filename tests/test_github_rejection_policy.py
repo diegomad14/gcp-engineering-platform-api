@@ -232,7 +232,7 @@ def test_bound_health_probe_accepts_known_repository_rename_without_rewriting_re
 
 
 @pytest.mark.parametrize("operation", ["deploy", "rollback", "retry"])
-def test_enrolled_direct_billing_rejection_falls_back_once_with_same_identity(
+def test_enrolled_direct_billing_rejection_keeps_provider_and_identity(
     monkeypatch, operation
 ):
     service = commands.catalog.get_service("eng-platform-api")
@@ -263,28 +263,26 @@ def test_enrolled_direct_billing_rejection_falls_back_once_with_same_identity(
     opened = mock.Mock()
     monkeypatch.setattr(commands, "start_cloud_build", fallback)
     monkeypatch.setattr(commands, "_open_billing_circuit", opened)
-    if operation == "deploy":
-        result = commands._dispatch_deploy(
-            service, ReleaseTag(name=item.tag, sha=item.sha), "operator"
-        )
-    elif operation == "rollback":
-        result = commands._dispatch_rollback(service, item, "operator")
-    else:
-        result = commands._retry_failed_dispatch(
-            service, item, "original-key", "dispatch failed"
-        )
-        save.assert_called_once_with(item, "original-key")
-    assert result is item
-    fallback.assert_called_once_with(
-        service,
-        item,
-        reason="retry_billing" if operation == "retry" else "github_quota_dispatch",
+    monkeypatch.setattr(
+        commands.deployment_executions, "get", lambda _: {"provider": "github_actions"}
     )
-    opened.assert_called_once_with(
-        service,
-        reason="github_actions_billing_rejection",
-        evidence="Payment required",
-    )
+    with pytest.raises(
+        (github_deployments.GitHubDispatchError, commands.HTTPException)
+    ):
+        if operation == "deploy":
+            commands._dispatch_deploy(
+                service, ReleaseTag(name=item.tag, sha=item.sha), "operator"
+            )
+        elif operation == "rollback":
+            commands._dispatch_rollback(service, item, "operator")
+        else:
+            commands._retry_failed_dispatch(
+                service, item, "original-key", "dispatch failed"
+            )
+            save.assert_called_once_with(item, "original-key")
+    assert item.id == "42"
+    fallback.assert_not_called()
+    opened.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -369,7 +367,7 @@ def test_recovery_required_surfaces_as_conflict_without_dispatch(
         status="SUCCEEDED",
         production_revision="revision-1",
     )
-    monkeypatch.setattr(commands, "_service_or_404", lambda _: service)
+    monkeypatch.setattr(commands, "_service_or_404", lambda *args: service)
     monkeypatch.setattr(commands, "_active_deployment", lambda _: None)
     monkeypatch.setattr(commands, "_require_release_quality", mock.Mock())
     monkeypatch.setattr(commands, "_require_orchestrated_release", mock.Mock())
@@ -412,7 +410,11 @@ def test_recovery_required_surfaces_as_conflict_without_dispatch(
         else:
             commands._retry_failed_dispatch(service, target, "key", "dispatch failed")
     assert caught.value.status_code == 409
-    assert "verified health recovery" in caught.value.detail
+    assert (
+        "requires reconciliation"
+        if operation == "retry"
+        else "verified health recovery"
+    ) in caught.value.detail
     github.assert_not_called()
     cloud.assert_not_called()
 

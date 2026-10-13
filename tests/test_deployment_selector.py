@@ -110,16 +110,16 @@ def test_dispatch_deploy_uses_preflight_cloud_build(monkeypatch, service):
         lambda **_kwargs: managed,
     )
     start_cloud = mock.Mock(return_value=managed)
-    monkeypatch.setattr(deployments, "_start_cloud_build", start_cloud)
+    monkeypatch.setattr(
+        deployments.deployment_commands, "start_cloud_build", start_cloud
+    )
 
     assert deployments._dispatch_deploy(service, tag, "operator") is managed
-    start_cloud.assert_called_once_with(
-        service, managed, reason="github_quota_preflight"
-    )
+    start_cloud.assert_called_once_with(service, managed, reason="selected_provider")
 
 
 @pytest.mark.parametrize("quota_error", [True, False])
-def test_dispatch_deploy_only_falls_back_for_explicit_quota(
+def test_dispatch_deploy_stops_for_quota_and_generic_errors(
     monkeypatch, service, quota_error
 ):
     failed = _item(status="FAILED", current_stage="dispatch")
@@ -139,17 +139,13 @@ def test_dispatch_deploy_only_falls_back_for_explicit_quota(
         lambda _: quota_error,
     )
     start_cloud = mock.Mock(return_value=failed)
-    monkeypatch.setattr(deployments, "_start_cloud_build", start_cloud)
+    monkeypatch.setattr(
+        deployments.deployment_commands, "start_cloud_build", start_cloud
+    )
 
-    if quota_error:
-        assert deployments._dispatch_deploy(service, tag, "operator") is failed
-        start_cloud.assert_called_once_with(
-            service, failed, reason="github_quota_dispatch"
-        )
-    else:
-        with pytest.raises(github_deployments.GitHubDispatchError):
-            deployments._dispatch_deploy(service, tag, "operator")
-        start_cloud.assert_not_called()
+    with pytest.raises(github_deployments.GitHubDispatchError):
+        deployments._dispatch_deploy(service, tag, "operator")
+    start_cloud.assert_not_called()
 
 
 def test_dispatch_rollback_preflight_preserves_target(monkeypatch, service):
@@ -165,7 +161,9 @@ def test_dispatch_rollback_preflight_preserves_target(monkeypatch, service):
         start_managed,
     )
     monkeypatch.setattr(
-        deployments, "_start_cloud_build", lambda *_args, **_kwargs: managed
+        deployments.deployment_commands,
+        "start_cloud_build",
+        lambda *_args, **_kwargs: managed,
     )
 
     assert deployments._dispatch_rollback(service, target, "operator") is managed
@@ -195,7 +193,9 @@ def test_refresh_projects_cloud_terminal_state(monkeypatch):
     assert status.call_args.kwargs["state"] == "success"
 
 
-def test_refresh_reacts_only_to_verified_startup_quota(monkeypatch, service):
+def test_refresh_never_starts_work_even_for_verified_startup_quota(
+    monkeypatch, service
+):
     item = _item(status="FAILED", github_run_id=99)
     run = object()
     repo = mock.Mock()
@@ -212,7 +212,10 @@ def test_refresh_reacts_only_to_verified_startup_quota(monkeypatch, service):
     )
     monkeypatch.setattr(deployments, "_service_or_404", lambda _: service)
     start_cloud = mock.Mock(return_value=item)
-    monkeypatch.setattr(deployments, "_start_cloud_build", start_cloud)
+    monkeypatch.setattr(
+        deployments.deployment_commands, "start_cloud_build", start_cloud
+    )
 
     assert deployments._refresh(item) is item
-    start_cloud.assert_called_once_with(service, item, reason="github_quota_startup")
+    start_cloud.assert_not_called()
+    repo.get_workflow_run.assert_not_called()

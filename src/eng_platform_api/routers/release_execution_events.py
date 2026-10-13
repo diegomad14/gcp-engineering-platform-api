@@ -433,6 +433,14 @@ def resolve_execution(
         raise HTTPException(
             status_code=404, detail="Release execution is not available"
         )
+    if execution.get("status") in {
+        "failed",
+        "quality_failed",
+        "no_release",
+        "released",
+        "superseded",
+    }:
+        raise HTTPException(409, "Release execution is already terminal")
     try:
         claims = release_workflow_identity.verify(_bearer(authorization), execution)
         require_managed_service_name(str(execution.get("service_name", "")))

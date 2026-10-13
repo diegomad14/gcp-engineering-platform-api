@@ -64,7 +64,7 @@ def revoke(jti: str) -> None:
         _mock_entries.setdefault(jti, {}).update(record)
 
 
-def get(jti: str) -> dict[str, Any] | None:
+def get(jti: str, *, require_durable: bool = False) -> dict[str, Any] | None:
     """Return a consumed authorization without exposing its token."""
     if not jti:
         return None
@@ -75,7 +75,7 @@ def get(jti: str) -> dict[str, Any] | None:
             return None
         record = snapshot.to_dict() or {}
         return record if isinstance(record, dict) else None
-    if not config.mock_mode:
+    if require_durable or not config.mock_mode:
         raise RuntimeError("Durable release authorization store is not configured")
     with _lock:
         record = _mock_entries.get(jti)

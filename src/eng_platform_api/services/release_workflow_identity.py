@@ -65,7 +65,9 @@ def verify(token: str, execution: dict) -> dict[str, str]:
     operation = str(execution["operation"])
     workflow = workflow_file(operation)
     expected_suffix = f"/.github/workflows/{workflow}@refs/heads/main"
-    expected_event = "pull_request_target" if operation == "pr_quality" else "push"
+    expected_event = execution.get("trigger_event") or (
+        "pull_request_target" if operation == "pr_quality" else "push"
+    )
     if (
         claims.get("repository") != execution.get("repository")
         or claims.get("event_name") != expected_event

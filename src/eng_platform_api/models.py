@@ -31,8 +31,25 @@ class ServiceQualityConfig(BaseModel):
     evidence_services: list[str] = Field(default_factory=list)
 
 
+ExecutionProvider = Literal["github_actions", "cloud_build"]
+
+
+class ServiceReleaseConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # None preserves the existing account policy for unmigrated catalogs.
+    executor: ExecutionProvider | None = None
+
+
+class ProviderSelection(BaseModel):
+    requested: ExecutionProvider | None = None
+    service_default: ExecutionProvider | None = None
+    effective: ExecutionProvider
+    source: Literal["request", "service_default", "legacy_policy", "legacy_execution"]
+    locked: bool = True
+
+
 class ServiceDeploymentConfig(BaseModel):
-    executor: Literal["auto", "cloud_build"] = "auto"
+    executor: Literal["auto", "github_actions", "cloud_build"] = "auto"
     enabled: bool = True
     workflow_file: str = "platform-deploy.yml"
     image_name: str = ""
@@ -96,6 +113,11 @@ class InventorySource(BaseModel):
     region: str
 
 
+class ExecutionProviderReadiness(BaseModel):
+    ready: bool
+    blockers: list[str] = Field(default_factory=list)
+
+
 class CatalogService(BaseModel):
     service_name: str
     management_mode: Literal["managed", "observability_only"] = "managed"
@@ -110,11 +132,15 @@ class CatalogService(BaseModel):
     release_policy: str = "oss-v2"
     validation_targets: list[ValidationTarget] = Field(default_factory=list)
     quality: ServiceQualityConfig = Field(default_factory=ServiceQualityConfig)
+    release: ServiceReleaseConfig = Field(default_factory=ServiceReleaseConfig)
     deployment: ServiceDeploymentConfig = Field(default_factory=ServiceDeploymentConfig)
     finops: FinOpsLabels = Field(default_factory=FinOpsLabels)
     logs: ServiceLogsCapability = Field(default_factory=ServiceLogsCapability)
     deployment_ready: bool = False
     deployment_blockers: list[str] = Field(default_factory=list)
+    deployment_provider_readiness: dict[
+        ExecutionProvider, ExecutionProviderReadiness
+    ] = Field(default_factory=dict)
     operational_secrets: list[OperationalSecret] = Field(default_factory=list)
     infrastructure_resources: list[InfrastructureResource] = Field(
         default_factory=list, max_length=256
@@ -142,6 +168,7 @@ class CatalogService(BaseModel):
                 or self.operational_secrets
                 or self.infrastructure_resources
                 or self.quality.enabled
+                or self.release.executor is not None
             ):
                 raise ValueError(
                     "Observation-only resources cannot carry managed configuration"
@@ -278,11 +305,39 @@ class DeploymentCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     tag: str = Field(min_length=1, max_length=128)
+    provider: ExecutionProvider | None = None
+
+
+class DeploymentRollbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    provider: ExecutionProvider | None = None
+
+
+class ReleaseExecutionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    head_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    base_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    provider: ExecutionProvider | None = None
+
+
+class ReleaseExecutionView(BaseModel):
+    execution_id: str
+    service_name: str
+    operation: str
+    head_sha: str
+    base_sha: str
+    provider: ExecutionProvider
+    provider_selection: ProviderSelection | None = None
+    status: str
+    error: str = ""
+    github_run_url: str = ""
 
 
 class ReleaseAuthorizationConsumeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    mode: Literal["consume", "continue"] = "consume"
+    stage: Literal["", "candidate", "promote", "rollback"] = ""
     token: str = Field(min_length=1, max_length=8192)
     repository: str = Field(min_length=1, max_length=256)
     service_name: str = Field(min_length=1, max_length=128)
@@ -300,6 +355,7 @@ class ReleaseAuthorizationConsumeResponse(BaseModel):
 
 
 class DeploymentItem(BaseModel):
+    provider_selection: ProviderSelection | None = None
     origin: Literal["managed", "external_verified"] = "managed"
     reason: str = ""
     image_digest: str = ""
@@ -315,6 +371,7 @@ class DeploymentItem(BaseModel):
     stages: list[DeploymentStage] = Field(default_factory=list)
     candidate_revision: str = ""
     production_revision: str = ""
+    rollback_target_deployment_id: str = ""
     candidate_url: str = ""
     production_url: str = ""
     requested_by: str = "anonymous"

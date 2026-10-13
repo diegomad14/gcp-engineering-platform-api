@@ -200,6 +200,9 @@ def request_quality_bootstrap(
     execution = release_executions.get(execution_id)
     if execution is None:
         raise QualityBootstrapError("Bootstrap execution is unavailable")
+    from .cloud_build_policy import require_new_builds
+
+    require_new_builds()
     service = _validate_identity(execution)
     if (
         execution.get("provider") != "github_actions"

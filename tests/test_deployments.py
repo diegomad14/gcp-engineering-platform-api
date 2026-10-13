@@ -13,7 +13,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from eng_platform_api.config import config
 from eng_platform_api.main import app
-from eng_platform_api.models import DeploymentItem, ReleaseTag, ReleaseTagPage
+from eng_platform_api.models import (
+    DeploymentItem,
+    ProviderSelection,
+    ReleaseTag,
+    ReleaseTagPage,
+)
 
 tmp_store = Path(tempfile.mkdtemp(prefix="deployments_test_")) / "deployments.json"
 
@@ -21,6 +26,10 @@ tmp_store = Path(tempfile.mkdtemp(prefix="deployments_test_")) / "deployments.js
 @pytest.fixture(autouse=True)
 def isolated_store(monkeypatch):
     monkeypatch.setattr(config.release_orchestrator, "private_executor_mode", "auto")
+    from eng_platform_api.services import deployment_executions
+
+    monkeypatch.setattr(deployment_executions, "_collection", lambda: None)
+    deployment_executions._memory.clear()
     private_key = (
         Ed25519PrivateKey.generate()
         .private_bytes(
@@ -82,6 +91,9 @@ def _tag(eligible=True):
 
 def _deployment():
     return DeploymentItem(
+        provider_selection=ProviderSelection(
+            effective="github_actions", source="legacy_execution"
+        ),
         id="42",
         service_name="eng-platform-api",
         repository="diegomad14/gcp-engineering-platform-api",
@@ -853,6 +865,7 @@ def test_retry_dispatch_reuses_github_deployment_and_release_identity(
             "error": "GitHub workflow dispatch failed",
         }
     )
+    _remember_github_rejection(item)
     github_deployment = mock.MagicMock(id=73)
     repository = mock.MagicMock()
     repository.get_deployment.return_value = github_deployment
@@ -1014,6 +1027,7 @@ def test_refresh_does_not_guess_between_ambiguous_unreported_runs(
 
 
 def test_open_billing_circuit_only_updates_private_repositories(monkeypatch):
+    monkeypatch.setattr(config.cloud_build, "new_builds_enabled", True)
     from eng_platform_api.services import deployment_commands
 
     service = SimpleNamespace(repository="owner/private")
@@ -1220,7 +1234,7 @@ def test_deployment_statuses_supply_run_and_revision_evidence():
 
 
 def _failed_item(**overrides):
-    return _deployment().model_copy(
+    value = _deployment().model_copy(
         update={
             "status": "FAILED",
             "current_stage": "dispatch",
@@ -1228,6 +1242,27 @@ def _failed_item(**overrides):
             **overrides,
         }
     )
+
+    _remember_github_rejection(value)
+    return value
+
+
+def _remember_github_rejection(value):
+    from eng_platform_api.services import deployment_executions
+
+    deployment_executions.reserve(
+        value.id,
+        provider="github_actions",
+        fingerprint="rejected-" + value.id,
+        service_name=value.service_name,
+        repository=value.repository,
+        sha=value.sha,
+        tag=value.tag,
+        kind=value.kind,
+        reason="verified_test_rejection",
+        provider_selection=value.provider_selection.model_dump(),
+    )
+    deployment_executions.save(value.id, status="GITHUB_REJECTED")
 
 
 def test_start_deployment_status_update_failure_is_recorded(private_provider_catalog):
@@ -1571,6 +1606,8 @@ def test_rollback_retry_generic_error_is_github_unavailable(client):
             "id": "rb-failed",
             "tag": target.tag,
             "kind": "rollback",
+            "production_revision": target.production_revision,
+            "rollback_target_deployment_id": target.id,
             "status": "FAILED",
             "current_stage": "dispatch",
             "error": "GitHub rollback workflow dispatch failed",
@@ -1599,6 +1636,8 @@ def test_rollback_retry_failed_dispatch_sets_502(client):
             "id": "rb-failed",
             "tag": target.tag,
             "kind": "rollback",
+            "production_revision": target.production_revision,
+            "rollback_target_deployment_id": target.id,
             "status": "FAILED",
             "current_stage": "dispatch",
             "error": "GitHub rollback workflow dispatch failed",
