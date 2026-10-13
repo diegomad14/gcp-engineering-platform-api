@@ -17,6 +17,8 @@ EXPECTED_WRITER = (
     "eng-platform-secret-writer@cgm-assistant-prod.iam.gserviceaccount.com"
 )
 BUNDLE_PATH = Path(__file__).with_name("quality_executor_bundle.json")
+ARTEMIS_PAIR_PATH = Path(__file__).with_name("artemis_release_pair.json")
+ARTEMIS_WEB_ENV = "ENG_PLATFORM_ARTEMIS_WEB_SHA"
 MANIFEST_PATH = Path(__file__).with_name("release_quality_profiles.json")
 TOOLING_REGISTRY = "us-central1-docker.pkg.dev/cgm-assistant-prod/cgm-sanplat-repo"
 IMAGE_NAMES = {
@@ -168,12 +170,29 @@ def _tooling_images() -> dict[str, str]:
     return {name: images[name] for name in IMAGE_NAMES}
 
 
+def _paired_web_sha() -> str:
+    """Read the reviewed Web commit from the exact controller release source."""
+    pair = json.loads(ARTEMIS_PAIR_PATH.read_text(), object_pairs_hook=_unique_object)
+    if (
+        not isinstance(pair, dict)
+        or set(pair) != {"web_sha"}
+        or not isinstance(pair["web_sha"], str)
+        or not re.fullmatch(r"[0-9a-f]{40}", pair["web_sha"])
+    ):
+        raise ValueError("invalid Artemis release pair")
+    return pair["web_sha"]
+
+
 def verify(project: str, region: str, revision: str) -> bool:
     """Fail closed without exposing container settings or provider diagnostics."""
     if not all(value.strip() for value in (project, region, revision)):
         return False
     try:
-        required = {WRITER_ENV: EXPECTED_WRITER, **_tooling_images()}
+        required = {
+            WRITER_ENV: EXPECTED_WRITER,
+            **_tooling_images(),
+            ARTEMIS_WEB_ENV: _paired_web_sha(),
+        }
         result = subprocess.run(
             [
                 "gcloud",
