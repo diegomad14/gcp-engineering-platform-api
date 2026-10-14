@@ -882,6 +882,139 @@ def _service_url(service: str, region: str, project: str) -> str:
     )
 
 
+class _NoTokenRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _token_json(request: urllib.request.Request, stage: str) -> dict:
+    """Never forward credentials on redirects or expose upstream response bodies."""
+    try:
+        opener = urllib.request.build_opener(_NoTokenRedirect())
+        with opener.open(request, timeout=20) as response:
+            raw = response.read(65537)
+        if len(raw) > 65536:
+            raise ValueError("bounded token response required")
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise ValueError("token response must be an object")
+        return payload
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        raise RuntimeError(f"runtime token {stage} HTTP {exc.code}") from None
+    except Exception:
+        raise RuntimeError(f"runtime token {stage} unavailable") from None
+
+
+def _token_value(payload: dict, key: str) -> str:
+    token = payload.get(key)
+    if not isinstance(token, str) or not token or re.search(r"\s", token):
+        raise RuntimeError("runtime token response is invalid")
+    return token
+
+
+def runtime_identity_token(audience: str) -> str:
+    """Use the existing WIF principal, not an already impersonated SA token.
+
+    The pinned auth action's external-account file contains a refreshable GitHub
+    subject-token source and the authorized deployer's impersonation URL. Mint
+    an ID token directly with the STS token, as documented for Cloud Run WIF.
+    No generateAccessToken call, self-impersonation, delegates or token files.
+    Each call refreshes from the existing source; tokens live only in memory.
+    """
+    if (
+        not re.fullmatch(r"https://[a-z0-9][a-z0-9.-]*\.run\.app", audience)
+        or "---" in audience
+    ):
+        raise RuntimeError("runtime token requires the canonical Cloud Run audience")
+    credential_path = os.getenv("CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE") or os.getenv(
+        "GOOGLE_APPLICATION_CREDENTIALS"
+    )
+    if not credential_path:
+        return run("gcloud", "auth", "print-identity-token", f"--audiences={audience}")
+    try:
+        with pathlib.Path(credential_path).open("rb") as source_file:
+            raw = source_file.read(65537)
+        if len(raw) > 65536:
+            raise ValueError("bounded credential configuration required")
+        config = json.loads(raw)
+        if not isinstance(config, dict):
+            raise ValueError("credential configuration must be an object")
+        if config.get("type") != "external_account":
+            return run(
+                "gcloud", "auth", "print-identity-token", f"--audiences={audience}"
+            )
+        target = config.get("service_account_impersonation_url", "")
+        if not re.fullmatch(
+            r"https://iamcredentials\.googleapis\.com/v1/projects/-/serviceAccounts/"
+            r"[A-Za-z0-9._-]+@[a-z0-9.-]+\.iam\.gserviceaccount\.com:generateAccessToken",
+            target,
+        ):
+            raise ValueError("existing deployer impersonation URL required")
+        if (
+            config.get("token_url") != "https://sts.googleapis.com/v1/token"
+            or config.get("subject_token_type")
+            != "urn:ietf:params:oauth:token-type:jwt"
+            or not re.fullmatch(
+                r"//iam\.googleapis\.com/projects/[0-9]+/locations/global/"
+                r"workloadIdentityPools/[A-Za-z0-9_-]+/providers/[A-Za-z0-9_-]+",
+                config.get("audience", ""),
+            )
+        ):
+            raise ValueError("existing Google WIF configuration required")
+        source = config["credential_source"]
+        source_url = urllib.parse.urlsplit(source["url"])
+        source_headers = source["headers"]
+        if (
+            source_url.scheme != "https"
+            or not (source_url.hostname or "").endswith(
+                ".actions.githubusercontent.com"
+            )
+            or source_url.username is not None
+            or source_url.password is not None
+            or source_url.port is not None
+            or source_url.fragment
+            or source.get("format")
+            != {"type": "json", "subject_token_field_name": "value"}
+            or set(source_headers) != {"Authorization"}
+            or not re.fullmatch(r"Bearer [^\s]+", source_headers["Authorization"])
+        ):
+            raise ValueError("pinned GitHub auth credential source required")
+    except Exception:
+        raise RuntimeError("runtime WIF credential configuration is invalid") from None
+
+    subject = _token_value(
+        _token_json(
+            urllib.request.Request(source["url"], headers=source_headers), "source"
+        ),
+        "value",
+    )
+    exchange = urllib.request.Request(
+        config["token_url"],
+        data=urllib.parse.urlencode(
+            {
+                "audience": config["audience"],
+                "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                "scope": "https://www.googleapis.com/auth/cloud-platform",
+                "subject_token_type": config["subject_token_type"],
+                "subject_token": subject,
+            }
+        ).encode(),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    federated_token = _token_value(_token_json(exchange, "STS"), "access_token")
+    mint = urllib.request.Request(
+        target.removesuffix(":generateAccessToken") + ":generateIdToken",
+        data=json.dumps({"audience": audience, "includeEmail": True}).encode(),
+        headers={
+            "Authorization": "Bearer " + federated_token,
+            "Content-Type": "application/json",
+        },
+    )
+    return _token_value(_token_json(mint, "IAM"), "token")
+
+
 def _smoke(url: str) -> None:
     target = url.rstrip("/") + "/" + env("CGM_HEALTH_PATH").lstrip("/")
     headers: dict[str, str] = {}
@@ -889,7 +1022,7 @@ def _smoke(url: str) -> None:
         audience = _service_url(
             env("CGM_SERVICE"), env("CGM_REGION"), env("CGM_PROJECT_ID")
         )
-        token = run("gcloud", "auth", "print-identity-token", f"--audiences={audience}")
+        token = runtime_identity_token(audience)
         headers["Authorization"] = f"Bearer {token}"
     for attempt in range(5):
         try:
@@ -1060,9 +1193,7 @@ def _runtime_ready_once(url: str, *, candidate: bool = False, sha: str = "") -> 
         audience = _service_url(
             env("CGM_SERVICE"), env("CGM_REGION"), env("CGM_PROJECT_ID")
         )
-        headers["Authorization"] = "Bearer " + run(
-            "gcloud", "auth", "print-identity-token", f"--audiences={audience}"
-        )
+        headers["Authorization"] = "Bearer " + runtime_identity_token(audience)
     request = urllib.request.Request(url.rstrip("/") + "/ready", headers=headers)
     try:
         response = urllib.request.urlopen(request, timeout=30)
