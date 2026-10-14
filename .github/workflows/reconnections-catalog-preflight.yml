@@ -1,0 +1,60 @@
+name: Reconnections catalog read-only preflight
+run-name: Inspect authorized reconnections catalog policy
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: reconnections-catalog-maintenance
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    if: ${{ github.repository == 'diegomad14/gcp-engineering-platform-api' && github.ref == 'refs/heads/main' && github.actor_id == '97854332' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require exact OSS quality evidence
+        uses: ./.github/actions/verify-quality
+        with:
+          platform-api-url: ${{ vars.ENG_PLATFORM_API_URL }}
+          service-name: eng-platform-api
+          commit-sha: ${{ github.sha }}
+          wait-seconds: '0'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Install reviewed validation dependencies
+        run: python -m pip install -e .
+      - name: Check existing federation identity
+        env:
+          EXISTING_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          EXISTING_ACCOUNT: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          test "$EXISTING_PROVIDER" = projects/546821492326/locations/global/workloadIdentityPools/cgm-github-pool/providers/cgm-github-oidc
+          test "$EXISTING_ACCOUNT" = cgm-sanplat-deployer@cgm-assistant-prod.iam.gserviceaccount.com
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f
+      - name: Inspect existing access and scope without mutation
+        env:
+          CGM_PREFLIGHT_REPORT: ${{ runner.temp }}/reconnections-catalog-preflight.json
+        run: python scripts/reconnections_catalog_preflight.py
+      - name: Upload only the bounded non-secret audit
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: reconnections-catalog-preflight-${{ github.sha }}
+          path: ${{ runner.temp }}/reconnections-catalog-preflight.json
+          if-no-files-found: ignore
