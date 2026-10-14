@@ -462,6 +462,8 @@ def test_main_invalid_approved_hash_stops_before_inspection(monkeypatch, tmp_pat
         "status": "blocked",
         "mutation_performed": False,
         "error_type": "ValueError",
+        "stage": "configure",
+        "error_code": "unclassified",
     }
 
 
@@ -476,7 +478,9 @@ def test_runtime_metadata_emits_only_reviewed_names_and_digest_images():
         "SECRET": "do not expose",
     }
     report = a.runtime_metadata(values)
-    assert set(report) == set(a.RELEASE_METADATA_KEYS) | set(a.IMAGE_METADATA_KEYS)
+    assert set(report) == set(a.RELEASE_METADATA_KEYS) | set(a.IMAGE_METADATA_KEYS) | {
+        "evidence_bucket_metadata"
+    }
     assert report[a.IMAGE_METADATA_KEYS[0]] == images[a.IMAGE_METADATA_KEYS[0]]
     values[a.IMAGE_METADATA_KEYS[0]] = (
         "https://private-user:private-token@registry.example"
@@ -790,3 +794,104 @@ def test_mislocated_connected_trigger_blocks_push_without_expanding_permissions(
     assert report["private_push_blocked"] is True
     assert reader.call_count == 4
     assert sum(row["status"] == "UNCERTIFIED" for row in report["resources"]) == 3
+
+
+@pytest.mark.parametrize(
+    "message,code",
+    [
+        ("reviewed managed service must remain enabled", "managed_mode_or_enabled"),
+        ("unreviewed private secret", "unclassified"),
+    ],
+)
+def test_policy_failure_preserves_stage_and_only_safe_error_code(
+    monkeypatch, tmp_path, message, code
+):
+    inspect_mocks(monkeypatch)
+    monkeypatch.setattr(a.policy, "prepare", Mock(side_effect=ValueError(message)))
+    report = cli(monkeypatch, tmp_path)
+    with pytest.raises(RuntimeError):
+        a.main()
+    result = json.loads(report.read_text())
+    assert result["stage"] == "catalog_policy"
+    assert result["error_code"] == code
+    assert result["mutation_performed"] is False
+    assert "private secret" not in report.read_text()
+
+
+def test_bucket_metadata_contains_only_presence_and_name_hash():
+    key = "ENG_PLATFORM_DEPLOYMENT_EVIDENCE_BUCKET"
+    result = a.runtime_metadata({key: "private-existing-bucket"})
+    assert result["evidence_bucket_metadata"][key] == {
+        "present": True,
+        "name_sha256": hashlib.sha256(b"private-existing-bucket").hexdigest(),
+    }
+    assert "private-existing-bucket" not in json.dumps(result)
+    assert result["evidence_bucket_metadata"][
+        "ENG_PLATFORM_CLOUD_BUILD_EVIDENCE_BUCKET"
+    ] == {"present": False, "name_sha256": None}
+
+
+@pytest.mark.parametrize(
+    "number,project",
+    [
+        ("546821492326", "cgm-assistant-prod"),
+        ("305411509341", "cgm-reconnections-prod"),
+    ],
+)
+def test_verified_project_numbers_are_same_four_audit_scopes(
+    monkeypatch, number, project
+):
+    reference = f"projects/{number}/locations/us-central1/connections/existing/repositories/known"
+    assert a.connected_resource(reference) == (project, "us-central1")
+    reader = Mock(return_value=SimpleNamespace(returncode=0, stdout=b"[]", stderr=b""))
+    monkeypatch.setattr(a.subprocess, "run", reader)
+    result = INSPECT_TRIGGERS(
+        {a.REPOSITORIES_ENV: json.dumps({"cgm-bot-api": reference})}
+    )
+    assert result["mapping_status"] == "CERTIFIED"
+    assert result["private_push_blocked"] is False
+    assert reader.call_count == 4
+
+
+def test_source_shape_audit_is_known_names_and_booleans_only(monkeypatch):
+    raw = json.dumps(
+        {"services": [{"service_name": "cgm-bot-api", "private": "NEVER_EMIT"}]}
+    ).encode()
+    monkeypatch.setattr(a, "SOURCE_SHA", hashlib.sha256(raw).hexdigest())
+    reader, _, _ = inspect_mocks(monkeypatch)
+    replies = list(reader.side_effect)
+    replies[-1] = raw
+    reader.side_effect = replies
+    audit = {}
+    _, proof, _, _ = a.inspect(audit)
+    assert audit is proof
+    assert audit["source_hash_matches"] is True
+    assert audit["managed_target_shapes"] == [
+        {
+            "service_name": "cgm-bot-api",
+            "management_mode_present": False,
+            "enabled_present": False,
+            "enabled_is_true": True,
+        }
+    ]
+    assert "NEVER_EMIT" not in json.dumps(proof)
+    assert audit["stage"] == "preflight_complete"
+
+
+@pytest.mark.parametrize(
+    "reason", ["PERMISSION_DENIED", "UNAUTHENTICATED", "NOT_FOUND", "SERVICE_DISABLED"]
+)
+def test_trigger_errors_keep_static_reason_without_raw_diagnostics(monkeypatch, reason):
+    reader = Mock(
+        return_value=SimpleNamespace(
+            returncode=1, stdout=b"", stderr=(reason + " private-secret").encode()
+        )
+    )
+    monkeypatch.setattr(a.subprocess, "run", reader)
+    report = INSPECT_TRIGGERS({})
+    assert report["private_push_blocked"]
+    assert all(
+        row["reason"] == reason and row["http_status"] is None
+        for row in report["resources"]
+    )
+    assert "private-secret" not in json.dumps(report)

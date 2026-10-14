@@ -50,6 +50,22 @@ AUDITED_TRIGGER_RESOURCES = (
     ("cgm-reconnections-prod", "global"),
     ("cgm-reconnections-prod", "us-central1"),
 )
+PROJECT_ALIASES = {
+    "546821492326": "cgm-assistant-prod",
+    "305411509341": "cgm-reconnections-prod",
+}
+SAFE_ERRORS = {
+    "existing reviewed identity required": "identity_mismatch",
+    "source differs from reviewed catalog SHA256": "source_hash_mismatch",
+    "reviewed managed service must remain enabled": "managed_mode_or_enabled",
+    "managed repository identity mismatch": "repository_mismatch",
+    "reviewed executor baseline changed": "executor_baseline",
+    "exact reviewed twenty two edits required": "edit_count",
+    "reviewed bounded immutable source generation required": "source_metadata",
+    "reviewed runtime image changed": "runtime_image",
+    "reviewed catalog source changed": "catalog_source",
+    "exact twenty managed services required": "managed_scope",
+}
 REPOSITORY_ALIASES = {
     "diegomad14/cgm-sanplat-api": "diegomad14/cgm-artemis-api",
     "diegomad14/cgm-sanplat-web": "diegomad14/cgm-artemis-web",
@@ -60,7 +76,7 @@ def connected_resource(reference):
     if not isinstance(reference, str) or not re.fullmatch(CONNECTED_PATTERN, reference):
         return None
     parts = reference.split("/")
-    return parts[1], parts[3]
+    return PROJECT_ALIASES.get(parts[1], parts[1]), parts[3]
 
 
 def canonical_repository(repository):
@@ -70,6 +86,18 @@ def canonical_repository(repository):
 
 def runtime_metadata(environment):
     result = {key: environment.get(key) for key in RELEASE_METADATA_KEYS}
+    result["evidence_bucket_metadata"] = {
+        key: {
+            "present": bool(environment.get(key)),
+            "name_sha256": hashlib.sha256(environment[key].encode()).hexdigest()
+            if isinstance(environment.get(key), str) and environment[key]
+            else None,
+        }
+        for key in (
+            "ENG_PLATFORM_DEPLOYMENT_EVIDENCE_BUCKET",
+            "ENG_PLATFORM_CLOUD_BUILD_EVIDENCE_BUCKET",
+        )
+    }
     for key in IMAGE_METADATA_KEYS:
         value = environment.get(key)
         result[key] = (
@@ -216,6 +244,19 @@ def inspect_triggers(environment):
                 entry.update(
                     status="UNCERTIFIED",
                     http_status=int(match[1]) if match else None,
+                    reason=next(
+                        (
+                            code
+                            for code in (
+                                "PERMISSION_DENIED",
+                                "UNAUTHENTICATED",
+                                "NOT_FOUND",
+                                "SERVICE_DISABLED",
+                            )
+                            if code.encode() in read.stderr
+                        ),
+                        "unclassified",
+                    ),
                 )
             else:
                 if len(read.stdout) > 1024 * 1024:
@@ -252,7 +293,9 @@ def configure(candidate_sha):
     rollout.TAG = "catalog-" + candidate_sha[:12]
 
 
-def inspect():
+def inspect(audit=None):
+    audit = {} if audit is None else audit
+    audit["stage"] = "verify_identity"
     active = (
         existing.read_command(
             "gcloud",
@@ -266,6 +309,7 @@ def inspect():
     )
     if active != existing.ACCOUNT:
         raise ValueError("existing reviewed identity required")
+    audit["stage"] = "read_runtime"
     runtime = json.loads(
         existing.read_command(
             "gcloud",
@@ -280,8 +324,10 @@ def inspect():
             "--format=json",
         )
     )
+    audit["stage"] = "source_identity"
     bucket, key = existing.source_identity(runtime)
     uri = "gs://" + bucket + "/" + key
+    audit["stage"] = "source_metadata"
     metadata = json.loads(
         existing.read_command(
             "gcloud",
@@ -296,20 +342,38 @@ def inspect():
         0 < int(metadata.get("size", 0)) <= 32 * 1024 * 1024
     ):
         raise ValueError("reviewed bounded immutable source generation required")
+    audit["stage"] = "source_bytes"
     raw = existing.read_command(
         "gcloud", "storage", "cat", uri + "#" + SOURCE_GENERATION
     )
+    audit["stage"] = "catalog_policy"
+    audit["source_hash_matches"] = hashlib.sha256(raw).hexdigest() == SOURCE_SHA
+    if audit["source_hash_matches"]:
+        rows = policy.byte_json.DECODER.decode(raw.decode())["services"]
+        audit["managed_target_shapes"] = [
+            {
+                "service_name": row["service_name"],
+                "management_mode_present": "management_mode" in row,
+                "enabled_present": "enabled" in row.get("deployment", {}),
+                "enabled_is_true": row.get("deployment", {}).get("enabled", True)
+                is True,
+            }
+            for row in rows
+            if row.get("service_name") in policy.SERVICE_REPOSITORIES
+        ]
     candidate, proof = policy.prepare(raw)
     # Validation only: no runtime environment or source file is changed.
     os.environ["ENG_PLATFORM_MOCK_MODE"] = "true"
     from eng_platform_api.services.log_catalog import validate_catalog
 
+    audit["stage"] = "catalog_schema"
     validate_catalog(json.loads(raw))
     validate_catalog(json.loads(candidate))
     environment = {
         row["name"]: row.get("value")
         for row in runtime["spec"]["template"]["spec"]["containers"][0].get("env", [])
     }
+    audit["stage"] = "inspect_triggers"
     proof.update(
         source_generation=SOURCE_GENERATION,
         existing_account=active,
@@ -323,7 +387,9 @@ def inspect():
         provider_precedence="explicit release.executor is returned before private policy, deployment executor, circuit or cloud_build_only_services",
         mutation_performed=False,
     )
-    return candidate, proof, bucket, key
+    audit.update(proof)
+    audit["stage"] = "preflight_complete"
+    return candidate, audit, bucket, key
 
 
 def publish(candidate, proof, bucket, key):
@@ -382,8 +448,9 @@ def main():
     path = Path(os.environ["CGM_ACTIVATION_REPORT"])
     audit = {"status": "blocked", "mutation_performed": False}
     try:
+        audit["stage"] = "configure"
         configure(args.candidate_sha256 if args.mode == "activate" else "0" * 64)
-        candidate, audit, bucket, key = inspect()
+        candidate, audit, bucket, key = inspect(audit)
         if args.mode == "activate":
             if audit["candidate_sha256"] != args.candidate_sha256:
                 raise ValueError("candidate differs from inspected approved SHA256")
@@ -393,6 +460,7 @@ def main():
     except Exception as error:
         audit["status"] = "blocked"
         audit["error_type"] = type(error).__name__
+        audit["error_code"] = SAFE_ERRORS.get(str(error), "unclassified")
         if isinstance(error, (existing.ExistingReadError, rollout.CloudError)):
             audit["http_status"] = error.status
         raise RuntimeError(
