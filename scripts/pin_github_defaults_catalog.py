@@ -100,8 +100,8 @@ def prepare(raw):
         if row.get("repository") != SERVICE_REPOSITORIES[name]:
             raise ValueError("managed repository identity mismatch")
         if (
-            row.get("management_mode") != "managed"
-            or deployment.get("enabled") is not True
+            row.get("management_mode", "managed") != "managed"
+            or deployment.get("enabled", True) is not True
         ):
             raise ValueError("reviewed managed service must remain enabled")
         release = (

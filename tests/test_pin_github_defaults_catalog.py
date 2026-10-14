@@ -133,7 +133,6 @@ def target(document):
         lambda d: target(d).update(repository="owner/unreviewed"),
         lambda d: target(d).update(management_mode="observability_only"),
         lambda d: target(d)["deployment"].update(enabled=False),
-        lambda d: target(d)["deployment"].pop("enabled"),
         lambda d: target(d)["deployment"].update(enabled=1),
         lambda d: target(d)["deployment"].update(executor="cloud_build"),
         lambda d: target(d).update(release={"executor": "cloud_build"}),
@@ -276,3 +275,32 @@ def test_current_release_admission_ignores_runtime_cloud_build_fallback_and_keep
     assert caught.value.status_code == 409
     github.assert_called_once()
     forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "omit_mode,omit_enabled", [(True, False), (False, True), (True, True)]
+)
+def test_valid_legacy_omissions_remain_omitted(monkeypatch, omit_mode, omit_enabled):
+    value = document()
+    for row in value["services"]:
+        if row["service_name"] in policy.SERVICE_REPOSITORIES:
+            if omit_mode:
+                row.pop("management_mode")
+            if omit_enabled:
+                row["deployment"].pop("enabled")
+    raw = reviewed(monkeypatch, encoded(value))
+    candidate, report = policy.prepare(raw)
+    assert report["edit_counts"] == {"release": 7, "deployment": 15}
+    for row in json.loads(candidate)["services"]:
+        if row["service_name"] in policy.SERVICE_REPOSITORIES:
+            assert ("management_mode" not in row) == omit_mode
+            assert ("enabled" not in row["deployment"]) == omit_enabled
+    assert report["bytes_outside_target_entries_identical"]
+
+
+@pytest.mark.parametrize("enabled", [False, None, 0, 1, "true", "false"])
+def test_legacy_defaults_never_coerce_disabled_or_invalid_values(monkeypatch, enabled):
+    value = document()
+    target(value)["deployment"]["enabled"] = enabled
+    with pytest.raises(ValueError, match="remain enabled"):
+        policy.prepare(reviewed(monkeypatch, encoded(value)))
