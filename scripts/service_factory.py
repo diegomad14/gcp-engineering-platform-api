@@ -66,6 +66,7 @@ def generate(args: argparse.Namespace) -> dict[str, str]:
         files[".github/workflows/platform-rollback.yml"] = (
             plan.platform_rollback_workflow
         )
+    files.update(plan.supporting_files)
     return files
 
 

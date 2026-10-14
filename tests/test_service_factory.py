@@ -136,7 +136,7 @@ def test_job_plan_has_no_service_deployment_or_http_contract():
     assert ".github/workflows/platform-deploy.yml" not in plan["generated_files"]
     assert "gcp-job-release.yaml" in plan["generated_files"]
     assert "cloud-run-job-labels.yaml" in plan["generated_files"]
-    assert len(plan["generated_files"]) == 9
+    assert len(plan["generated_files"]) == 11
 
 
 def test_default_service_catalog_is_valid_and_image_override_is_not_identity():
@@ -164,7 +164,7 @@ def test_default_service_catalog_is_valid_and_image_override_is_not_identity():
     assert any(
         "scripts/catalog_registry.py --write" in step for step in plan["checklist"]
     )
-    assert any("actual shared source" in step for step in plan["checklist"])
+    assert any("configured runtime catalog" in step for step in plan["checklist"])
 
 
 def test_factory_cannot_accept_log_permissions_or_unknown_runtime_kind():
@@ -206,3 +206,75 @@ def test_published_request_schema_matches_factory_input_fields():
     assert set(schema["properties"]) == set(ServiceFactoryRequest.model_fields)
     assert schema["properties"]["runtime_kind"]["default"] == "cloud_run_service"
     assert schema["properties"]["cloud_run_service_name"]["deprecated"] is True
+
+
+def test_generated_service_has_complete_authorized_orchestration():
+    """A fresh repository must not rely on a pre-existing local action."""
+    import re
+    import yaml
+
+    response = client.post("/api/service-factory/plan", json=_payload())
+    assert response.status_code == 200
+    plan = response.json()
+    supporting = plan["supporting_files"]
+    assert set(supporting) <= set(plan["generated_files"])
+    action_path = ".github/actions/verify-release-authorization"
+    for field in ("platform_deploy_workflow", "platform_rollback_workflow"):
+        workflow = yaml.safe_load(plan[field])
+        for job in workflow["jobs"].values():
+            for step in job.get("steps", []):
+                local = step.get("uses", "")
+                if local.startswith("./"):
+                    assert f"{local[2:]}/action.yml" in supporting
+    assert (
+        'node "$GITHUB_ACTION_PATH/verify-release-authorization.mjs"'
+        in supporting[f"{action_path}/action.yml"]
+    )
+    assert supporting[f"{action_path}/verify-release-authorization.mjs"]
+    for name in ("eng-platform-quality.yml", "eng-platform-release.yml"):
+        workflow = supporting[f".github/workflows/{name}"]
+        assert "eng-platform-api" not in workflow
+        assert "__SERVICE_NAME__" not in workflow
+        assert "ENG_PLATFORM_RELEASE_SERVICE: test-api" in workflow
+        assert "ENG_PLATFORM_RELEASE_ORCHESTRATOR_ENABLED == 'true'" in workflow
+        assert not re.search(r"gcloud\s+builds\s+submit", workflow)
+    release = supporting[".github/workflows/eng-platform-release.yml"]
+    assert "workflow_dispatch:" in release
+    assert "execution_id:" in release
+    assert '"$REQUESTED_EXECUTION_ID"' in release
+    for legacy in ("caller_pr_check", "semantic_release_workflow"):
+        assert "ENG_PLATFORM_RELEASE_ORCHESTRATOR_ENABLED != 'true'" in plan[legacy]
+    entry = yaml.safe_load(plan["catalog_entry"])
+    assert entry["release"]["executor"] == "github_actions"
+    assert entry["deployment"]["executor"] == "github_actions"
+
+
+def test_factory_supporting_templates_match_reviewed_repository_sources():
+    """The deployable templates retain the existing authorization and isolation."""
+    from pathlib import Path
+    from eng_platform_api.models import ServiceFactoryRequest
+    from eng_platform_api.services.service_factory import generate_plan
+
+    root = Path(__file__).resolve().parents[1]
+    plan = generate_plan(
+        ServiceFactoryRequest(**_payload(service_name="eng-platform-api"))
+    )
+    for name, content in plan.supporting_files.items():
+        assert content == (root / name).read_text()
+
+
+def test_job_supporting_files_do_not_install_service_authorization_or_enable_deploy():
+    import yaml
+
+    response = client.post(
+        "/api/service-factory/plan", json=_payload(runtime_kind="cloud_run_job")
+    )
+    plan = response.json()
+    assert set(plan["supporting_files"]) == {
+        ".github/workflows/eng-platform-quality.yml",
+        ".github/workflows/eng-platform-release.yml",
+    }
+    entry = yaml.safe_load(plan["catalog_entry"])
+    assert entry["deployment"]["enabled"] is False
+    assert entry["deployment"]["executor"] == "cloud_build"
+    assert "release" not in entry

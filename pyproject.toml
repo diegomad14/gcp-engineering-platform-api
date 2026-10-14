@@ -54,4 +54,4 @@ eng_platform_api = ["*.json", "static_examples/*.json"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 # Keep the catalog CLI instrumented by the existing immutable CI profiles.
-addopts = "--cov=scripts.catalog_registry --cov=scripts.pin_reconnections_catalog --cov=scripts.reconnections_catalog_preflight --cov=scripts.reconnections_catalog_activate --cov=scripts.pin_artemis_release_catalog --cov=scripts.artemis_release_catalog"
+addopts = "--cov=scripts.catalog_registry --cov=scripts.pin_reconnections_catalog --cov=scripts.reconnections_catalog_preflight --cov=scripts.reconnections_catalog_activate --cov=scripts.pin_artemis_release_catalog --cov=scripts.artemis_release_catalog --cov=scripts.pin_github_defaults_catalog --cov=scripts.github_defaults_catalog --cov=scripts.service_factory"

@@ -38,9 +38,9 @@ def test_config_loads_explicit_private_policy(mode):
         environment["ENG_PLATFORM_PRIVATE_EXECUTOR_MODE"] = mode
     with mock.patch.dict(os.environ, environment, clear=True):
         assert load_config().release_orchestrator.private_executor_mode == (
-            mode or "cloud_build"
+            mode or "github_actions"
         )
-    assert ReleaseOrchestratorConfig().private_executor_mode == "cloud_build"
+    assert ReleaseOrchestratorConfig().private_executor_mode == "github_actions"
 
 
 @pytest.mark.parametrize("mode", ["", "github", "unknown"])
@@ -58,7 +58,7 @@ def test_config_rejects_invalid_private_policy(mode):
 
 
 @pytest.mark.parametrize(
-    "private,expected", [(True, "cloud_build"), (False, "github_actions")]
+    "private,expected", [(True, "github_actions"), (False, "github_actions")]
 )
 def test_release_selection_never_reads_or_changes_billing(
     monkeypatch, private, expected
@@ -81,15 +81,15 @@ def test_release_selection_never_reads_or_changes_billing(
     hint.assert_not_called()
 
 
-def test_unknown_release_visibility_is_fail_closed(monkeypatch):
+def test_default_release_does_not_require_visibility_lookup(monkeypatch):
     monkeypatch.setattr(
         orchestrator.github_release_control,
         "repository_is_private",
         mock.Mock(side_effect=RuntimeError("visibility unavailable")),
     )
     with mock.patch.object(orchestrator.executor_circuits, "get") as circuit:
-        with pytest.raises(orchestrator.ReleaseOrchestratorError, match="visibility"):
-            orchestrator._provider(_service())
+        assert orchestrator._provider(_service()) == "github_actions"
+    orchestrator.github_release_control.repository_is_private.assert_not_called()
     circuit.assert_not_called()
 
 
@@ -264,10 +264,15 @@ def test_explicit_dispatch_uses_policy_reason(monkeypatch, kind):
     ):
         if kind == "deploy":
             result = commands._dispatch_deploy(
-                service, ReleaseTag(name=item.tag, sha=item.sha), "operator"
+                service,
+                ReleaseTag(name=item.tag, sha=item.sha),
+                "operator",
+                "cloud_build",
             )
         else:
-            result = commands._dispatch_rollback(service, item, "operator")
+            result = commands._dispatch_rollback(
+                service, item, "operator", "cloud_build"
+            )
     assert result is item
     submit.assert_called_once_with(service, item, reason="selected_provider")
     opened.assert_not_called()

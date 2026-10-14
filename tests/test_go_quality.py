@@ -132,9 +132,9 @@ def test_go_optional_pin_preserves_existing_controller_startup():
 
 
 @pytest.mark.parametrize(
-    "opened,expected", [(False, "github_actions"), (True, "cloud_build")]
+    "opened,expected", [(False, "github_actions"), (True, "github_actions")]
 )
-def test_github_first_exception_preserves_billing_fallback(
+def test_global_policy_and_billing_circuit_cannot_switch_default(
     monkeypatch, opened, expected
 ):
     service = CatalogService(
@@ -163,7 +163,7 @@ def test_github_first_exception_preserves_billing_fallback(
     )
     assert orchestrator._provider(service) == expected
     service.service_name = "existing-private"
-    assert orchestrator._provider(service) == "cloud_build"
+    assert orchestrator._provider(service) == "github_actions"
 
 
 def test_github_first_deployment_keeps_explicit_restrictions(monkeypatch):
@@ -196,7 +196,7 @@ def test_github_first_deployment_keeps_explicit_restrictions(monkeypatch):
     monkeypatch.setattr(
         orchestrator.github_release_control, "repository_is_private", lambda _: True
     )
-    assert orchestrator._provider(service) == "cloud_build"
+    assert orchestrator._provider(service) == "github_actions"
 
 
 def test_go_image_and_api_use_identical_additive_profile_hash():

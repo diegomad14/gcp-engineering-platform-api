@@ -1,7 +1,6 @@
-"""Shared throttling of economic GitHub hints never caches circuit safety."""
+"""Circuit evidence never rewrites repository hints or selects another provider."""
 
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
 from types import SimpleNamespace
 from unittest import mock
 
@@ -11,51 +10,32 @@ from eng_platform_api.models import CatalogService
 from eng_platform_api.services import executor_circuits as circuits
 from eng_platform_api.services import release_orchestrator as orchestrator
 
-
 REPOSITORY = "owner/private"
 
 
 @pytest.fixture
-def propagation(monkeypatch):
-    # Retained auto-mode behavior is tested under an explicitly approved future activation.
+def routing(monkeypatch):
     monkeypatch.setattr(orchestrator.config.cloud_build, "enabled", True)
     monkeypatch.setattr(orchestrator.config.cloud_build, "new_builds_enabled", True)
-    now = [1000.0]
-    monkeypatch.setattr(circuits.time, "time", lambda: now[0])
     monkeypatch.setattr(orchestrator.config.github, "billing_owner", "")
-    monkeypatch.setattr(orchestrator.config.cloud_build, "repositories", {})
     service = CatalogService(
         service_name="example-service",
-        management_mode="managed",
         repository=REPOSITORY,
         owner="platform",
         project_id="test-project",
         region="us-central1",
+        release={"executor": None},
     )
-    services = mock.Mock(
-        return_value=SimpleNamespace(
-            services=[service, SimpleNamespace(repository="owner/other")]
-        )
-    )
-    private = mock.Mock(return_value=True)
-    set_mode = mock.Mock()
-    monkeypatch.setattr(orchestrator.catalog, "get_services", services)
+    catalog, private, hints = mock.Mock(), mock.Mock(), mock.Mock()
+    monkeypatch.setattr(orchestrator.catalog, "get_services", catalog)
     monkeypatch.setattr(
         orchestrator.github_release_control, "repository_is_private", private
     )
     monkeypatch.setattr(
-        orchestrator.github_release_control, "set_repository_execution_mode", set_mode
+        orchestrator.github_release_control, "set_repository_execution_mode", hints
     )
     return SimpleNamespace(
-        now=now, service=service, catalog=services, private=private, set_mode=set_mode
-    )
-
-
-@pytest.fixture(autouse=True)
-def automatic_executor_policy(monkeypatch):
-    """These regression cases exercise the retained billing-only auto mode."""
-    monkeypatch.setattr(
-        orchestrator.config.release_orchestrator, "private_executor_mode", "auto"
+        service=service, catalog=catalog, private=private, hints=hints
     )
 
 
@@ -68,68 +48,56 @@ def _open():
     )
 
 
-def test_repeated_open_and_provider_calls_skip_catalog_fanout(propagation):
+@pytest.mark.parametrize("mode", ["auto", "cloud_build", "github_actions"])
+@pytest.mark.parametrize("default", [None, "github_actions", "cloud_build"])
+def test_service_default_is_independent_of_account_circuit(
+    monkeypatch, routing, mode, default
+):
+    monkeypatch.setattr(
+        orchestrator.config.release_orchestrator, "private_executor_mode", mode
+    )
+    routing.service.release.executor = default
     _open()
     for _ in range(8):
-        _open()
-        assert orchestrator._provider(propagation.service) == "cloud_build"
-    assert propagation.catalog.call_count == 1
-    assert propagation.set_mode.call_count == 2
+        assert orchestrator._provider(routing.service) == (default or "github_actions")
     assert circuits.get("owner")["run_id"] == "42"
-    # Success is refreshed eventually, so added repos and later changes recover.
-    propagation.now[0] = 1600.0
-    assert orchestrator._provider(propagation.service) == "cloud_build"
-    assert propagation.catalog.call_count == 2
-    assert propagation.set_mode.call_count == 4
+    routing.catalog.assert_not_called()
+    routing.private.assert_not_called()
+    routing.hints.assert_not_called()
 
 
-def test_partial_failure_is_retried_without_blocking_provider(propagation):
-    def fail_one(repository, mode):
-        if repository == "owner/other":
-            raise RuntimeError("temporary GitHub failure")
-
-    propagation.set_mode.side_effect = fail_one
+def test_concurrent_default_selection_does_not_wait_for_or_rewrite_hints(routing):
     _open()
-    assert propagation.set_mode.call_count == 2
-    assert circuits.is_open("owner")
-    propagation.set_mode.side_effect = None
-    propagation.now[0] = 1059.0
-    assert orchestrator._provider(propagation.service) == "cloud_build"
-    assert propagation.set_mode.call_count == 2
-    propagation.now[0] = 1060.0
-    assert orchestrator._provider(propagation.service) == "cloud_build"
-    assert propagation.set_mode.call_count == 4
-    propagation.set_mode.assert_any_call("owner/other", "cloud_build")
-
-
-def test_concurrent_provider_calls_do_not_wait_for_or_duplicate_sweep(propagation):
-    circuits.open_circuit("owner", reason="github_actions_billing_rejection")
-    entered = Event()
-    release = Event()
-
-    def set_mode(repository, mode):
-        entered.set()
-        assert release.wait(timeout=5)
-
-    propagation.set_mode.side_effect = set_mode
+    routing.hints.side_effect = AssertionError("No routing mutation")
     with ThreadPoolExecutor(max_workers=5) as pool:
-        first = pool.submit(orchestrator._provider, propagation.service)
-        try:
-            assert entered.wait(timeout=5)
-            others = [
-                pool.submit(orchestrator._provider, propagation.service)
-                for _ in range(4)
-            ]
-            assert [task.result(timeout=3) for task in others] == ["cloud_build"] * 4
-            assert propagation.catalog.call_count == 1
-        finally:
-            release.set()
-        assert first.result(timeout=3) == "cloud_build"
-    assert propagation.set_mode.call_count == 2
+        values = list(
+            pool.map(lambda _: orchestrator._provider(routing.service), range(40))
+        )
+    assert values == ["github_actions"] * 40
+    routing.catalog.assert_not_called()
+    routing.hints.assert_not_called()
 
 
-def test_stale_open_snapshot_cannot_reopen_closed_circuit(propagation):
-    stale, _ = circuits.open_circuit("owner", reason="github_actions_billing_rejection")
+def test_open_circuit_persistence_failure_does_not_write_hints(monkeypatch, routing):
+    monkeypatch.setattr(
+        circuits, "open_circuit", mock.Mock(side_effect=RuntimeError("storage error"))
+    )
+    with pytest.raises(RuntimeError, match="storage error"):
+        _open()
+    routing.catalog.assert_not_called()
+    routing.hints.assert_not_called()
+
+
+def test_default_selection_does_not_depend_on_circuit_store(monkeypatch, routing):
+    read = mock.Mock(side_effect=RuntimeError("storage error"))
+    monkeypatch.setattr(circuits, "get", read)
+    assert orchestrator._provider(routing.service) == "github_actions"
+    read.assert_not_called()
+    routing.hints.assert_not_called()
+
+
+def test_closed_circuit_cannot_be_reopened_by_default_selection(routing):
+    _open()
     circuits.request_probe(
         "owner", repository=REPOSITORY, workflow="health.yml", requested_by="admin"
     )
@@ -142,56 +110,9 @@ def test_stale_open_snapshot_cannot_reopen_closed_circuit(propagation):
         jobs_started=1,
     )
     closed = circuits.close_after_successful_probe("owner", run_id="43")
-    orchestrator._propagate_open_circuit("owner", stale)
+    assert orchestrator._provider(routing.service) == "github_actions"
     assert circuits.get("owner") == closed
-    propagation.catalog.assert_not_called()
-    propagation.set_mode.assert_not_called()
-
-
-def test_open_circuit_persistence_failure_does_not_write_hints(
-    monkeypatch, propagation
-):
-    monkeypatch.setattr(
-        circuits, "open_circuit", mock.Mock(side_effect=RuntimeError("storage error"))
-    )
-    with pytest.raises(RuntimeError, match="storage error"):
-        _open()
-    propagation.catalog.assert_not_called()
-    propagation.set_mode.assert_not_called()
-
-
-def test_circuit_read_failure_does_not_select_github(monkeypatch, propagation):
-    monkeypatch.setattr(
-        circuits, "get", mock.Mock(side_effect=RuntimeError("storage error"))
-    )
-    with pytest.raises(RuntimeError, match="storage error"):
-        orchestrator._provider(propagation.service)
-    propagation.set_mode.assert_not_called()
-
-
-@pytest.mark.parametrize("failure", ["catalog", "claim", "finish"])
-def test_hint_infrastructure_failures_preserve_open_provider_and_retry(
-    monkeypatch, propagation, failure
-):
-    circuits.open_circuit("owner", reason="github_actions_billing_rejection")
-    with monkeypatch.context() as patch:
-        if failure == "catalog":
-            patch.setattr(
-                orchestrator.catalog,
-                "get_services",
-                mock.Mock(side_effect=RuntimeError("catalog error")),
-            )
-        else:
-            patch.setattr(
-                circuits,
-                f"{failure}_mode_propagation",
-                mock.Mock(side_effect=RuntimeError("lease error")),
-            )
-        assert orchestrator._provider(propagation.service) == "cloud_build"
-    assert circuits.is_open("owner")
-    propagation.now[0] += 300
-    assert orchestrator._provider(propagation.service) == "cloud_build"
-    propagation.set_mode.assert_any_call(REPOSITORY, "cloud_build")
+    routing.hints.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -210,48 +131,21 @@ def test_hint_infrastructure_failures_preserve_open_provider_and_retry(
         {"retry_after": 10**12},
     ],
 )
-def test_malformed_propagation_metadata_is_repaired_without_changing_provider(
-    propagation, metadata
+def test_legacy_propagation_metadata_cannot_change_routing_or_be_rewritten(
+    routing, metadata
 ):
-    circuits.open_circuit("owner", reason="github_actions_billing_rejection")
+    _open()
     circuits._memory[circuits._id("owner")]["mode_propagation"] = metadata
-    assert orchestrator._provider(propagation.service) == "cloud_build"
-    assert propagation.catalog.call_count == 1
-    assert propagation.set_mode.call_count == 2
-    assert circuits.get("owner")["state"] == "open"
-    assert circuits.get("owner")["mode_propagation"]["retry_after"] == 1600.0
+    before = repr(circuits.get("owner"))
+    assert orchestrator._provider(routing.service) == "github_actions"
+    assert repr(circuits.get("owner")) == before
+    routing.catalog.assert_not_called()
+    routing.hints.assert_not_called()
 
 
-def test_paused_circuit_cannot_propagate_cloud_build_hints(propagation, monkeypatch):
+def test_paused_build_policy_does_not_change_github_default(monkeypatch, routing):
     monkeypatch.setattr(orchestrator.config.cloud_build, "new_builds_enabled", False)
     _open()
     assert circuits.is_open("owner")
-    assert orchestrator._provider(propagation.service) == "cloud_build"
-    propagation.catalog.assert_not_called()
-    propagation.set_mode.assert_not_called()
-
-
-def test_explicit_repository_github_default_ignores_billing_circuit(propagation):
-    _open()
-    propagation.service.release.executor = "github_actions"
-    propagation.catalog.reset_mock()
-    propagation.private.reset_mock()
-    propagation.set_mode.reset_mock()
-    assert orchestrator._provider(propagation.service) == "github_actions"
-    propagation.catalog.assert_not_called()
-    propagation.private.assert_not_called()
-    propagation.set_mode.assert_not_called()
-
-
-def test_global_github_policy_never_propagates_cloud_build_hints(
-    propagation, monkeypatch
-):
-    monkeypatch.setattr(
-        orchestrator.config.release_orchestrator,
-        "private_executor_mode",
-        "github_actions",
-    )
-    _open()
-    assert orchestrator._provider(propagation.service) == "github_actions"
-    propagation.catalog.assert_not_called()
-    propagation.set_mode.assert_not_called()
+    assert orchestrator._provider(routing.service) == "github_actions"
+    routing.hints.assert_not_called()

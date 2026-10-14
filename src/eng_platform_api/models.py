@@ -36,8 +36,8 @@ ExecutionProvider = Literal["github_actions", "cloud_build"]
 
 class ServiceReleaseConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    # None preserves the existing account policy for unmigrated catalogs.
-    executor: ExecutionProvider | None = None
+    # Explicit null remains compatible and resolves to GitHub Actions.
+    executor: ExecutionProvider | None = "github_actions"
 
 
 class ProviderSelection(BaseModel):
@@ -49,7 +49,7 @@ class ProviderSelection(BaseModel):
 
 
 class ServiceDeploymentConfig(BaseModel):
-    executor: Literal["auto", "github_actions", "cloud_build"] = "auto"
+    executor: Literal["auto", "github_actions", "cloud_build"] = "github_actions"
     enabled: bool = True
     workflow_file: str = "platform-deploy.yml"
     image_name: str = ""
@@ -145,6 +145,20 @@ class CatalogService(BaseModel):
     infrastructure_resources: list[InfrastructureResource] = Field(
         default_factory=list, max_length=256
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def observation_release_default(cls, value):
+        # Managed defaults cannot grant release configuration to inventory.
+        # Preserve explicit executors so the management barrier rejects them.
+        if (
+            isinstance(value, dict)
+            and value.get("management_mode") == "observability_only"
+        ):
+            release = value.get("release", {})
+            if isinstance(release, dict) and "executor" not in release:
+                return {**value, "release": {**release, "executor": None}}
+        return value
 
     @model_serializer(mode="wrap")
     def serialize_optional_infrastructure(self, handler: SerializerFunctionWrapHandler):
@@ -769,6 +783,7 @@ class ServiceFactoryTemplate(BaseModel):
 
 
 class ServiceFactoryPlan(BaseModel):
+    supporting_files: dict[str, str] = Field(default_factory=dict)
     repository: str
     service_name: str
     generated_files: list[str] = Field(default_factory=list)

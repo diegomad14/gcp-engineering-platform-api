@@ -1,8 +1,8 @@
 """Shared, provider-neutral deployment commands.
 
 Both REST and MCP call this module.  Keeping the command boundary here is
-important: callers can authenticate differently, but cannot select an
-executor, change a release profile, or bypass release evidence.
+important: callers can authenticate differently and explicitly select an
+available provider, but cannot change a release profile or bypass evidence.
 """
 
 from __future__ import annotations
@@ -65,27 +65,6 @@ def _open_billing_circuit(service, *, reason: str, evidence: str = "") -> None:
         repository=service.repository,
         evidence=evidence,
     )
-    if not config.cloud_build.new_builds_enabled:
-        return
-    if config.release_orchestrator.private_executor_mode in {
-        "cloud_build",
-        "github_actions",
-    }:
-        # A late real rejection must not suppress another reserved GitHub job.
-        return
-    for repository in {
-        item.repository for item in catalog.get_services().services if item.repository
-    }:
-        try:
-            if not github_release_control.repository_is_private(repository):
-                continue
-            github_release_control.set_repository_execution_mode(
-                repository, "cloud_build"
-            )
-        except Exception:
-            # The durable circuit is authoritative. A webhook/scheduled
-            # reconciliation can retry the economic repository variable later.
-            pass
 
 
 def _service_or_404(service_name: str, provider: ExecutionProvider | None = None):
@@ -247,15 +226,9 @@ def _selection(service, requested: ExecutionProvider | None):
     current = provider_selection.current()
     if current is not None:
         return current
-    legacy: ExecutionProvider = "github_actions"
-    if requested is None and service.deployment.executor == "auto":
-        if github_actions_quota.should_use_cloud_build(
-            service.service_name, service.repository
-        ):
-            legacy = "cloud_build"
-    return provider_selection.select(
-        service, requested, operation="deploy", legacy_provider=legacy
-    )
+    # Historical auto catalogs inherit GitHub, independent of account quota or
+    # runtime policy. Only a service default or request can select Cloud Build.
+    return provider_selection.select(service, requested, operation="deploy")
 
 
 def _dispatch_deploy(

@@ -63,9 +63,9 @@ def test_cli_generates_oss_onboarding(tmp_path, runtime, offline_cli_env):
         cwd=Path(__file__).resolve().parents[1],
         env=offline_cli_env,
     )
-    assert "Generated 11 files" in result.stdout
+    assert "Generated 15 files" in result.stdout
     files = [path for path in tmp_path.rglob("*") if path.is_file()]
-    assert len(files) == 11
+    assert len(files) == 15
     assert all("sonar" not in path.name.lower() for path in files)
     assert all("SONAR_TOKEN" not in path.read_text() for path in files)
     contract = yaml.safe_load((tmp_path / "gcp-service-release.yaml").read_text())
@@ -119,7 +119,7 @@ def test_cli_job_proposal_has_no_service_deploy_workflow(tmp_path, offline_cli_e
         cwd=Path(__file__).resolve().parents[1],
         env=offline_cli_env,
     )
-    assert "Generated 9 files" in result.stdout
+    assert "Generated 11 files" in result.stdout
     assert "No GCP resources were created" in result.stdout
     assert (tmp_path / "gcp-job-release.yaml").exists()
     assert (tmp_path / "cloud-run-job-labels.yaml").exists()
@@ -139,7 +139,7 @@ def test_cli_job_proposal_has_no_service_deploy_workflow(tmp_path, offline_cli_e
 
 
 @pytest.mark.parametrize(
-    "kind,expected_count", [("cloud_run_service", 11), ("cloud_run_job", 9)]
+    "kind,expected_count", [("cloud_run_service", 15), ("cloud_run_job", 11)]
 )
 def test_cli_main_defaults_to_local_proposal_directory(
     tmp_path, monkeypatch, capsys, kind, expected_count
@@ -181,3 +181,56 @@ def test_cli_main_defaults_to_local_proposal_directory(
     entry = yaml.safe_load((output / "catalog/services/new-runtime.yaml").read_text())
     assert entry["repository"] == "platform/example"
     assert entry["logs"] == {"enabled": False, "allowed_logins": []}
+
+
+def test_cli_delivers_every_api_supporting_file(tmp_path, monkeypatch, capsys):
+    """CLI output and the API proposal must have the same dependency closure."""
+    from scripts import service_factory
+    from eng_platform_api.models import ServiceFactoryRequest
+    from eng_platform_api.services.service_factory import generate_plan
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "service_factory.py",
+            "--app-name",
+            "example",
+            "--service-name",
+            "fresh-api",
+            "--service-type",
+            "api",
+            "--runtime",
+            "python",
+            "--gcp-project",
+            "test-project",
+            "--owner",
+            "platform",
+            "--cost-center",
+            "ops",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+    service_factory.main()
+    plan = generate_plan(
+        ServiceFactoryRequest(
+            repository="platform/example",
+            service_name="fresh-api",
+            service_type="api",
+            runtime="python",
+            gcp_project="test-project",
+            owner="platform",
+            cost_center="ops",
+        )
+    )
+    actual = {
+        str(path.relative_to(tmp_path)): path.read_text()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    # Path normalizes the historical './.quality-sources.json' spelling.
+    assert set(actual) == {str(Path(path)) for path in plan.generated_files}
+    for path, content in plan.supporting_files.items():
+        assert actual[path] == content
+    assert "Generated 15 files" in capsys.readouterr().out

@@ -169,9 +169,9 @@ def test_artemis_explicit_github_uses_github_readiness_without_changing_defaults
     assert original is not None
     before = original.model_dump()
     assert original.deployment.executor == (
-        "auto" if service_name == "cgm-artemis-web" else "cloud_build"
+        "github_actions" if service_name == "cgm-artemis-web" else "cloud_build"
     )
-    assert original.release.executor is None
+    assert original.release.executor == "github_actions"
     assert original.deployment_provider_readiness["github_actions"].ready
     assert not original.deployment_provider_readiness["cloud_build"].ready
 
@@ -185,7 +185,7 @@ def test_artemis_explicit_github_uses_github_readiness_without_changing_defaults
     assert selected.effective == "github_actions"
     assert selected.requested == "github_actions"
     assert selected.service_default == (
-        None if service_name == "cgm-artemis-web" else "cloud_build"
+        "github_actions" if service_name == "cgm-artemis-web" else "cloud_build"
     )
     assert selected.source == "request" and selected.locked
     # A deployment default never becomes a release default implicitly.
@@ -193,7 +193,8 @@ def test_artemis_explicit_github_uses_github_readiness_without_changing_defaults
         original, None, operation="release", legacy_provider="github_actions"
     )
     assert release.effective == "github_actions"
-    assert release.service_default is None and release.source == "legacy_policy"
+    assert release.service_default == "github_actions"
+    assert release.source == "service_default"
 
     with mock.patch.object(
         catalog, "deployment_blockers", wraps=catalog.deployment_blockers

@@ -134,6 +134,7 @@ def _build_caller_workflow(
 
         jobs:
           quality:
+            if: ${{{{ vars.ENG_PLATFORM_RELEASE_ORCHESTRATOR_ENABLED != 'true' }}}}
             uses: diegomad14/gcp-engineering-platform-api/.github/workflows/reusable-quality-gate.yml@bac46b1a70c0305470ed1d4c11a18bf07c09ab76
             with:
               service-name: {service_name}
@@ -230,7 +231,7 @@ def _build_catalog_entry(req: ServiceFactoryRequest) -> str:
     deployment: dict[str, object] = {
         "enabled": not is_job,
         "runtime_kind": req.runtime_kind,
-        "executor": "cloud_build" if is_job else "auto",
+        "executor": "cloud_build" if is_job else "github_actions",
         "image_name": req.cloud_run_service_name or req.service_name,
         "artifact_repository": "cgm-sanplat-repo",
         "build_context": req.quality_working_directory,
@@ -265,6 +266,8 @@ def _build_catalog_entry(req: ServiceFactoryRequest) -> str:
         "logs": {"enabled": False, "allowed_logins": []},
         "finops": _labels(req),
     }
+    if not is_job:
+        entry["release"] = {"executor": "github_actions"}
     return yaml.safe_dump(entry, sort_keys=False)
 
 
@@ -295,6 +298,7 @@ def _build_semantic_release_workflow(service_name: str = "") -> str:
 
     jobs:
       release:
+        if: ${{ vars.ENG_PLATFORM_RELEASE_ORCHESTRATOR_ENABLED != 'true' }}
         runs-on: ubuntu-latest
         steps:
           - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -328,6 +332,23 @@ def _build_semantic_release_workflow(service_name: str = "") -> str:
         "      - name: Create semantic version",
         gate + "      - name: Create semantic version",
     )
+
+
+def _build_supporting_files(req: ServiceFactoryRequest) -> dict[str, str]:
+    """Deliver the complete orchestration and local authorization dependencies."""
+    files = {
+        f".github/workflows/{name}": (_SERVICE_FACTORY_TEMPLATE_DIR / f"{name}.tpl")
+        .read_text()
+        .replace("__SERVICE_NAME__", req.service_name)
+        for name in ("eng-platform-quality.yml", "eng-platform-release.yml")
+    }
+    if req.runtime_kind != "cloud_run_job":
+        for name in ("action.yml", "verify-release-authorization.mjs"):
+            files[f".github/actions/verify-release-authorization/{name}"] = (
+                _SERVICE_FACTORY_TEMPLATE_DIR
+                / f"verify-release-authorization-{name}.tpl"
+            ).read_text()
+    return files
 
 
 def _build_agent_prompt(req: ServiceFactoryRequest) -> str:
@@ -374,11 +395,11 @@ def _build_checklist(req: ServiceFactoryRequest) -> list[str]:
         "Reserve service_name globally: duplicates across projects, regions or runtime kinds are rejected",
         "Review owner, repository, project_id, region, runtime_kind, quality policy and proposed labels",
         "Confirm Artifact Registry, runtime accounts and deployment authorization through the approved platform process",
-        "Review generated CI/quality and semantic-release proposals before copying them to the resource repository",
+        "Review generated workflows and authorization action before copying them to the resource repository; enable the orchestrator only after existing GitHub identity and policy checks pass",
         f"Review {'gcp-job-release.yaml' if kind == 'Job' else 'gcp-service-release.yaml'}; it does not register or create a resource",
         f"From the API repository run: python scripts/catalog_registry.py --check catalog/services/{req.service_name}.yaml",
         f"After review run: python scripts/catalog_registry.py --write catalog/services/{req.service_name}.yaml",
-        "Review the diff of src/eng_platform_api/static_examples/mock_catalog.json, the actual shared source; catalog/services/*.yaml is not loaded at runtime",
+        "Review the catalog proposal against the configured runtime catalog; demo fixtures and catalog/services/*.yaml are not the production inventory",
         "Verify the new resource in /api/catalog/services after the reviewed catalog is delivered through the normal release process",
         "Keep logs.enabled=false and logs.allowed_logins=[]; approve any log readers in a separate catalog policy review",
     ]
@@ -420,6 +441,7 @@ def generate_plan(req: ServiceFactoryRequest) -> ServiceFactoryPlan:
     service_name = req.service_name
     is_job = req.runtime_kind == "cloud_run_job"
 
+    supporting_files = _build_supporting_files(req)
     plan = ServiceFactoryPlan(
         repository=req.repository,
         service_name=service_name,
@@ -441,8 +463,10 @@ def generate_plan(req: ServiceFactoryRequest) -> ServiceFactoryPlan:
             "cloud-run-job-labels.yaml" if is_job else "cloud-run-service-labels.yaml",
             "onboarding-checklist.md",
             "agent-handoff-prompt.md",
+            *supporting_files,
         ],
         checklist=_build_checklist(req),
+        supporting_files=supporting_files,
         yaml_contract=contract_yaml,
         caller_pr_check=_build_caller_workflow(
             f"{req.service_name} PR Check",

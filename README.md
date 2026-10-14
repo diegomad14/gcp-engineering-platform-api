@@ -50,7 +50,12 @@ python3 -m pytest -q
 The optional remote MCP endpoint is `/mcp`. It is disabled by default and uses
 OAuth 2.1 + DCR with GitHub identity; see
 [`docs/runbooks/remote-mcp.md`](docs/runbooks/remote-mcp.md). It reuses the same
-release engine and never lets a client select GitHub Actions or Cloud Build.
+release engine. Release, deployment and rollback accept an optional `provider`
+(`github_actions` or `cloud_build`); omission inherits the service default.
+GitHub Actions is the default for new services and historical `auto`/null values.
+An existing operation keeps its selected provider, and failures never launch
+an alternate executor. Explicit Cloud Build requests still require backend
+readiness and the new-build policy; selecting it does not grant access.
 
 ## Quality report storage
 

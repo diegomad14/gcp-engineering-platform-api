@@ -184,7 +184,9 @@ def _catalog_service(cfg: dict) -> CatalogService:
             ValidationTarget(**vt) for vt in cfg.get("validation_targets", [])
         ],
         quality=ServiceQualityConfig(**quality_cfg),
-        release=ServiceReleaseConfig(**cfg.get("release", {})),
+        release=ServiceReleaseConfig(executor=None)
+        if observation_only
+        else ServiceReleaseConfig(**cfg.get("release", {})),
         deployment=ServiceDeploymentConfig(**deployment_cfg),
         finops=FinOpsLabels(**cfg.get("finops", {})),
         operational_secrets=cfg.get("operational_secrets", []),

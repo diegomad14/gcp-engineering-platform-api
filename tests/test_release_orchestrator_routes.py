@@ -96,16 +96,11 @@ def test_provider_ignores_usage_and_preserves_persistent_circuit(monkeypatch):
         "get",
         lambda _: {"state": "open", "reason": "github_actions_billing_rejection"},
     )
-    propagated = mock.Mock()
-    monkeypatch.setattr(orchestrator, "_propagate_open_circuit", propagated)
-    assert orchestrator._provider(service) == "cloud_build"
+    assert orchestrator._provider(service) == "github_actions"
     opened.assert_not_called()
-    propagated.assert_called_once_with(
-        "owner", {"state": "open", "reason": "github_actions_billing_rejection"}
-    )
 
 
-def test_open_circuit_persists_then_propagates_to_private_repositories(monkeypatch):
+def test_open_circuit_persists_without_rewriting_repository_routing(monkeypatch):
     persisted = mock.Mock(wraps=orchestrator.executor_circuits.open_circuit)
     set_mode = mock.Mock()
     monkeypatch.setattr(orchestrator.executor_circuits, "open_circuit", persisted)
@@ -130,7 +125,7 @@ def test_open_circuit_persists_then_propagates_to_private_repositories(monkeypat
     )
 
     assert persisted.call_args.kwargs["run_id"] == "42"
-    set_mode.assert_called_once_with(REPOSITORY, "cloud_build")
+    set_mode.assert_not_called()
 
 
 def test_explicit_build_rejection_finishes_canonical_checks(monkeypatch):
@@ -323,7 +318,7 @@ def test_health_probe_closes_circuit_only_after_real_started_success(monkeypatch
 
     assert orchestrator._close_circuit_from_probe(REPOSITORY, payload) is True
     assert recorded.call_args.kwargs["jobs_started"] == 1
-    assert set_mode.call_count == 2
+    set_mode.assert_not_called()
     closed.assert_called_once_with("owner", run_id="42")
 
     closed.reset_mock()
@@ -368,7 +363,7 @@ def test_unbound_health_probe_cannot_close_circuit(monkeypatch):
     run.assert_not_called()
 
 
-def test_probe_variable_update_failure_preserves_open_circuit(monkeypatch):
+def test_probe_recovery_does_not_depend_on_repository_variable_writes(monkeypatch):
     workflow = orchestrator.config.release_orchestrator.github_health_workflow
     monkeypatch.setattr(
         orchestrator.executor_circuits,
@@ -425,5 +420,5 @@ def test_probe_variable_update_failure_preserves_open_circuit(monkeypatch):
         "id": 43,
     }
     assert orchestrator._close_circuit_from_probe(REPOSITORY, payload) is True
-    assert any(mode == "cloud_build" for _, mode in calls)
-    closed.assert_not_called()
+    assert calls == []
+    closed.assert_called_once_with("owner", run_id="43")

@@ -1026,7 +1026,7 @@ def test_refresh_does_not_guess_between_ambiguous_unreported_runs(
     assert result.status == "QUEUED"
 
 
-def test_open_billing_circuit_only_updates_private_repositories(monkeypatch):
+def test_open_billing_circuit_keeps_repository_executor_hints(monkeypatch):
     monkeypatch.setattr(config.cloud_build, "new_builds_enabled", True)
     from eng_platform_api.services import deployment_commands
 
@@ -1059,7 +1059,7 @@ def test_open_billing_circuit_only_updates_private_repositories(monkeypatch):
         service, reason="billing", evidence="explicit rejection"
     )
 
-    assert modes == [("owner/private", "cloud_build")]
+    assert modes == []
 
 
 def test_refresh_does_not_recheck_statuses_once_production_revision_known(

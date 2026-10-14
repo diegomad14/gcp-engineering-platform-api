@@ -7,7 +7,10 @@
     "scripts/pin_reconnections_catalog.py",
     "scripts/reconnections_catalog_activate.py",
     "scripts/pin_artemis_release_catalog.py",
-    "scripts/artemis_release_catalog.py"
+    "scripts/artemis_release_catalog.py",
+    "scripts/pin_github_defaults_catalog.py",
+    "scripts/github_defaults_catalog.py",
+    "scripts/service_factory.py"
   ],
   "exclude": []
 }
