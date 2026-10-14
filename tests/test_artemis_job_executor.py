@@ -211,7 +211,8 @@ def test_private_worker_smoke_uses_base_service_audience(monkeypatch):
     monkeypatch.setenv("CGM_SERVICE", "cgm-artemis-sync-worker")
     monkeypatch.setenv("CGM_REGION", "us-central1")
     monkeypatch.setenv("CGM_PROJECT_ID", "cgm-assistant-prod")
-    monkeypatch.setattr(engine, "_service_url", lambda *args: "https://base.example")
+    base = "https://cgm-artemis-sync-worker-123456789.us-central1.run.app"
+    monkeypatch.setattr(engine, "_service_url", lambda *args: base)
     called = []
     monkeypatch.setattr(
         engine, "run", lambda *args: called.append(args) or "identity-token"
@@ -233,9 +234,7 @@ def test_private_worker_smoke_uses_base_service_audience(monkeypatch):
 
     monkeypatch.setattr(engine.urllib.request, "urlopen", open_request)
     engine._smoke("https://candidate.example")
-    assert called == [
-        ("gcloud", "auth", "print-identity-token", "--audiences=https://base.example")
-    ]
+    assert called == [("gcloud", "auth", "print-identity-token", f"--audiences={base}")]
 
 
 @pytest.mark.parametrize(

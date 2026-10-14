@@ -65,8 +65,15 @@ jobs:
               python3 docker/quality-executor/smoke_go_isolation.py "$tag"
             fi
             if [[ "$name" == eng-platform-release-executor ]]; then
-              docker run --rm --entrypoint /usr/bin/python3 "$tag" \
-                -c 'import runpy, yaml; runpy.run_path("/opt/eng-platform/release_executor.py")'
+              local expected_engine actual_engine
+              expected_engine="$(sha256sum docker/release-executor/release_executor.py | cut -d' ' -f1)"
+              actual_engine="$(docker run --rm --network none --read-only --cap-drop ALL \
+                --security-opt no-new-privileges --entrypoint /usr/bin/sha256sum "$tag" \
+                /opt/eng-platform/release_executor.py | cut -d' ' -f1)"
+              test "$actual_engine" = "$expected_engine"
+              docker run --rm --network none --read-only --cap-drop ALL \
+                --security-opt no-new-privileges --entrypoint /usr/bin/python3 "$tag" \
+                -c 'import runpy, yaml; engine = runpy.run_path("/opt/eng-platform/release_executor.py"); assert callable(engine["runtime_identity_token"])'
               docker run --rm --entrypoint gcloud "$tag" --version >/dev/null
             fi
             if [[ "$name" == quality-python || "$name" == quality-node ]]; then
@@ -108,8 +115,9 @@ jobs:
           fi
 
           manifest_sha256="$(sha256sum src/eng_platform_api/release_quality_profiles.json | cut -d' ' -f1)"
-          printf 'source_sha=%s\ncomponent=%s\nmanifest_sha256=%s\n' \
-            "$SOURCE_SHA" "$COMPONENT" "$manifest_sha256" > "$RUNNER_TEMP/tooling-source"
+          engine_sha256="$(sha256sum docker/release-executor/release_executor.py | cut -d' ' -f1)"
+          printf 'source_sha=%s\ncomponent=%s\nmanifest_sha256=%s\nrelease_executor_sha256=%s\n' \
+            "$SOURCE_SHA" "$COMPONENT" "$manifest_sha256" "$engine_sha256" > "$RUNNER_TEMP/tooling-source"
 
           {
             echo '### Immutable release tooling'

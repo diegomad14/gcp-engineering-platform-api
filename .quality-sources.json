@@ -1,5 +1,6 @@
 {
   "roots": [
+    "docker/release-executor",
     ".github/actions/verify-quality",
     "src",
     "scripts/release",
