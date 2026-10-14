@@ -3,18 +3,54 @@
 import json
 import os
 import re
+import subprocess
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
 
+# Reviewed with the twelve Artemis release catalog entries. This registry ships
+# with the SHA-pinned action, never with caller source, inputs or environment.
+# Repository equality remains exact; repository aliases are not authorization.
+EVIDENCE_OWNERS = {
+    ("diegomad14/cgm-artemis-api", service): "cgm-artemis-api"
+    for service in (
+        "cgm-artemis-job-dispatcher",
+        "cgm-artemis-job-worker",
+        "cgm-artemis-sync-worker",
+        "cgm-artemis-clock-sync-worker",
+        "cgm-artemis-data-recovery-worker",
+        "cgm-artemis-fnd-ip-sync-worker",
+        "cgm-artemis-fnd-observation-worker",
+        "cgm-artemis-readings-export-worker",
+        "cgm-artemis-smarti-prevention-worker",
+        "cgm-artemis-wm-sweep-worker",
+        "cgm-artemis-mcp-worker",
+    )
+}
+
+
+def verify_release_tag(tag: str, sha: str) -> None:
+    """Quality is published before tagging; bind the tag through the checkout."""
+    if not re.fullmatch(
+        r"v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", tag
+    ):
+        raise ValueError("A semantic release tag is required")
+    resolved = subprocess.check_output(
+        ["git", "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}"], text=True
+    ).strip()
+    if resolved != sha:
+        raise ValueError("Release tag does not match the evidence SHA")
+
+
 def validate(report: dict, service: str, repository: str, sha: str) -> None:
+    owner = EVIDENCE_OWNERS.get((repository, service), service)
     if (
         report.get("service_name"),
         report.get("repository"),
         report.get("commit_sha"),
-    ) != (service, repository, sha):
+    ) != (owner, repository, sha):
         raise ValueError("Evidence identity does not match the release")
     if (
         report.get("policy_version") != "oss-v2"
@@ -43,6 +79,9 @@ def main() -> None:
         or not re.fullmatch(r"[0-9a-f]{40}", sha)
     ):
         raise ValueError("HTTPS API URL, service and full SHA are required")
+    tag = os.environ.get("QUALITY_TAG", "")
+    if tag:
+        verify_release_tag(tag, sha)
     deadline = time.monotonic() + min(
         1800, max(0, int(os.environ.get("QUALITY_WAIT", "0")))
     )
