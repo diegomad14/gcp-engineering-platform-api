@@ -5,7 +5,9 @@
     "scripts/catalog_registry.py",
     "scripts/reconnections_catalog_preflight.py",
     "scripts/pin_reconnections_catalog.py",
-    "scripts/reconnections_catalog_activate.py"
+    "scripts/reconnections_catalog_activate.py",
+    "scripts/pin_artemis_release_catalog.py",
+    "scripts/artemis_release_catalog.py"
   ],
   "exclude": []
 }
