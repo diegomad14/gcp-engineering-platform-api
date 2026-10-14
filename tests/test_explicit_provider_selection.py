@@ -87,7 +87,7 @@ def test_release_and_deploy_defaults_are_independent(service):
     assert (
         selection.select(service, None, operation="deploy").effective == "cloud_build"
     )
-    assert ServiceReleaseConfig().executor is None
+    assert ServiceReleaseConfig().executor == "github_actions"
     service.release.executor = None
     assert (
         selection.select(
@@ -575,3 +575,124 @@ def test_pending_dispatch_cannot_retry_even_after_default_changes(
     assert conflict.value.status_code == 409
     retry.assert_not_called()
     build.assert_not_called()
+
+
+@pytest.mark.parametrize("runtime_mode", ["auto", "cloud_build", "github_actions"])
+@pytest.mark.parametrize("kind", ["deploy", "rollback"])
+def test_legacy_auto_dispatch_uses_github_without_quota_or_fallback(
+    service, monkeypatch, runtime_mode, kind
+):
+    service.deployment.executor = "auto"
+    service.release.executor = None
+    monkeypatch.setattr(
+        config.release_orchestrator, "private_executor_mode", runtime_mode
+    )
+    monkeypatch.setattr(config.cloud_build, "mode", "cloud_build")
+    monkeypatch.setattr(
+        config.cloud_build, "cloud_build_only_services", (service.service_name,)
+    )
+    item = DeploymentItem(
+        id="default",
+        service_name=service.service_name,
+        repository=service.repository,
+        tag="v1",
+        sha=HEAD,
+        production_revision="old",
+    )
+    github = Mock(return_value=item)
+    forbidden = Mock(
+        side_effect=AssertionError("No implicit provider or quota mutation")
+    )
+    monkeypatch.setattr(github_deployments, "start_deployment", github)
+    monkeypatch.setattr(github_deployments, "start_rollback", github)
+    monkeypatch.setattr(commands, "start_cloud_build", forbidden)
+    monkeypatch.setattr(
+        commands.github_actions_quota, "should_use_cloud_build", forbidden
+    )
+    monkeypatch.setattr(
+        releases.github_release_control, "repository_is_private", forbidden
+    )
+    monkeypatch.setattr(releases.executor_circuits, "get", forbidden)
+    assert releases._provider(service) == "github_actions"
+    if kind == "deploy":
+        result = commands._dispatch_deploy(
+            service, ReleaseTag(name="v1", sha=HEAD), "operator"
+        )
+    else:
+        result = commands._dispatch_rollback(service, item, "operator")
+    assert result.provider_selection.effective == "github_actions"
+    assert result.provider_selection.locked
+    github.assert_called_once()
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("runtime_mode", ["auto", "cloud_build", "github_actions"])
+@pytest.mark.parametrize("plane", ["release", "deployment"])
+def test_billing_evidence_never_rewrites_repository_hints(
+    monkeypatch, runtime_mode, plane
+):
+    monkeypatch.setattr(
+        config.release_orchestrator, "private_executor_mode", runtime_mode
+    )
+    monkeypatch.setattr(
+        releases.github_release_control, "repository_is_private", lambda _: True
+    )
+    hints, services = Mock(), Mock()
+    monkeypatch.setattr(
+        releases.github_release_control, "set_repository_execution_mode", hints
+    )
+    monkeypatch.setattr(catalog, "get_services", services)
+    if plane == "release":
+        releases._open_circuit(
+            repository="owner/private",
+            run_id="42",
+            reason="github_actions_billing_rejection",
+            evidence="verified",
+        )
+    else:
+        commands._open_billing_circuit(
+            catalog.CatalogService(
+                service_name="example",
+                repository="owner/private",
+                owner="platform",
+                project_id="test-project",
+                region="us-central1",
+            ),
+            reason="github_actions_billing_rejection",
+            evidence="verified",
+        )
+    assert (
+        releases.executor_circuits.get("owner")["reason"]
+        == "github_actions_billing_rejection"
+    )
+    hints.assert_not_called()
+    services.assert_not_called()
+
+
+async def test_mcp_discovery_publishes_optional_provider_for_all_operations():
+    from eng_platform_api.mcp_server import mcp
+
+    tools = {tool.name: tool for tool in await mcp.list_tools()}
+    for name in ["start_release", "start_deployment", "start_rollback"]:
+        schema = tools[name].inputSchema
+        assert "provider" not in schema.get("required", [])
+        alternatives = schema["properties"]["provider"]["anyOf"]
+        assert {"type": "null"} in alternatives
+        assert (
+            next(value["enum"] for value in alternatives if "enum" in value)
+            == PROVIDERS
+        )
+
+
+def test_factory_supporting_files_preserves_legacy_plan_compatibility():
+    from eng_platform_api.models import ServiceFactoryPlan
+
+    legacy = ServiceFactoryPlan(repository="owner/repo", service_name="example")
+    assert legacy.supporting_files == {}
+    current = legacy.model_copy(
+        update={"supporting_files": {".github/action.js": "verified source"}}
+    )
+    assert (
+        ServiceFactoryPlan.model_validate(current.model_dump()).supporting_files
+        == current.supporting_files
+    )

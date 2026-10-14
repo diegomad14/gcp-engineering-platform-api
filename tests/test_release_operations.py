@@ -27,6 +27,12 @@ def test_scheduler_reconciliation_uses_dedicated_identity(monkeypatch):
         release_operations.release_executions, "list_due", lambda **_kwargs: []
     )
 
+    monkeypatch.setattr(
+        release_operations.deployment_commands,
+        "reconcile_stalled_dispatches",
+        lambda: {"reconciled": 0, "items": []},
+    )
+
     assert release_operations.reconcile_due("Bearer scheduler-token") == {
         "reconciled": 0,
         "items": [],

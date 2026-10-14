@@ -1,4 +1,4 @@
-"""Automatic fallback requires positive, pre-start GitHub billing evidence."""
+"""Billing evidence cannot change a selected executor or repository routing."""
 
 from types import SimpleNamespace
 from unittest import mock
@@ -70,7 +70,7 @@ def test_only_failed_runs_can_be_billing_rejections(monkeypatch, conclusion):
 
 @pytest.fixture(autouse=True)
 def automatic_executor_policy(monkeypatch):
-    """These regression cases exercise the retained billing-only auto mode."""
+    """Legacy runtime auto values must not change operation routing."""
     monkeypatch.setattr(
         orchestrator.config.release_orchestrator, "private_executor_mode", "auto"
     )
@@ -315,21 +315,15 @@ def test_legacy_open_circuit_selects_neither_executor_and_preserves_state(
         orchestrator.github_release_control, "repository_is_private", lambda _: True
     )
     before, _ = circuits.open_circuit("owner", reason=reason)
-    propagate = mock.Mock()
-    monkeypatch.setattr(orchestrator, "_propagate_open_circuit", propagate)
     with pytest.raises(
         circuits.CircuitRecoveryRequired, match="verified health recovery"
     ):
         quota.should_use_cloud_build(service.service_name, service.repository)
-    with pytest.raises(
-        orchestrator.ReleaseOrchestratorError, match="verified health recovery"
-    ):
-        orchestrator._provider(service)
+    assert orchestrator._provider(service) == "github_actions"
     assert circuits.get("owner") == before
-    propagate.assert_not_called()
 
 
-def test_verified_billing_circuit_still_allows_automatic_fallback(monkeypatch):
+def test_verified_billing_circuit_cannot_switch_release_default(monkeypatch):
     service = commands.catalog.get_service("eng-platform-api")
     circuits = orchestrator.executor_circuits
     monkeypatch.setattr(quota.config.github, "billing_owner", "owner")
@@ -347,15 +341,13 @@ def test_verified_billing_circuit_still_allows_automatic_fallback(monkeypatch):
     monkeypatch.setattr(
         orchestrator.github_release_control, "repository_is_private", lambda _: True
     )
-    monkeypatch.setattr(orchestrator, "_propagate_open_circuit", mock.Mock())
     circuits.open_circuit("owner", reason="github_actions_billing_rejection")
     assert quota.should_use_cloud_build(service.service_name, service.repository)
-    assert orchestrator._provider(service) == "cloud_build"
+    assert orchestrator._provider(service) == "github_actions"
 
 
-@pytest.mark.parametrize("operation", ["deploy", "rollback", "retry"])
-def test_recovery_required_surfaces_as_conflict_without_dispatch(
-    monkeypatch, operation
+def test_legacy_retry_without_recorded_provider_still_requires_reconciliation(
+    monkeypatch,
 ):
     service = commands.catalog.get_service("eng-platform-api")
     target = DeploymentItem(
@@ -364,57 +356,19 @@ def test_recovery_required_surfaces_as_conflict_without_dispatch(
         repository=service.repository,
         tag="v1.0.0",
         sha="a" * 40,
-        status="SUCCEEDED",
-        production_revision="revision-1",
+        status="FAILED",
+        current_stage="dispatch",
     )
-    monkeypatch.setattr(commands, "_service_or_404", lambda *args: service)
-    monkeypatch.setattr(commands, "_active_deployment", lambda _: None)
+    monkeypatch.setattr(commands.deployment_executions, "get", lambda _: None)
     monkeypatch.setattr(commands, "_require_release_quality", mock.Mock())
     monkeypatch.setattr(commands, "_require_orchestrated_release", mock.Mock())
-    monkeypatch.setattr(commands.deployment_store, "get", lambda _: target)
-    monkeypatch.setattr(
-        commands.deployment_store, "find_by_idempotency_key", lambda _: None
-    )
-    monkeypatch.setattr(
-        github_deployments,
-        "get_tag",
-        lambda *_: ReleaseTag(name=target.tag, sha=target.sha, eligible=True),
-    )
-    monkeypatch.setattr(
-        quota,
-        "should_use_cloud_build",
-        mock.Mock(
-            side_effect=commands.executor_circuits.CircuitRecoveryRequired(
-                "verified health recovery required"
-            )
-        ),
-    )
-    github = mock.Mock()
-    cloud = mock.Mock()
-    for name in ("start_deployment", "start_rollback", "retry_dispatch"):
-        monkeypatch.setattr(github_deployments, name, github)
+    github, cloud = mock.Mock(), mock.Mock()
+    monkeypatch.setattr(github_deployments, "retry_dispatch", github)
     monkeypatch.setattr(commands, "start_cloud_build", cloud)
     with pytest.raises(commands.HTTPException) as caught:
-        if operation == "deploy":
-            commands.start_deployment(
-                service_name=service.service_name,
-                tag_name=target.tag,
-                requested_by="operator",
-            )
-        elif operation == "rollback":
-            commands.start_rollback(
-                service_name=service.service_name,
-                target_deployment_id=target.id,
-                requested_by="operator",
-            )
-        else:
-            commands._retry_failed_dispatch(service, target, "key", "dispatch failed")
+        commands._retry_failed_dispatch(service, target, "key", "dispatch failed")
     assert caught.value.status_code == 409
-    assert (
-        "requires reconciliation"
-        if operation == "retry"
-        else "verified health recovery"
-    ) in caught.value.detail
+    assert "requires reconciliation" in caught.value.detail
     github.assert_not_called()
     cloud.assert_not_called()
 
@@ -481,8 +435,5 @@ def test_visibility_failure_cannot_bypass_open_circuit(monkeypatch, reason):
         circuits.CircuitRecoveryRequired, match="automatic execution is paused"
     ):
         quota.should_use_cloud_build(service.service_name, service.repository)
-    with pytest.raises(
-        orchestrator.ReleaseOrchestratorError, match="automatic execution is paused"
-    ):
-        orchestrator._provider(service)
+    assert orchestrator._provider(service) == "github_actions"
     assert circuits.get("owner") == before

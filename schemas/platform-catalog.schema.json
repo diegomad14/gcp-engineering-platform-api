@@ -4,7 +4,7 @@
       "additionalProperties": false,
       "properties": {
         "executor": {
-          "default": "auto",
+          "default": "github_actions",
           "enum": [
             "auto",
             "github_actions",
@@ -715,7 +715,7 @@
               "type": "null"
             }
           ],
-          "default": null,
+          "default": "github_actions",
           "title": "Executor"
         }
       },

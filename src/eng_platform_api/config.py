@@ -100,7 +100,7 @@ class CloudBuildConfig:
 
 @dataclass
 class ReleaseOrchestratorConfig:
-    """Private CI/release fallback configuration.
+    """CI/release executor configuration.
 
     This plane is intentionally separate from the deployment executor: quality
     images never receive deployment permissions and the deployment image does
@@ -108,7 +108,7 @@ class ReleaseOrchestratorConfig:
     """
 
     enabled: bool = False
-    private_executor_mode: str = "cloud_build"
+    private_executor_mode: str = "github_actions"
     github_first_services: tuple[str, ...] = ()
     execution_collection: str = "release_executions"
     circuit_collection: str = "executor_circuits"
@@ -431,7 +431,7 @@ def load_config() -> PlatformConfig:
 
     release_orchestrator = ReleaseOrchestratorConfig(
         private_executor_mode=os.getenv(
-            "ENG_PLATFORM_PRIVATE_EXECUTOR_MODE", "cloud_build"
+            "ENG_PLATFORM_PRIVATE_EXECUTOR_MODE", "github_actions"
         ).strip(),
         github_first_services=tuple(
             service.strip()

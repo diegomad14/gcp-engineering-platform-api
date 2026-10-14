@@ -98,7 +98,8 @@ def test_start_cloud_build_converts_provider_error(monkeypatch, service):
     assert raised.value.item.error == "disabled"
 
 
-def test_dispatch_deploy_uses_preflight_cloud_build(monkeypatch, service):
+def test_dispatch_deploy_uses_explicit_cloud_build(monkeypatch, service):
+    service.deployment.executor = "cloud_build"
     managed = _item()
     tag = ReleaseTag(name=managed.tag, sha=managed.sha)
     monkeypatch.setattr(
@@ -149,6 +150,7 @@ def test_dispatch_deploy_stops_for_quota_and_generic_errors(
 
 
 def test_dispatch_rollback_preflight_preserves_target(monkeypatch, service):
+    service.deployment.executor = "cloud_build"
     target = _item(production_revision="revision-7")
     managed = _item(kind="rollback", production_revision="revision-7")
     monkeypatch.setattr(

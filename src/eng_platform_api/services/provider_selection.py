@@ -1,7 +1,8 @@
 """Resolve operator intent independently for release and deployment.
 
-Only legacy catalogs consult the old policy. Once an operation has been
-reserved, its selection is authoritative even if the service default changes.
+Legacy null/auto defaults resolve to GitHub Actions at admission. Once an
+operation has been reserved, its selection is authoritative even if the service
+default changes. Recorded historical provider values remain compatible.
 """
 
 from contextlib import contextmanager

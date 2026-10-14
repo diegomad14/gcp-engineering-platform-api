@@ -36,8 +36,8 @@ ExecutionProvider = Literal["github_actions", "cloud_build"]
 
 class ServiceReleaseConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    # None preserves the existing account policy for unmigrated catalogs.
-    executor: ExecutionProvider | None = None
+    # Explicit null remains compatible and resolves to GitHub Actions.
+    executor: ExecutionProvider | None = "github_actions"
 
 
 class ProviderSelection(BaseModel):
@@ -49,7 +49,7 @@ class ProviderSelection(BaseModel):
 
 
 class ServiceDeploymentConfig(BaseModel):
-    executor: Literal["auto", "github_actions", "cloud_build"] = "auto"
+    executor: Literal["auto", "github_actions", "cloud_build"] = "github_actions"
     enabled: bool = True
     workflow_file: str = "platform-deploy.yml"
     image_name: str = ""
@@ -769,6 +769,7 @@ class ServiceFactoryTemplate(BaseModel):
 
 
 class ServiceFactoryPlan(BaseModel):
+    supporting_files: dict[str, str] = Field(default_factory=dict)
     repository: str
     service_name: str
     generated_files: list[str] = Field(default_factory=list)

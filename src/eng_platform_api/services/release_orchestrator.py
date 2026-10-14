@@ -103,116 +103,20 @@ def _policy_hash(service: CatalogService) -> str:
 
 def _open_circuit(*, repository: str, run_id: str, reason: str, evidence: str) -> None:
     owner = _owner(repository)
-    circuit, _created = executor_circuits.open_circuit(
+    executor_circuits.open_circuit(
         owner,
         reason=reason,
         repository=repository,
         run_id=run_id,
         evidence=evidence,
     )
-    _propagate_open_circuit(owner, circuit)
-
-
-def _propagate_open_circuit(owner: str, circuit: dict[str, Any]) -> None:
-    if not config.cloud_build.new_builds_enabled:
-        return
-    if config.release_orchestrator.private_executor_mode in {
-        "cloud_build",
-        "github_actions",
-    }:
-        # Preserve hints until existing GitHub reservations have drained.
-        return
-    # Never cache the provider decision or reopen from a stale read. Only the
-    # best-effort repository hints are deduplicated, using the existing durable
-    # circuit document so bursts on different workers share one sweep.
-    if not executor_circuits.mode_propagation_due(circuit):
-        return
-    token = None
-    succeeded = False
-    try:
-        token = executor_circuits.claim_mode_propagation(owner)
-        if token is None:
-            return
-        repositories = {
-            service.repository
-            for service in catalog.get_services().services
-            if service.repository
-            and getattr(getattr(service, "release", None), "executor", None)
-            != "github_actions"
-            and (
-                not config.cloud_build.repositories
-                or getattr(service, "service_name", "")
-                in config.cloud_build.repositories
-            )
-        }
-        succeeded = True
-        for candidate in repositories:
-            try:
-                if github_release_control.repository_is_private(candidate):
-                    github_release_control.set_repository_execution_mode(
-                        candidate, "cloud_build"
-                    )
-            except Exception:
-                succeeded = False
-                logger.exception("Unable to propagate open circuit to %s", candidate)
-    except Exception:
-        # The circuit has already been persisted/read. A catalog or lease failure
-        # must not switch execution back to GitHub; a later event can repair hints.
-        logger.exception("Unable to propagate open circuit for %s", owner)
-    finally:
-        if token is not None:
-            try:
-                executor_circuits.finish_mode_propagation(
-                    owner, token=token, succeeded=succeeded
-                )
-            except Exception:
-                # An uncertain completion is retried after the durable lease
-                # expires. It must not turn an economic optimization into an outage.
-                logger.exception("Unable to finish circuit propagation for %s", owner)
 
 
 def _provider(service: CatalogService) -> str:
     service = require_managed(service)
-    if service.release.executor:
-        return service.release.executor
-    if config.release_orchestrator.private_executor_mode == "github_actions":
-        return "github_actions"
-    try:
-        private = github_release_control.repository_is_private(service.repository)
-    except Exception as exc:
-        if github_actions_quota.explicit_private_policy(service.service_name):
-            raise ReleaseOrchestratorError(
-                "Cannot verify repository visibility for explicit Cloud Build policy"
-            ) from exc
-        if executor_circuits.is_open(_owner(service.repository)):
-            raise ReleaseOrchestratorError(
-                "Cannot verify repository visibility while the GitHub Actions "
-                "circuit is open; automatic execution is paused"
-            ) from exc
-        return "github_actions"
-    if not private:
-        return "github_actions"
-    if (
-        service.deployment.executor == "cloud_build"
-        or service.service_name in config.cloud_build.cloud_build_only_services
-    ):
-        return "cloud_build"
-    if github_actions_quota.explicit_private_policy(service.service_name):
-        # Explicit operator policy is independent of the billing circuit.
-        # Reservation keeps any existing execution on its original provider.
-        return "cloud_build"
-    owner = _owner(service.repository)
-    circuit = executor_circuits.get(owner)
-    if circuit.get("state") == "open":
-        try:
-            executor_circuits.require_billing_rejection(circuit)
-        except executor_circuits.CircuitRecoveryRequired as exc:
-            raise ReleaseOrchestratorError(str(exc)) from exc
-        _propagate_open_circuit(owner, circuit)
-        return "cloud_build"
-    # Included usage does not prove that GitHub will reject a runner. The
-    # durable rejection circuit, not a usage estimate, controls auto fallback.
-    return "github_actions"
+    # Legacy nulls never opt into an account-wide quota policy. Per-service
+    # defaults remain independent from deployment and explicit request choices.
+    return provider_selection.select(service, None, operation="release").effective
 
 
 def _reserve(
@@ -522,39 +426,9 @@ def _close_circuit_from_probe(repository: str, payload_run: dict[str, Any]) -> b
         nonce=nonce,
     )
     if getattr(run, "conclusion", "") == "success" and started:
-        if settings.private_executor_mode in {"cloud_build", "github_actions"}:
-            # A billing probe cannot override explicit executor policy or
-            # suppress an older GitHub reservation during coordinated drain.
-            # Repository hints are migrated separately after that drain.
-            executor_circuits.close_after_successful_probe(owner, run_id=str(run_id))
-            return True
-        updated: list[str] = []
-        repositories = {
-            service.repository
-            for service in catalog.get_services().services
-            if service.repository
-        }
-        try:
-            for candidate in repositories:
-                github_release_control.set_repository_execution_mode(
-                    candidate, "github_actions"
-                )
-                updated.append(candidate)
-        except Exception:
-            logger.exception("Unable to restore all GitHub Actions mode variables")
-            # Keep the circuit and repository variables aligned. A new admin
-            # probe can retry after the GitHub API/configuration issue clears.
-            for candidate in updated:
-                try:
-                    github_release_control.set_repository_execution_mode(
-                        candidate, "cloud_build"
-                    )
-                except Exception:
-                    logger.exception(
-                        "Unable to roll back GitHub mode for %s", candidate
-                    )
-        else:
-            executor_circuits.close_after_successful_probe(owner, run_id=str(run_id))
+        # Recovery updates circuit evidence only; it cannot rewrite repository
+        # routing or the immutable provider of an existing operation.
+        executor_circuits.close_after_successful_probe(owner, run_id=str(run_id))
     return True
 
 

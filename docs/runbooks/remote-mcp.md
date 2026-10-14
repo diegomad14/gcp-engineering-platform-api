@@ -89,8 +89,15 @@ cancellation, expiration and cleanup details. Metadata uses its reserved permit.
 All tools require the same full grant. Deploy/rollback still require `reason`
 and `idempotency_key`, remain limited to ten mutations/user/hour, and use exact
 `oss-v2` evidence, eligible tags, managed-resource barriers, executor selection,
-service locks and idempotency. Clients cannot supply SHA, executor, commands,
-credentials or profile overrides. Signed release capabilities attest the MCP
+service locks and idempotency. `start_release`, `start_deployment` and
+`start_rollback` accept optional `provider: github_actions | cloud_build`; omitted
+values inherit the service default, with GitHub Actions for historical auto/null
+defaults. Release also requires distinct full `head_sha` and `base_sha`, checked
+against the current repository branch and ancestry. Clients cannot supply
+executor commands, credentials or profile overrides. Existing operations retain
+their provider; requesting a different one returns 409. A dispatch or billing
+failure never selects an alternate executor. Cloud Build remains subject to
+backend readiness and new-build policy. Signed release capabilities attest the MCP
 grant; workflow consumption checks its live authority. Web capabilities continue
 using the existing operator authorization.
 
