@@ -31,6 +31,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Require exact OSS quality evidence
         uses: ./.github/actions/verify-quality
@@ -43,7 +44,30 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install reviewed validation dependencies
-        run: python -m pip install -e .
+        run: python -m pip install -e '.[dev]'
+      - name: Require coverage of the full approved catalog change before cloud authentication
+        env:
+          SCOPED_REPORT_DIR: ${{ runner.temp }}/artemis-scoped-quality
+          APPROVED_BASE_SHA: c3d6157735969ca84473fdc435acf0fcc61e63e3
+        run: |
+          set -euo pipefail
+          mkdir -p "$SCOPED_REPORT_DIR"
+          python -m pytest -q -o addopts='' \
+            --cov=scripts.pin_artemis_release_catalog --cov=scripts.artemis_release_catalog \
+            --cov-report="json:$SCOPED_REPORT_DIR/coverage.json" --cov-fail-under=80 \
+            tests/test_pin_artemis_release_catalog.py tests/test_artemis_release_catalog.py
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          from scripts.quality.differential_coverage import differential
+          directory = Path(os.environ['SCOPED_REPORT_DIR'])
+          report = differential(Path.cwd(), directory, 'python', os.environ['APPROVED_BASE_SHA'], os.environ['GITHUB_SHA'])
+          assert report['policy_version'] == 'oss-v2' and report['changed_lines'] > 0
+          assert report['differential_coverage'] >= report['differential_threshold'] == 80
+          report.update(commit_sha=os.environ['GITHUB_SHA'], repository=os.environ['GITHUB_REPOSITORY'], quality_gate_status='PASSED')
+          (directory / 'artemis-release-catalog-differential.json').write_text(json.dumps(report, indent=2) + '\n')
+          print(json.dumps(report, sort_keys=True))
+          PY
       - name: Check existing federation identity
         env:
           EXISTING_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
@@ -68,5 +92,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: artemis-release-catalog-${{ inputs.mode }}-${{ github.sha }}
-          path: ${{ runner.temp }}/artemis-release-catalog.json
+          path: |
+            ${{ runner.temp }}/artemis-release-catalog.json
+            ${{ runner.temp }}/artemis-scoped-quality/artemis-release-catalog-differential.json
           if-no-files-found: ignore
