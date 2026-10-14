@@ -1,0 +1,42 @@
+{
+  "status": "read_only_preflight_passed",
+  "authorization": "user granted the exact two reconnections catalog pins",
+  "mutation_performed": false,
+  "source_sha256": "7a0d21c78e34ce05dbcdc75744c66b6c189624f9c3630cdf40ce6255c5b980a7",
+  "stage": "completed_read_only",
+  "service_name": "cgm-reconnections-api",
+  "candidate_sha256": "b82cdad9d13a881b25b777d5f9f0cb76f909c17e9cb11e823805b13d88da3c1d",
+  "exact_byte_edits": [
+    {
+      "offset": 51243,
+      "old_utf8": "\"auto\"",
+      "new_utf8": "\"github_actions\""
+    },
+    {
+      "offset": 55824,
+      "old_utf8": "",
+      "new_utf8": ", \"release\": {\"executor\": \"github_actions\"}"
+    }
+  ],
+  "byte_edit_semantics": "Apply in order against intermediate UTF-8 bytes; verify old bytes and final SHA256. No private context is included.",
+  "only_policy_changes": {
+    "release.executor": [
+      null,
+      "github_actions"
+    ],
+    "deployment.executor": [
+      "auto",
+      "github_actions"
+    ]
+  },
+  "other_entries_semantically_identical": true,
+  "bytes_outside_target_entry_identical": true,
+  "network_or_production_action": false,
+  "schema_valid": true,
+  "existing_account": "cgm-sanplat-deployer@cgm-assistant-prod.iam.gserviceaccount.com",
+  "existing_object_read": true,
+  "bucket_test_reports_object_create": true,
+  "conditional_object_permissions_may_require_operator_review": false,
+  "bucket_identity_sha256": "393a48e5b3b712fb159e1d3a121f2d9dd60a2cad68faca0bda335f5e4cfeabaa",
+  "source_generation": "1791926193790392"
+}

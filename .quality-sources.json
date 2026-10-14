@@ -4,7 +4,8 @@
     "scripts/release",
     "scripts/catalog_registry.py",
     "scripts/reconnections_catalog_preflight.py",
-    "scripts/pin_reconnections_catalog.py"
+    "scripts/pin_reconnections_catalog.py",
+    "scripts/reconnections_catalog_activate.py"
   ],
   "exclude": []
 }
