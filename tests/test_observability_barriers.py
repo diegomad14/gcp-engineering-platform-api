@@ -141,6 +141,30 @@ def test_inventory_has_all_32_observation_only_resources():
     )
 
 
+@pytest.mark.parametrize("release", [None, {}, {"executor": None}])
+def test_observation_release_default_preserves_unconfigured_inventory(release):
+    row = deepcopy(OBSERVATIONS[0])
+    row.pop("release", None)
+    if release is not None:
+        row["release"] = release
+    original = deepcopy(row)
+    assert CatalogService.model_validate(row).release.executor is None
+    assert row == original
+
+
+@pytest.mark.parametrize("provider", ["github_actions", "cloud_build"])
+def test_observation_rejects_explicit_release_provider(provider):
+    row = {**deepcopy(OBSERVATIONS[0]), "release": {"executor": provider}}
+    with pytest.raises(ValueError, match="cannot carry managed configuration"):
+        CatalogService.model_validate(row)
+
+
+def test_observation_does_not_accept_null_release_block():
+    row = {**deepcopy(OBSERVATIONS[0]), "release": None}
+    with pytest.raises(ValueError):
+        CatalogService.model_validate(row)
+
+
 @pytest.mark.parametrize("row", OBSERVATIONS, ids=NAMES)
 def test_all_observed_resources_block_management_sinks_before_external_calls(
     row, no_cloud

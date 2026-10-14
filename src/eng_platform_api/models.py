@@ -146,6 +146,20 @@ class CatalogService(BaseModel):
         default_factory=list, max_length=256
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def observation_release_default(cls, value):
+        # Managed defaults cannot grant release configuration to inventory.
+        # Preserve explicit executors so the management barrier rejects them.
+        if (
+            isinstance(value, dict)
+            and value.get("management_mode") == "observability_only"
+        ):
+            release = value.get("release", {})
+            if isinstance(release, dict) and "executor" not in release:
+                return {**value, "release": {**release, "executor": None}}
+        return value
+
     @model_serializer(mode="wrap")
     def serialize_optional_infrastructure(self, handler: SerializerFunctionWrapHandler):
         # No serializer return annotation: Pydantic must preserve the structured
