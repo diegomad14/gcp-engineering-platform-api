@@ -1,5 +1,6 @@
 {
   "roots": [
+    ".github/actions/verify-quality",
     "src",
     "scripts/release",
     "scripts/catalog_registry.py",

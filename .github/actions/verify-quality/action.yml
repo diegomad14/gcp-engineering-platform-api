@@ -1,5 +1,5 @@
 name: Verify release quality
-description: Fail closed unless the exact service and commit have current OSS evidence.
+description: Require exact repository and commit evidence from the service or its explicitly authorized owner.
 inputs:
   platform-api-url:
     required: true
@@ -13,6 +13,9 @@ inputs:
   wait-seconds:
     default: '0'
     description: Maximum wait for main CI to publish evidence
+  release-tag:
+    default: ''
+    description: Optional release tag to bind to the exact evidence SHA (empty for pre-tag CI)
 runs:
   using: composite
   steps:
@@ -22,4 +25,5 @@ runs:
         QUALITY_SERVICE: ${{ inputs.service-name }}
         QUALITY_SHA: ${{ inputs.commit-sha }}
         QUALITY_WAIT: ${{ inputs.wait-seconds }}
+        QUALITY_TAG: ${{ inputs.release-tag }}
       run: python3 "${{ github.action_path }}/verify.py"
