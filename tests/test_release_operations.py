@@ -24,7 +24,7 @@ def test_scheduler_reconciliation_uses_dedicated_identity(monkeypatch):
 
     monkeypatch.setattr(release_operations, "_verify_google", verify)
     monkeypatch.setattr(
-        release_operations.release_executions, "list_due", lambda **_kwargs: []
+        release_operations.release_executions, "iter_due", lambda **_kwargs: iter(())
     )
 
     monkeypatch.setattr(

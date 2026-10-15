@@ -8,6 +8,7 @@ reconstruct that state after an API restart.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import hashlib
@@ -16,18 +17,19 @@ import fcntl
 import tempfile
 from contextvars import ContextVar
 from contextlib import contextmanager
+from collections.abc import Iterator
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from ..models import DeploymentItem
+from .firestore_queries import count_query, count_query_at, iter_query_pages
 
 _DEFAULT_STORE_PATH = Path(
     os.getenv("ENG_PLATFORM_DEPLOYMENT_STORE_PATH", "data/deployments.json")
 )
 _COLLECTION = os.getenv("ENG_PLATFORM_DEPLOYMENT_FIRESTORE_COLLECTION", "")
-# A single Firestore IN query supports at most 30 comparison values.
-_FIRESTORE_IN_QUERY_LIMIT = 30
+_logger = logging.getLogger(__name__)
 _lock = threading.RLock()
 _command_key: ContextVar[str] = ContextVar("deployment_command_key", default="")
 
@@ -268,8 +270,26 @@ def list_for_service_with_total(
 ) -> tuple[list[DeploymentItem], int]:
     collection = _firestore_collection()
     if collection is not None:
-        snapshots = collection.where("service_name", "==", service_name).stream()
-        records = [snapshot.to_dict() for snapshot in snapshots]
+        query = collection.where("service_name", "==", service_name)
+        total, read_time = count_query_at(query)
+        if read_time is None:
+            raise RuntimeError("Firestore snapshot time is unavailable")
+        ordered = query.order_by("created_at", direction="DESCENDING").order_by(
+            "__name__", direction="DESCENDING"
+        )
+        ordered_total, _ = count_query_at(ordered, read_time=read_time)
+        if ordered_total != total:
+            _logger.warning(
+                "Deployment history legacy compatibility scan: missing created_at"
+            )
+            items = [
+                DeploymentItem(**snapshot.to_dict())
+                for snapshot in iter_query_pages(query, read_time=read_time)
+            ]
+            items.sort(key=lambda item: (item.created_at, item.id), reverse=True)
+            return items[:limit], total
+        snapshots = ordered.limit(limit).stream(read_time=read_time)
+        return [DeploymentItem(**snapshot.to_dict()) for snapshot in snapshots], total
     else:
         with _lock:
             records = [
@@ -278,7 +298,7 @@ def list_for_service_with_total(
                 if record.get("service_name") == service_name
             ]
     items = [DeploymentItem(**record) for record in records]
-    items.sort(key=lambda item: item.created_at, reverse=True)
+    items.sort(key=lambda item: (item.created_at, item.id), reverse=True)
     return items[:limit], len(items)
 
 
@@ -288,11 +308,44 @@ def latest_for_services(service_names: list[str]) -> dict[str, DeploymentItem]:
     service_names = list(dict.fromkeys(service_names))
     collection = _firestore_collection()
     if collection is not None:
-        records: list[dict[str, Any]] = []
-        for offset in range(0, len(service_names), _FIRESTORE_IN_QUERY_LIMIT):
-            batch = service_names[offset : offset + _FIRESTORE_IN_QUERY_LIMIT]
-            snapshots = collection.where("service_name", "in", batch).stream()
-            records.extend(snapshot.to_dict() for snapshot in snapshots)
+        # One shared server snapshot detects legacy rows missing created_at.
+        # Aggregate globally once instead of issuing two aggregates per service
+        # on the normal path. An unrelated legacy row never broadens a service
+        # reader: only that service's missing rows trigger compatibility scans.
+        total, read_time = count_query_at(collection)
+        if read_time is None:
+            raise RuntimeError("Firestore snapshot time is unavailable")
+        ordered_total, _ = count_query_at(
+            collection.order_by("created_at"), read_time=read_time
+        )
+        has_legacy = total != ordered_total
+        latest_by_service: dict[str, DeploymentItem] = {}
+        for service_name in service_names:
+            query = collection.where("service_name", "==", service_name)
+            ordered = query.order_by("created_at", direction="DESCENDING").order_by(
+                "__name__", direction="DESCENDING"
+            )
+            if has_legacy:
+                service_total, _ = count_query_at(query, read_time=read_time)
+                service_ordered_total, _ = count_query_at(ordered, read_time=read_time)
+                if service_total != service_ordered_total:
+                    _logger.warning(
+                        "Deployment latest legacy compatibility scan: missing created_at"
+                    )
+                    items = [
+                        DeploymentItem(**snapshot.to_dict())
+                        for snapshot in iter_query_pages(query, read_time=read_time)
+                    ]
+                    if items:
+                        latest_by_service[service_name] = max(
+                            items, key=lambda item: (item.created_at, item.id)
+                        )
+                    continue
+            snapshots = ordered.limit(1).stream(read_time=read_time)
+            snapshot = next(iter(snapshots), None)
+            if snapshot is not None:
+                latest_by_service[service_name] = DeploymentItem(**snapshot.to_dict())
+        return latest_by_service
     else:
         with _lock:
             records = [
@@ -301,7 +354,7 @@ def latest_for_services(service_names: list[str]) -> dict[str, DeploymentItem]:
                 if record.get("service_name") in service_names
             ]
     items = [DeploymentItem(**record) for record in records]
-    items.sort(key=lambda item: item.created_at, reverse=True)
+    items.sort(key=lambda item: (item.created_at, item.id), reverse=True)
     latest: dict[str, DeploymentItem] = {}
     for item in items:
         latest.setdefault(item.service_name, item)
@@ -311,25 +364,45 @@ def latest_for_services(service_names: list[str]) -> dict[str, DeploymentItem]:
 def count_for_service(service_name: str) -> int:
     collection = _firestore_collection()
     if collection is not None:
-        return sum(
-            1 for _ in collection.where("service_name", "==", service_name).stream()
-        )
+        return count_query(collection.where("service_name", "==", service_name))
     with _lock:
         return sum(
             1 for record in _local_load() if record.get("service_name") == service_name
         )
 
 
-def list_unfinished(limit: int = 200) -> list[DeploymentItem]:
-    """Return every request that still claims to be running, across services.
+def iter_unfinished(*, page_size: int = 200) -> Iterator[DeploymentItem]:
+    """Yield all unfinished requests, oldest first across every query page.
 
-    The reconciliation sweep needs one pass over all services, which the
-    per-service readers cannot express.  GitHub remains the source of truth for
-    execution state; this only finds the candidates to re-read.
+    A query page is a transport bound, never a reconciliation work limit.
+    NOT-IN preserves UNKNOWN, rollback and other nonterminal states. Missing
+    legacy status is detected using aggregate counts at the same server read
+    time as the scan. Only those collections take the explicit compatibility
+    scan, preserving the model's QUEUED default without a race with writers.
     """
     collection = _firestore_collection()
     if collection is not None:
-        records = [snapshot.to_dict() for snapshot in collection.stream()]
+        total, read_time = count_query_at(collection)
+        if read_time is None:
+            raise RuntimeError("Firestore snapshot time is unavailable")
+        populated, _ = count_query_at(
+            collection.where("status", "!=", None), read_time=read_time
+        )
+        if populated != total:
+            _logger.warning(
+                "Deployment unfinished legacy compatibility scan: missing/null status"
+            )
+            query = collection
+        else:
+            query = collection.where(
+                "status", "not-in", sorted(_TERMINAL_STORE_STATUSES)
+            )
+        records = [
+            snapshot.to_dict()
+            for snapshot in iter_query_pages(
+                query, page_size=page_size, read_time=read_time
+            )
+        ]
     else:
         with _lock:
             records = list(_local_load())
@@ -338,8 +411,15 @@ def list_unfinished(limit: int = 200) -> list[DeploymentItem]:
         for record in records
         if record.get("status") not in _TERMINAL_STORE_STATUSES
     ]
-    items.sort(key=lambda item: item.created_at)
-    return items[:limit]
+    # Status is the Firestore inequality order. Restore chronological order
+    # globally after exhausting the cursor, rather than sorting each page.
+    items.sort(key=lambda item: (item.created_at, item.id))
+    yield from items
+
+
+def list_unfinished(limit: int = 200) -> list[DeploymentItem]:
+    """Bounded compatibility reader; reconciliation uses iter_unfinished()."""
+    return list(iter_unfinished())[:limit]
 
 
 _TERMINAL_STORE_STATUSES = frozenset(

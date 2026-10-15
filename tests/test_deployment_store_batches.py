@@ -1,6 +1,5 @@
-"""Overview queries stay within Firestore limits as the catalog grows."""
+"""Overview latest queries stay bounded as catalog and history grow."""
 
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 from fastapi.testclient import TestClient
@@ -10,6 +9,7 @@ from eng_platform_api.main import app
 from eng_platform_api.models import DeploymentItem
 from eng_platform_api.routers import deployments
 from eng_platform_api.services import catalog, deployment_store
+from tests.test_firestore_history_read_savings import Collection
 
 
 def _deployment(service_name, *, newer=False):
@@ -23,25 +23,15 @@ def _deployment(service_name, *, newer=False):
 
 
 def _collection(records):
-    """Enforce the provider's actual bound instead of accepting any mocked IN."""
-    collection = Mock()
-
-    def where(field, operator, names):
-        assert (field, operator) == ("service_name", "in")
-        assert 0 < len(names) <= 30
-        snapshots = [
-            SimpleNamespace(to_dict=lambda record=record: record.model_dump())
-            for record in records
-            if record.service_name in names
-        ]
-        return SimpleNamespace(stream=lambda: iter(snapshots))
-
-    collection.where.side_effect = where
+    """Provider-shaped counts and one ordered document per service."""
+    collection = Collection([record.model_dump() for record in records])
+    collection.where = Mock(wraps=collection.where)
+    collection.stream = Mock(side_effect=AssertionError("No unbounded scan"))
     return collection
 
 
 @pytest.mark.parametrize("size", [1, 30, 31, 51, 60, 61])
-def test_latest_batches_firestore_queries_without_losing_services(monkeypatch, size):
+def test_latest_bounds_firestore_queries_without_losing_services(monkeypatch, size):
     names = [f"service-{index}" for index in range(size)]
     # Unsorted records exercise latest selection in every batch.
     records = [
@@ -54,9 +44,7 @@ def test_latest_batches_firestore_queries_without_losing_services(monkeypatch, s
 
     assert set(latest) == set(names)
     assert all(item.id == f"{name}-new" for name, item in latest.items())
-    assert [call.args[2] for call in collection.where.call_args_list] == [
-        names[offset : offset + 30] for offset in range(0, size, 30)
-    ]
+    assert [call.args[2] for call in collection.where.call_args_list] == names
     collection.stream.assert_not_called()  # Never broaden to the full collection.
 
 
@@ -71,10 +59,7 @@ def test_latest_deduplicates_names_without_mutating_input(monkeypatch):
 
     assert requested == original
     assert set(latest) == {names[-1]}
-    assert [call.args[2] for call in collection.where.call_args_list] == [
-        names[:30],
-        names[30:],
-    ]
+    assert [call.args[2] for call in collection.where.call_args_list] == names
 
 
 def test_latest_empty_input_never_initializes_firestore(monkeypatch):
@@ -84,15 +69,15 @@ def test_latest_empty_input_never_initializes_firestore(monkeypatch):
     collection.assert_not_called()
 
 
-def test_later_batch_failure_is_not_hidden_as_partial_history(monkeypatch):
+def test_later_service_failure_is_not_hidden_as_partial_history(monkeypatch):
     names = [f"service-{index}" for index in range(31)]
     collection = _collection([_deployment(names[0])])
-    first_batch = collection.where.side_effect
+    first_query = Collection.where.__get__(collection, Collection)
 
-    def where(field, operator, batch):
-        if batch == names[30:]:
+    def where(field, operator, name):
+        if name == names[1]:
             raise RuntimeError("Provider unavailable")
-        return first_batch(field, operator, batch)
+        return first_query(field, operator, name)
 
     collection.where.side_effect = where
     monkeypatch.setattr(deployment_store, "_firestore_collection", lambda: collection)
@@ -118,7 +103,7 @@ def test_local_latest_retains_filtering_and_order_for_large_catalog(monkeypatch)
     assert all(item.id == f"{name}-new" for name, item in latest.items())
 
 
-def test_overview_returns_all_51_resources_with_batched_firestore(monkeypatch):
+def test_overview_returns_all_51_resources_with_bounded_latest_queries(monkeypatch):
     services = catalog.get_services().services
     assert len(services) == 51
     managed = [service for service in services if service.management_mode == "managed"]
@@ -147,6 +132,10 @@ def test_overview_returns_all_51_resources_with_batched_firestore(monkeypatch):
         assert item["last_deployment"] is None
         assert item["deployment_ready"] is False
         assert item["deployment_blockers"] == service.deployment_blockers
-    assert [len(call.args[2]) for call in collection.where.call_args_list] == [30, 21]
+    assert [call.args[2] for call in collection.where.call_args_list] == [
+        service.service_name for service in services
+    ]
     assert client.get("/api/deployments/overview").json() == response.json()
-    assert collection.where.call_count == 2  # Cached overview does not re-query.
+    assert collection.where.call_count == len(
+        services
+    )  # Cached overview does not re-query.

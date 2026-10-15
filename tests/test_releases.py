@@ -384,7 +384,9 @@ def test_firestore_save_and_query_uses_collection_backend():
             mock_stream
         )
         collection_mock.where.return_value.order_by.return_value.limit.return_value.stream.return_value = mock_stream
-        collection_mock.where.return_value.stream.return_value = mock_stream
+        collection_mock.where.return_value.count.return_value.get.return_value = [
+            [um.Mock(value=1)]
+        ]
 
         results = releases_store.get_releases(service_name="test-api", limit=5)
         assert len(results) == 1

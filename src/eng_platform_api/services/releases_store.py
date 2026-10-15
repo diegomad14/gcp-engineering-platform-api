@@ -18,6 +18,7 @@ from ..models import (
 )
 
 from .resource_access import require_managed_service_name
+from .firestore_queries import count_query
 
 _DEFAULT_STORE_PATH = Path(os.getenv("RELEASES_STORE_PATH", "data/releases.json"))
 _COLLECTION = os.getenv("ENG_PLATFORM_RELEASES_FIRESTORE_COLLECTION", "")
@@ -472,10 +473,8 @@ def count_releases(service_name: Optional[str] = None) -> int:
     collection = _firestore_collection()
     if collection is not None:
         if service_name:
-            return sum(
-                1 for _ in collection.where("service_name", "==", service_name).stream()
-            )
-        return sum(1 for _ in collection.stream())
+            return count_query(collection.where("service_name", "==", service_name))
+        return count_query(collection)
     with _store_lock:
         records = _load()
     return sum(

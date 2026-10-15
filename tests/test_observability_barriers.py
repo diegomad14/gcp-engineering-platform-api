@@ -488,7 +488,7 @@ def test_scheduler_does_not_turn_management_denial_into_a_record_write(
     )
     monkeypatch.setattr(
         release_executions,
-        "list_due",
+        "iter_due",
         Mock(return_value=[{"execution_id": "synthetic"}]),
     )
     monkeypatch.setattr(
