@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from copy import deepcopy
 from datetime import datetime, timezone
 from threading import RLock
 from typing import Any, Literal
+from collections.abc import Iterator
 
 from ..config import config
 from .repository_identity import aliases
+from .firestore_queries import count_query_at, iter_query_pages
 
 ReleaseOperation = Literal["pr_quality", "main_release"]
 ReleaseProvider = Literal["github_actions", "cloud_build"]
@@ -75,6 +78,7 @@ _TRANSITIONS: dict[str, set[str]] = {
 
 _memory: dict[str, dict[str, Any]] = {}
 _lock = RLock()
+_logger = logging.getLogger(__name__)
 QUALITY_BOOTSTRAP_TICKET_ID = "artemis-pr172-quality-bootstrap-v1"
 _BOOTSTRAP_DOCUMENT_ID = "__bootstrap_ticket_" + QUALITY_BOOTSTRAP_TICKET_ID
 _IDENTITY_FIELDS = frozenset(
@@ -1559,7 +1563,30 @@ def _validate_status_change(current: dict[str, Any], changes: dict[str, Any]) ->
         )
 
 
+def _excluded_fence_missing_field(
+    collection, field, read_time, repository=None, *, allowed_values=None
+) -> int:
+    """The immutable bootstrap fence is metadata, not a legacy execution."""
+    snapshot = collection.document(_BOOTSTRAP_DOCUMENT_ID).get(read_time=read_time)
+    if not snapshot.exists:
+        return 0
+    fence = snapshot.to_dict()
+    return int(
+        fence.get("ticket_id") == QUALITY_BOOTSTRAP_TICKET_ID
+        and (repository is None or fence.get("repository") == repository)
+        and (
+            fence.get(field) not in allowed_values
+            if allowed_values is not None
+            else fence.get(field) is None
+            if field == "status"
+            else field not in fence
+        )
+    )
+
+
 def list_for_repository(repository: str, *, limit: int = 50) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
     repository_names = aliases(repository)
     collection = _collection()
     if collection is None:
@@ -1571,34 +1598,94 @@ def list_for_repository(repository: str, *, limit: int = 50) -> list[dict[str, A
                 and value.get("ticket_id") != QUALITY_BOOTSTRAP_TICKET_ID
             ]
     else:
-        # Apply the limit only after deterministic ordering. Firestore's
-        # unspecified pre-limit order can otherwise hide the newest execution
-        # once a repository has accumulated historical terminal records.
+        # The newest `limit` valid rows from each alias suffice for the global
+        # newest `limit`. Excluded bootstrap fences must not consume that cap.
         values = []
+        read_time = None
         for name in repository_names:
-            query = collection.where("repository", "==", name)
-            values.extend(
-                snapshot.to_dict()
-                for snapshot in query.stream()
-                if snapshot.to_dict().get("ticket_id") != QUALITY_BOOTSTRAP_TICKET_ID
+            base_query = collection.where("repository", "==", name)
+            total, read_time = count_query_at(base_query, read_time=read_time)
+            ordered_count, _ = count_query_at(
+                base_query.order_by("created_at", direction="DESCENDING"),
+                read_time=read_time,
             )
-    values.sort(key=lambda value: value.get("created_at", ""), reverse=True)
+            query = base_query.order_by("created_at", direction="DESCENDING").order_by(
+                "__name__", direction="DESCENDING"
+            )
+            missing = total - ordered_count
+            if missing:
+                missing -= _excluded_fence_missing_field(
+                    collection, "created_at", read_time, name
+                )
+            legacy = missing != 0
+            if legacy:
+                _logger.warning(
+                    "Release history uses legacy timestamp compatibility scan"
+                )
+                query = base_query
+            kept = 0
+            for snapshot in iter_query_pages(
+                query, page_size=max(1, limit), read_time=read_time
+            ):
+                value = snapshot.to_dict()
+                if value.get("ticket_id") == QUALITY_BOOTSTRAP_TICKET_ID:
+                    continue
+                values.append(value)
+                kept += 1
+                if kept >= limit and not legacy:
+                    break
+    values.sort(
+        key=lambda value: (value.get("created_at", ""), value.get("execution_id", "")),
+        reverse=True,
+    )
     return values[:limit]
 
 
 def find(repository: str, head_sha: str, operation: str) -> dict[str, Any] | None:
-    return next(
-        (
+    collection = _collection()
+    if collection is None:
+        with _lock:
+            values = [
+                dict(value)
+                for value in _memory.values()
+                if value.get("repository") in aliases(repository)
+                and value.get("head_sha") == head_sha.lower()
+                and value.get("operation") == operation
+                and value.get("ticket_id") != QUALITY_BOOTSTRAP_TICKET_ID
+            ]
+    else:
+        values = []
+        read_time = None
+        for name in aliases(repository):
+            query = (
+                collection.where("repository", "==", name)
+                .where("head_sha", "==", head_sha.lower())
+                .where("operation", "==", operation)
+            )
+            _, read_time = count_query_at(query, read_time=read_time)
+            values.extend(
+                snapshot.to_dict()
+                for snapshot in iter_query_pages(query, read_time=read_time)
+            )
+        values = [
             value
-            for value in list_for_repository(repository, limit=100)
-            if value.get("head_sha") == head_sha.lower()
-            and value.get("operation") == operation
-        ),
-        None,
+            for value in values
+            if value.get("ticket_id") != QUALITY_BOOTSTRAP_TICKET_ID
+        ]
+    return max(
+        values,
+        key=lambda value: (value.get("created_at", ""), value.get("execution_id", "")),
+        default=None,
     )
 
 
-def list_due(*, limit: int = 100) -> list[dict[str, Any]]:
+def iter_due(*, page_size: int = 100) -> Iterator[dict[str, Any]]:
+    """All reconciliation candidates, globally oldest first, without a work cap.
+
+    Missing/null legacy statuses are detected at the same server snapshot and
+    retain the original scan/filter semantics. Index errors never trigger a
+    scan fallback. The separate bootstrap fence is never reconciled.
+    """
     terminal = {"quality_failed", "no_release", "released", "superseded", "failed"}
     collection = _collection()
     if collection is None:
@@ -1621,27 +1708,77 @@ def list_due(*, limit: int = 100) -> list[dict[str, Any]]:
                 )
             ]
     else:
-        # Do not limit before filtering: terminal history is intentionally
-        # retained and must never crowd newer active work out of reconciliation.
-        values = [
-            snapshot.to_dict()
-            for snapshot in collection.stream()
-            if (
-                snapshot.to_dict().get("status") not in terminal
-                or planner_retry_candidate(
-                    snapshot.to_dict(),
-                    allow_remediation=True,
-                    allow_contract_retry=True,
-                )
+        total, read_time = count_query_at(collection)
+        indexed_statuses, _ = count_query_at(
+            collection.where("status", "!=", None), read_time=read_time
+        )
+        known_operations = ["main_release", "pr_quality"]
+        indexed_operations, _ = count_query_at(
+            collection.where("operation", "in", known_operations), read_time=read_time
+        )
+        legacy_operations = total - indexed_operations
+        if legacy_operations:
+            legacy_operations -= _excluded_fence_missing_field(
+                collection, "operation", read_time, allowed_values=known_operations
             )
-            and snapshot.to_dict().get("ticket_id") != QUALITY_BOOTSTRAP_TICKET_ID
-            and not (
-                snapshot.to_dict().get("operation") == "pr_quality"
-                and snapshot.to_dict().get("status") == "quality_passed"
+        passed_query = collection.where("status", "==", "quality_passed")
+        if legacy_operations:
+            _logger.warning(
+                "Release reconciliation uses legacy operation compatibility query"
             )
+        else:
+            passed_query = passed_query.where("operation", "==", "main_release")
+        queries = [
+            # Passed PR quality is retained history, not active work. Main
+            # quality_passed still needs its planner, hence the second query.
+            collection.where("status", "not-in", sorted(terminal | {"quality_passed"})),
+            passed_query,
+            # Failed planner-only recovery is the deliberate terminal exception.
+            collection.where("status", "==", "failed")
+            .where("provider", "==", "cloud_build")
+            .where("operation", "==", "main_release")
+            .where("release_engine_failed", "==", True)
+            .where("engine_event_status", "==", "quality_passed")
+            .where("evidence_committed", "==", True),
         ]
-    values.sort(key=lambda value: value.get("updated_at", ""))
-    return values[:limit]
+        missing = total - indexed_statuses
+        if missing:
+            missing -= _excluded_fence_missing_field(collection, "status", read_time)
+        if missing:
+            _logger.warning(
+                "Release reconciliation uses legacy status compatibility scan"
+            )
+            queries = [collection]
+        by_id = {}
+        for query in queries:
+            for snapshot in iter_query_pages(
+                query, page_size=page_size, read_time=read_time
+            ):
+                value = snapshot.to_dict()
+                if (
+                    value.get("ticket_id") != QUALITY_BOOTSTRAP_TICKET_ID
+                    and (
+                        value.get("status") not in terminal
+                        or planner_retry_candidate(
+                            value, allow_remediation=True, allow_contract_retry=True
+                        )
+                    )
+                    and not (
+                        value.get("operation") == "pr_quality"
+                        and value.get("status") == "quality_passed"
+                    )
+                ):
+                    by_id[value["execution_id"]] = value
+        values = list(by_id.values())
+    values.sort(
+        key=lambda value: (value.get("updated_at", ""), value.get("execution_id", ""))
+    )
+    yield from values
+
+
+def list_due(*, limit: int = 100) -> list[dict[str, Any]]:
+    """Compatibility reader; the scheduler uses exhaustive ``iter_due``."""
+    return list(iter_due())[:limit]
 
 
 def monthly_cloud_build_minutes(month: str) -> float:

@@ -5,6 +5,8 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import hashlib
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -17,9 +19,10 @@ BASE = "b" * 40
 
 
 class _Snapshot:
-    def __init__(self, value=None):
+    def __init__(self, value=None, identifier=""):
         self._value = deepcopy(value)
         self.exists = value is not None
+        self.id = identifier
 
     def to_dict(self):
         return deepcopy(self._value)
@@ -43,7 +46,7 @@ class _Document:
         self._client = _Client()
         self.value = None
 
-    def get(self, transaction=None):
+    def get(self, transaction=None, read_time=None):
         return _Snapshot(self.value)
 
     def set(self, changes, merge=False):
@@ -54,34 +57,91 @@ class _Document:
 
 
 class _Query:
-    def __init__(self, documents, predicates=(), limit=None):
+    def __init__(self, documents, predicates=(), limit=None, orders=(), cursor=None):
         self.documents = documents
         self.predicates = predicates
         self.max_items = limit
+        self.orders = orders
+        self.cursor = cursor
 
-    def where(self, field, operator, value):
-        assert operator == "=="
+    def _copy(self, **changes):
         return _Query(
-            self.documents,
-            (*self.predicates, (field, value)),
-            self.max_items,
+            **dict(
+                documents=self.documents,
+                predicates=self.predicates,
+                limit=self.max_items,
+                orders=self.orders,
+                cursor=self.cursor,
+            )
+            | changes
         )
 
-    def limit(self, value):
-        return _Query(self.documents, self.predicates, value)
+    def where(self, field, operator, value):
+        assert operator in {"==", "!=", "in", "not-in"}
+        return self._copy(predicates=(*self.predicates, (field, operator, value)))
 
-    def stream(self):
+    def limit(self, value):
+        return self._copy(limit=value)
+
+    def order_by(self, field, direction="ASCENDING"):
+        return self._copy(orders=(*self.orders, (field, direction)))
+
+    def start_after(self, snapshot):
+        return self._copy(cursor=snapshot)
+
+    def stream(self, read_time=None):
         values = [
-            document.value
-            for document in self.documents.values()
+            _Snapshot(document.value, key)
+            for key, document in self.documents.items()
             if document.value is not None
             and all(
-                document.value.get(field) == value for field, value in self.predicates
+                document.value.get(field) == value
+                if operator == "=="
+                else (
+                    document.value.get(field) is not None
+                    and document.value.get(field) != value
+                    if operator == "!="
+                    else document.value.get(field) in value
+                    if operator == "in"
+                    else document.value.get(field) is not None
+                    and document.value[field] not in value
+                )
+                for field, operator, value in self.predicates
             )
         ]
+        values.sort(key=lambda snapshot: snapshot.id)
+        orders = self.orders or tuple(
+            (field, "ASCENDING")
+            for field, operator, _ in self.predicates
+            if operator == "not-in"
+        )
+        for field, direction in reversed(orders):
+            if field != "__name__":
+                values = [s for s in values if field in s._value]
+            values.sort(
+                key=lambda s: s.id if field == "__name__" else s._value[field],
+                reverse=direction == "DESCENDING",
+            )
+        if self.cursor:
+            cursor_index = next(
+                i for i, s in enumerate(values) if s.id == self.cursor.id
+            )
+            values = values[cursor_index + 1 :]
         if self.max_items is not None:
             values = values[: self.max_items]
-        return [_Snapshot(value) for value in values]
+        return values
+
+    def count(self, alias="total"):
+        return SimpleNamespace(
+            get=lambda **_: [
+                [
+                    SimpleNamespace(
+                        value=len(self.stream()),
+                        read_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    )
+                ]
+            ]
+        )
 
 
 class _Collection(_Query):

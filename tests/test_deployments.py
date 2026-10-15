@@ -416,18 +416,16 @@ def test_terminal_deployments_do_not_call_github(client):
     refresh.assert_not_called()
 
 
-def test_latest_deployments_use_one_grouped_firestore_query():
+def test_latest_deployments_use_one_bounded_query_per_service():
     from eng_platform_api.services import deployment_store
 
     first = _succeeded_deployment()
     second = first.model_copy(
         update={"id": "other", "service_name": "eng-platform-web"}
     )
-    collection = mock.MagicMock()
-    collection.where.return_value.stream.return_value = [
-        mock.MagicMock(to_dict=mock.MagicMock(return_value=first.model_dump())),
-        mock.MagicMock(to_dict=mock.MagicMock(return_value=second.model_dump())),
-    ]
+    from tests.test_firestore_history_read_savings import Collection
+
+    collection = Collection([first.model_dump(), second.model_dump()])
     with mock.patch.object(
         deployment_store, "_firestore_collection", return_value=collection
     ):
@@ -435,9 +433,11 @@ def test_latest_deployments_use_one_grouped_firestore_query():
             ["eng-platform-api", "eng-platform-web"]
         )
 
-    collection.where.assert_called_once_with(
-        "service_name", "in", ["eng-platform-api", "eng-platform-web"]
-    )
+    assert collection.filters == [
+        ("service_name", "==", "eng-platform-api"),
+        ("service_name", "==", "eng-platform-web"),
+    ]
+    assert collection.limits == [1, 1]
     assert set(latest) == {"eng-platform-api", "eng-platform-web"}
 
 

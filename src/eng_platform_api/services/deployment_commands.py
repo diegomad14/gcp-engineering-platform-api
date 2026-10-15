@@ -360,7 +360,7 @@ def reconcile_stalled_dispatches(*, limit: int = 50) -> dict[str, Any]:
     """
     timeout = config.cloud_build.deploy_dispatch_timeout_seconds
     results: list[dict[str, Any]] = []
-    for item in deployment_store.list_unfinished(limit=limit):
+    for item in deployment_store.iter_unfinished(page_size=limit):
         try:
             require_managed_service_name(item.service_name)
         except HTTPException:

@@ -67,23 +67,19 @@ def test_unfinished_listing_and_key_lookup():
 
 
 def test_unfinished_listing_reads_firestore_records():
-    class _Snapshot:
-        def __init__(self, value):
-            self.value = value
+    from tests.test_firestore_history_read_savings import Collection
 
-        def to_dict(self):
-            return dict(self.value)
-
-    class _Collection:
-        def stream(self):
-            return [_Snapshot({**_item("93").model_dump(), "idempotency_key": "k"})]
-
+    class _Collection(Collection):
         def document(self, key):
             record = {**_item("93").model_dump(), "idempotency_key": "k"}
             return mock.Mock(get=lambda: mock.Mock(exists=True, to_dict=lambda: record))
 
     with mock.patch.object(
-        deployment_store, "_firestore_collection", return_value=_Collection()
+        deployment_store,
+        "_firestore_collection",
+        return_value=_Collection(
+            [{**_item("93").model_dump(), "idempotency_key": "k"}]
+        ),
     ):
         assert [item.id for item in deployment_store.list_unfinished()] == ["93"]
         assert deployment_store.idempotency_key_for("93") == "k"

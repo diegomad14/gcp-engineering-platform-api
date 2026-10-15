@@ -58,7 +58,7 @@ class Document:
         self.collection = collection
         self._client = collection
 
-    def get(self, transaction=None):
+    def get(self, transaction=None, read_time=None):
         return Snapshot(self.collection.values.get(self.key))
 
 
@@ -78,14 +78,19 @@ class Collection:
         return [Snapshot(value) for value in self.values.values()]
 
     def where(self, field, operator, value):
-        assert operator == "=="
-        return SimpleNamespace(
-            stream=lambda: [
-                Snapshot(item)
-                for item in self.values.values()
-                if item.get(field) == value
-            ]
-        )
+        from tests.test_release_executions import _Query
+
+        documents = {
+            key: SimpleNamespace(value=item) for key, item in self.values.items()
+        }
+        return _Query(documents).where(field, operator, value)
+
+    def count(self, alias="total"):
+        from tests.test_release_executions import _Query
+
+        return _Query(
+            {key: SimpleNamespace(value=item) for key, item in self.values.items()}
+        ).count(alias=alias)
 
 
 @pytest.fixture(params=["memory", "firestore"])

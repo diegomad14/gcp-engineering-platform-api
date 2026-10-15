@@ -84,7 +84,7 @@ def reconcile_due(authorization: str | None = Header(default=None)):
     # Accounting runs even if the functional execution query later fails.
     usage = cloud_build_usage.reconcile()
     results = []
-    for execution in release_executions.list_due(limit=100):
+    for execution in release_executions.iter_due():
         execution_id = str(execution["execution_id"])
         try:
             updated = release_reconciler.reconcile(execution_id)
