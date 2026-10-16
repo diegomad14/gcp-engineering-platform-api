@@ -582,7 +582,7 @@ jobs:
             --security-opt no-new-privileges --read-only \
             --entrypoint /usr/bin/sha256sum "$RELEASE_EXECUTOR_IMAGE" \
             /opt/eng-platform/release_executor.py | cut -d' ' -f1)"
-          test "$actual_engine_sha256" = 5922dd57c377c7f9539c925cfb2db3c9ae60b65bf25797137689fe645676cd8d || {
+          test "$actual_engine_sha256" = 1b86dffecd414fe3840c0e248cadc41f7c1171321e24c96705a3975430ced09e || {
             echo 'Release engine does not implement the approved staged contract' >&2
             exit 1
           }
@@ -857,7 +857,7 @@ jobs:
             --security-opt no-new-privileges --read-only \
             --entrypoint /usr/bin/sha256sum "$RELEASE_EXECUTOR_IMAGE" \
             /opt/eng-platform/release_executor.py | cut -d' ' -f1)"
-          test "$actual_engine_sha256" = 5922dd57c377c7f9539c925cfb2db3c9ae60b65bf25797137689fe645676cd8d || {
+          test "$actual_engine_sha256" = 1b86dffecd414fe3840c0e248cadc41f7c1171321e24c96705a3975430ced09e || {
             echo 'Release engine does not implement the approved staged contract' >&2
             exit 1
           }

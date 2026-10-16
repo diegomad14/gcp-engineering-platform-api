@@ -370,3 +370,74 @@ def test_artemis_cloud_build_contract_is_economical(monkeypatch):
             for word in ("pytest", "semantic-release", "postgres", "scanner")
         )
         assert service.deployment.image_name in {"cgm-artemis-api", "cgm-artemis-web"}
+
+
+def test_fnd_profile_pins_perseo_location_and_other_profiles_do_not(monkeypatch):
+    name = "cgm-artemis-fnd-observation-worker"
+    monkeypatch.setenv("CGM_PROFILE", name)
+    monkeypatch.setenv("CGM_RELEASE_SHA", "a" * 40)
+    rendered = engine.candidate_env_args()
+    assert rendered[0] == "--update-env-vars"
+    assert "PERSEO_DB_GCS_BUCKET=cgm-artemis-data" in rendered[1].split(",")
+    assert "PERSEO_DB_GCS_OBJECT=kpi_cgm.db" in rendered[1].split(",")
+    for profile, spec in engine.PROFILE_SPECS.items():
+        expected = profile == name
+        assert (
+            any(row[0] == "PERSEO_DB_GCS_BUCKET" for row in spec["candidate_env_vars"])
+            == expected
+        )
+        assert (
+            any(row[0] == "PERSEO_DB_GCS_OBJECT" for row in spec["candidate_env_vars"])
+            == expected
+        )
+
+
+@pytest.mark.parametrize(
+    ("profile", "name", "value"),
+    [
+        (
+            "cgm-artemis-fnd-observation-worker",
+            "PERSEO_DB_GCS_BUCKET",
+            "cgm-sanplat-data",
+        ),
+        ("cgm-artemis-fnd-observation-worker", "PERSEO_DB_GCS_OBJECT", "other.db"),
+        ("cgm-artemis-fnd-observation-worker", "PERSEO_DB_GCS_PERSIST_ENABLED", "true"),
+        (
+            "cgm-artemis-readings-export-worker",
+            "PERSEO_DB_GCS_BUCKET",
+            "cgm-artemis-data",
+        ),
+        ("cgm-artemis-api", "PERSEO_DB_GCS_OBJECT", "kpi_cgm.db"),
+    ],
+)
+def test_perseo_candidate_whitelist_rejects_unapproved_pair_or_resource(
+    monkeypatch, profile, name, value
+):
+    monkeypatch.setenv("CGM_PROFILE", profile)
+    monkeypatch.setenv("CGM_RELEASE_SHA", "a" * 40)
+    monkeypatch.setitem(
+        engine.PROFILE_SPECS[profile], "candidate_env_vars", [[name, value]]
+    )
+    with pytest.raises(RuntimeError, match="unsupported candidate environment"):
+        engine.candidate_env_args()
+
+
+def test_fnd_job_update_receives_location_and_preserves_existing_definition(
+    job_runtime,
+):
+    events, state = job_runtime
+    before = state["definition"]
+    engine.deploy_job("repo/new@sha256:new")
+    updates = [
+        event for event in events if event[:4] == ("gcloud", "run", "jobs", "update")
+    ]
+    assert (
+        "PERSEO_DB_GCS_BUCKET=cgm-artemis-data"
+        in updates[0][updates[0].index("--update-env-vars") + 1]
+    )
+    assert (
+        "PERSEO_DB_GCS_OBJECT=kpi_cgm.db"
+        in updates[0][updates[0].index("--update-env-vars") + 1]
+    )
+    assert ("snapshot", before) in events
+    assert all("--set-env-vars" not in event for event in updates)

@@ -329,6 +329,8 @@ PROFILE_SPECS.update(
                 ["APP_RELEASE_RESOURCE", "cgm-artemis-fnd-observation-worker"],
                 ["APP_RUNTIME_CHECK_ONLY", "true"],
                 ["ARTEMIS_WORKER_TYPE", "fnd-observation"],
+                ["PERSEO_DB_GCS_BUCKET", "cgm-artemis-data"],
+                ["PERSEO_DB_GCS_OBJECT", "kpi_cgm.db"],
             ],
             "pre_candidate_hooks": [],
             "candidate_hooks": [],
@@ -751,6 +753,14 @@ def candidate_env_args() -> list[str]:
             }.get(profile_name)
             if template != expected:
                 raise RuntimeError("task worker type does not match release profile")
+            value = template
+        elif profile_name == "cgm-artemis-fnd-observation-worker" and (
+            name,
+            template,
+        ) in {
+            ("PERSEO_DB_GCS_BUCKET", "cgm-artemis-data"),
+            ("PERSEO_DB_GCS_OBJECT", "kpi_cgm.db"),
+        }:
             value = template
         elif profile_name.startswith("cgm-artemis-") and (
             (name == "APP_RELEASE_SCOPE" and template == "runtime-v1")

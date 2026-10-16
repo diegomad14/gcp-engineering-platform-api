@@ -183,6 +183,14 @@ for _name in _ARTEMIS_JOBS:
                 "ARTEMIS_WORKER_TYPE",
                 _name.removeprefix("cgm-artemis-").removesuffix("-worker"),
             ),
+        )
+        + (
+            (
+                ("PERSEO_DB_GCS_BUCKET", "cgm-artemis-data"),
+                ("PERSEO_DB_GCS_OBJECT", "kpi_cgm.db"),
+            )
+            if _name == "cgm-artemis-fnd-observation-worker"
+            else ()
         ),
         rollback_mode="job_definition",
     )
