@@ -14,6 +14,7 @@ from collections.abc import Iterator
 from ..config import config
 from .repository_identity import aliases
 from .firestore_queries import count_query_at, iter_query_pages
+from .quality_profiles import github_actions_only
 
 ReleaseOperation = Literal["pr_quality", "main_release"]
 ReleaseProvider = Literal["github_actions", "cloud_build"]
@@ -879,6 +880,8 @@ def transition_to_cloud_build(execution_id: str, *, reason: str) -> tuple[dict, 
                 raise ValueError("Reserved release provider is immutable")
             if current.get("bootstrap_ticket_id"):
                 raise ValueError("Quality bootstrap provider cannot be reset")
+            if github_actions_only(str(current.get("service_name") or "")):
+                raise ValueError("Service releases run on GitHub Actions only")
             if current.get("provider") == "cloud_build":
                 return dict(current), False
             if current.get("provider") != "github_actions":
@@ -905,6 +908,8 @@ def transition_to_cloud_build(execution_id: str, *, reason: str) -> tuple[dict, 
             raise ValueError("Reserved release provider is immutable")
         if current.get("bootstrap_ticket_id"):
             raise ValueError("Quality bootstrap provider cannot be reset")
+        if github_actions_only(str(current.get("service_name") or "")):
+            raise ValueError("Service releases run on GitHub Actions only")
         if current.get("provider") == "cloud_build":
             return current, False
         if current.get("provider") != "github_actions":

@@ -94,8 +94,17 @@ def test_go_catalog_proposal_and_server_owned_profiles_agree(monkeypatch):
     service = CatalogService(**entry)
     profile = quality_profiles.profile_for(service)
     assert profile.runtime == "go" and profile.coverage_threshold == 80
-    assert "-coverpkg=./..." in profile.spec["commands"]["tests"]
-    assert "-race" in profile.spec["commands"]["tests"]
+    assert profile.spec["postgres"] is True
+    assert (
+        profile.spec["commands"]["tests"]
+        == "python3 /opt/eng-platform/reconnections_pg.py"
+    )
+    helper = (ROOT / "docker/quality-executor/reconnections_pg.py").read_text()
+    assert '"-coverpkg=./..."' in helper and '"-race"' in helper
+    assert (
+        quality_profiles.postgres_fixture_image(profile)
+        == quality_profiles.RECONNECTIONS_POSTGRES_IMAGE
+    )
     assert release_profiles.profile_for(service).name == service.service_name
     assert service.deployment.health_path == "/health"
     assert release_profiles.profile_for(service).fingerprint() == (
@@ -184,8 +193,12 @@ def test_github_first_deployment_keeps_explicit_restrictions(monkeypatch):
     )
     monkeypatch.setattr(quota.executor_circuits, "get", lambda _: {"state": "closed"})
     assert quota.should_use_cloud_build(name, "owner/private") is False
+    # GitHub Actions only: even an explicit Cloud Build pin cannot select it.
     monkeypatch.setattr(config.cloud_build, "cloud_build_only_services", (name,))
-    assert quota.should_use_cloud_build(name, "owner/private") is True
+    assert quota.should_use_cloud_build(name, "owner/private") is False
+    monkeypatch.setattr(config.cloud_build, "mode", "cloud_build")
+    assert quota.should_use_cloud_build(name, "owner/private") is False
+    assert quota.deployment_fallback_enabled(name) is False
     service = CatalogService(
         service_name=name,
         repository="owner/private",
@@ -258,3 +271,38 @@ def test_go_coverpkg_duplicate_blocks_merge_without_double_counting(
     report.write_text(f"mode: {mode}\n{name}:3.2,4.2 1 0\n{name}:3.2,4.2 2 1\n")
     with pytest.raises(ValueError, match="Conflicting.*statement counts"):
         go_coverage.go_coverage(report, tmp_path, tmp_path)
+
+
+def test_reconnections_never_falls_back_to_cloud_build(monkeypatch):
+    from eng_platform_api.services import release_cloud_build, release_executions
+
+    name = "cgm-reconnections-api"
+    service = CatalogService(
+        service_name=name,
+        repository="owner/private",
+        owner="cgm",
+        project_id="test-project",
+        region="us-central1",
+    )
+    pinned = SimpleNamespace(deployment=SimpleNamespace(executor="cloud_build"))
+    monkeypatch.setattr(quota.catalog, "get_service", lambda _: pinned)
+    with pytest.raises(ValueError, match="GitHub Actions only"):
+        quota.should_use_cloud_build(name, "owner/private")
+
+    settings = config.release_orchestrator
+    monkeypatch.setattr(settings, "enabled", True)
+    monkeypatch.setattr(settings, "enabled_services", (name,))
+    with pytest.raises(
+        release_cloud_build.ReleaseCloudBuildError, match="GitHub Actions only"
+    ):
+        release_cloud_build._require_config(service)
+
+    monkeypatch.setattr(release_executions, "_collection", lambda: None)
+    monkeypatch.setitem(
+        release_executions._memory,
+        "exec-gha-only",
+        {"service_name": name, "provider": "github_actions", "status": "received"},
+    )
+    with pytest.raises(ValueError, match="GitHub Actions only"):
+        release_executions.transition_to_cloud_build("exec-gha-only", reason="billing")
+    assert release_executions._memory["exec-gha-only"]["provider"] == "github_actions"

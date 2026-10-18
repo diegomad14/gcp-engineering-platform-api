@@ -35,6 +35,27 @@ def _load_document() -> dict[str, Any]:
 
 _DOCUMENT = _load_document()
 
+# This service targets PostgreSQL 15. Keep its disposable fixture separate from
+# the configured Python fixture image; never change other services implicitly.
+RECONNECTIONS_POSTGRES_IMAGE = (
+    "postgres@sha256:724292da1f2e50bdccfc3302ce75bbba7f4a6076701b588cc795fcac65683550"
+)
+
+
+# Services whose releases must run exclusively on GitHub Actions. Cloud Build
+# is never selected for them, neither by policy nor by billing fallback.
+GITHUB_ACTIONS_ONLY_SERVICES = frozenset({"cgm-reconnections-api"})
+
+
+def github_actions_only(service_name: str) -> bool:
+    return service_name in GITHUB_ACTIONS_ONLY_SERVICES
+
+
+def postgres_fixture_image(profile: QualityProfile) -> str:
+    if profile.name == "cgm-reconnections-api":
+        return RECONNECTIONS_POSTGRES_IMAGE
+    return config.release_orchestrator.postgres_image
+
 
 @dataclass(frozen=True)
 class QualityProfile:

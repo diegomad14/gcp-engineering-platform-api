@@ -505,13 +505,13 @@ def _child_environment(
         )
         environment["PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"] = "1"
     if profile.get("postgres"):
-        environment.update(_postgres_environment())
+        environment.update(_postgres_environment(profile))
     if any(name in environment for name in _SENSITIVE_ENV_NAMES):
         raise QualityExecutorError("Credential environment leaked into quality runtime")
     return environment
 
 
-def _postgres_environment() -> dict[str, str]:
+def _postgres_environment(profile: dict[str, Any] | None = None) -> dict[str, str]:
     """Return only disposable loopback DSNs for the isolated test database.
 
     PostgreSQL clients allow query parameters such as ``hostaddr`` and
@@ -521,6 +521,26 @@ def _postgres_environment() -> dict[str, str]:
     """
 
     result: dict[str, str] = {}
+    if profile and profile.get("runtime") == "go":
+        value = os.environ.get("POSTGRES_TEST_DSN", "")
+        try:
+            parsed = urllib.parse.urlsplit(value)
+            valid = (
+                parsed.scheme == "postgresql"
+                and parsed.hostname == "127.0.0.1"
+                and parsed.port == 5432
+                and parsed.path == "/postgres"
+                and "?" not in value
+                and "#" not in value
+                and not any(c.isspace() for c in value)
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            raise QualityExecutorError(
+                "Go PostgreSQL fixture must use disposable loopback port 5432"
+            )
+        return {"POSTGRES_TEST_DSN": value, "REQUIRE_POSTGRES_TESTS": "1"}
     for name in (
         "FND_TEST_POSTGRES_DSN",
         "WM_TEST_POSTGRES_DSN",

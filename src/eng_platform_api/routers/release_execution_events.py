@@ -474,7 +474,9 @@ def resolve_execution(
         raise HTTPException(status_code=503, detail="Execution service is unavailable")
     postgres_image = ""
     if quality_profiles.profile_for(service).spec.get("postgres"):
-        postgres_image = config.release_orchestrator.postgres_image
+        postgres_image = quality_profiles.postgres_fixture_image(
+            quality_profiles.profile_for(service)
+        )
         if not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", postgres_image):
             raise HTTPException(
                 status_code=503, detail="PostgreSQL image must be pinned by digest"
