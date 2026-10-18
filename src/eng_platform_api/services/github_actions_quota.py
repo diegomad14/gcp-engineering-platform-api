@@ -15,6 +15,7 @@ import httpx
 from ..config import config
 from . import catalog, executor_circuits
 from .github_deployments import github_client
+from .quality_profiles import github_actions_only
 
 _CACHE_SECONDS = 300
 _cache: tuple[float, int, int, "Usage | None"] | None = None
@@ -130,7 +131,8 @@ def current_usage(*, force: bool = False) -> Usage | None:
 def deployment_fallback_enabled(service_name: str) -> bool:
     """Reactive fallback must honor deployment enrollment and explicit pins."""
     return (
-        config.cloud_build.enabled
+        not github_actions_only(service_name)
+        and config.cloud_build.enabled
         and service_name in config.cloud_build.enabled_services
         and config.cloud_build.mode != "github_actions"
     )
@@ -147,6 +149,10 @@ def explicit_private_policy(service_name: str) -> bool:
 def should_use_cloud_build(service_name: str, repository: str) -> bool:
     """Honor explicit policy; automatic fallback still requires rejection."""
     service = catalog.get_service(service_name)
+    if github_actions_only(service_name):
+        if service and service.deployment.executor == "cloud_build":
+            raise ValueError(f"{service_name} must run on GitHub Actions only")
+        return False
     if service and service.deployment.executor == "cloud_build":
         if not service.deployment_ready:
             raise ValueError("; ".join(service.deployment_blockers))

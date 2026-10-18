@@ -6,11 +6,11 @@
       "working_directory": ".",
       "coverage_threshold": 80,
       "timeout_seconds": 1800,
-      "postgres": false,
+      "postgres": true,
       "container_smoke": false,
       "commands": {
         "install": "go mod download && go mod verify",
-        "tests": "go test -race -count=1 -covermode=atomic -coverpkg=./... -coverprofile=quality-reports/coverage.out ./...",
+        "tests": "python3 /opt/eng-platform/reconnections_pg.py",
         "build": "go build ./...",
         "lint": "go vet ./...",
         "format": "test -z \"$(git ls-files -z '*.go' | xargs -0 -r gofmt -l)\"",

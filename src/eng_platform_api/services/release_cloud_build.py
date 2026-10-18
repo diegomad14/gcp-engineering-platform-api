@@ -16,7 +16,12 @@ from ..config import config
 from ..models import CatalogService
 from . import release_executions
 from .cloud_build_policy import economy_options, require_new_builds, validate_submission
-from .quality_profiles import executor_image, planner_hash, profile_for
+from .quality_profiles import (
+    executor_image,
+    github_actions_only,
+    planner_hash,
+    profile_for,
+)
 
 from .resource_access import require_managed, require_managed_service_name
 
@@ -328,6 +333,8 @@ def _require_config(service: CatalogService) -> None:
         *settings.canary_services,
     }:
         raise ReleaseCloudBuildError("Service is not enabled for release orchestration")
+    if github_actions_only(service.service_name):
+        raise ReleaseCloudBuildError("Service releases run on GitHub Actions only")
     if not config.cloud_build.project_id or not settings.service_account:
         raise ReleaseCloudBuildError(
             "Cloud Build project and service account are required"
