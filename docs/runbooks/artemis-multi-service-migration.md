@@ -219,6 +219,11 @@ names and earlier bucket generations are superseded by the current status above.
 
 ## Runtime rollout
 
+> [!NOTE] Retired 2026-10-18
+> The legacy `cgm-sanplat-*` peers were deleted after the cutover, so the
+> one-time `scripts/bootstrap_artemis_runtimes.py` was removed. The section
+> below is kept only as a historical record.
+
 The one-time provisioning command is `python3 scripts/bootstrap_artemis_runtimes.py
 cgm-artemis-api`. It prints the reviewed source, immutable image, target service
 account and secret *references* without changing GCP. Add `--apply` for that

@@ -204,23 +204,23 @@ def get_ci_quality_project(service: CatalogService) -> QualityProject | None:
 def _fallback_releases() -> list[ReleaseItem]:
     return [
         ReleaseItem(
-            service_name="cgm-sanplat-api",
-            repository="diegomad14/parametrizacion-correos-cgm",
+            service_name="cgm-artemis-api",
+            repository="diegomad14/cgm-artemis-api",
             version="v0.4.3",
             status="promoted",
-            revision="cgm-sanplat-api-00173-5cs",
+            revision="cgm-artemis-api-00173-5cs",
             action="promoted",
-            github_run_url="https://github.com/diegomad14/parametrizacion-correos-cgm/actions",
+            github_run_url="https://github.com/diegomad14/cgm-artemis-api/actions",
             created_at="2026-07-07T15:57:39Z",
         ),
         ReleaseItem(
-            service_name="cgm-sanplat-web",
-            repository="diegomad14/parametrizacion-correos-cgm",
+            service_name="cgm-artemis-web",
+            repository="diegomad14/cgm-artemis-web",
             version="v0.4.3",
             status="promoted",
-            revision="cgm-sanplat-web-00088-bx5",
+            revision="cgm-artemis-web-00088-bx5",
             action="promoted",
-            github_run_url="https://github.com/diegomad14/parametrizacion-correos-cgm/actions",
+            github_run_url="https://github.com/diegomad14/cgm-artemis-web/actions",
             created_at="2026-07-07T15:57:39Z",
         ),
     ]

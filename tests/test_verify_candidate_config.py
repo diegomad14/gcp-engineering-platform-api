@@ -92,12 +92,10 @@ def test_routing_contract_is_exactly_thirteen_artemis_plus_five_private_services
         "cgm-bot-api",
         "communications-ms",
         "eng-platform-web",
-        "cgm-sanplat-api",
-        "cgm-sanplat-web",
     }
     assert len(check.BASELINE_CLOUD_BUILD_ONLY_SERVICES) == 13
     assert set(check.BASELINE_CLOUD_BUILD_ONLY_SERVICES) == baseline
-    assert len(check.CLOUD_BUILD_ONLY_SERVICES) == 18
+    assert len(check.CLOUD_BUILD_ONLY_SERVICES) == 16
     assert set(check.CLOUD_BUILD_ONLY_SERVICES) == baseline | additions
     assert "eng-platform-api" not in check.CLOUD_BUILD_ONLY_SERVICES
 
