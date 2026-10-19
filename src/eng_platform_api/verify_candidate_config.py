@@ -46,8 +46,6 @@ CLOUD_BUILD_ONLY_SERVICES = BASELINE_CLOUD_BUILD_ONLY_SERVICES + (
     "cgm-bot-api",
     "communications-ms",
     "eng-platform-web",
-    "cgm-sanplat-api",
-    "cgm-sanplat-web",
 )
 PROFILE_VALIDATOR_PATH = (
     Path(__file__).resolve().parents[2] / "docker/quality-executor/quality_profiles.py"
