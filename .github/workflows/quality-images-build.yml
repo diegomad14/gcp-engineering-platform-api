@@ -1,0 +1,73 @@
+name: Quality Images Build
+
+# Build-only check for the quality executor images. Publishing stays in
+# publish-release-tooling (manual, main only); this job has no registry or GCP
+# credentials and never pushes.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - docker/quality-executor/**
+      - scripts/quality/**
+      - src/eng_platform_api/release_quality_profiles.json
+      - .github/workflows/quality-images-build.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-images-build-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [quality-python, quality-node]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      # Same invocation as publish-release-tooling, so the in-image unit tests
+      # run under the same builder.
+      - name: Build linux/amd64 image
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          dockerfile="docker/quality-executor/Dockerfile.${IMAGE#quality-}"
+          docker build --pull --platform linux/amd64 --file "$dockerfile" --tag "local/$IMAGE:${GITHUB_SHA}" .
+
+      # docker save keeps layers uncompressed; gzip each one as a push would to
+      # report the size a pull downloads.
+      - name: Report compressed size
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          docker save --output "$RUNNER_TEMP/image.tar" "local/$IMAGE:${GITHUB_SHA}"
+          python3 - "$RUNNER_TEMP/image.tar" "$IMAGE" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import gzip, json, sys, tarfile
+
+          path, name = sys.argv[1:]
+          with tarfile.open(path) as archive:
+              manifest = json.load(archive.extractfile("manifest.json"))[0]
+              config = json.load(archive.extractfile(manifest["Config"]))
+              history = [h.get("created_by", "") for h in config["history"] if not h.get("empty_layer")]
+              rows = []
+              for layer, created_by in zip(manifest["Layers"], history):
+                  size = len(gzip.compress(archive.extractfile(layer).read(), compresslevel=6))
+                  rows.append((size, " ".join(created_by.split())[:90].replace("|", "\\|")))
+          total = sum(size for size, _ in rows)
+          print(f"### {name}: {total / 1048576:.1f} MB compressed ({len(rows)} layers)\n")
+          print("| MB | Layer |\n|---:|---|")
+          for size, created_by in rows:
+              if size >= 512 * 1024:
+                  print(f"| {size / 1048576:.1f} | `{created_by}` |")
+          print()
+          PY
+          rm -f "$RUNNER_TEMP/image.tar"

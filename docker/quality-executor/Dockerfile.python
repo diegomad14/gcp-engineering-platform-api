@@ -1,11 +1,15 @@
-FROM python:3.12.11-slim-bookworm
+FROM python:3.12.11-slim-bookworm AS tools
 
 ARG TRIVY_VERSION=0.72.0
 ARG ACTIONLINT_VERSION=1.7.12
+ARG DOCKER_CLI_VERSION=27.5.1
+ARG DOCKER_CLI_SHA256=4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640
 
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1 NPM_CONFIG_AUDIT=false
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# An optional public CA bundle supports build proxies without persisting trust.
+# Tools are resolved here so downloads, archives and pip state never reach the
+# runtime image. Binaries are staged root-owned so the final COPY is one layer.
+# The API smoke test only drives the host daemon, so only the Docker CLI ships.
 RUN --mount=type=secret,id=build-ca-bundle,required=false,mode=0444 \
     if [ -f /run/secrets/build-ca-bundle ]; then \
         export PIP_CERT=/run/secrets/build-ca-bundle CURL_CA_BUNDLE=/run/secrets/build-ca-bundle; \
@@ -14,9 +18,8 @@ RUN --mount=type=secret,id=build-ca-bundle,required=false,mode=0444 \
     fi \
     && sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl docker.io git nodejs npm socat \
-    && rm -rf /var/lib/apt/lists/* /tmp/quality-build-apt.conf \
-    && python -m pip install --no-cache-dir \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && python -m pip install --no-cache-dir --no-compile --root=/staging \
         bandit==1.8.6 \
         mypy==1.18.2 \
         pip-audit==2.9.0 \
@@ -24,22 +27,50 @@ RUN --mount=type=secret,id=build-ca-bundle,required=false,mode=0444 \
         ruff==0.15.22 \
         setuptools==80.9.0 \
         semgrep==1.136.0 \
-    && semgrep --version \
+    && mkdir -p /tools/bin \
     && curl --fail --location --silent --show-error \
         "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
-        | tar -xz -C /usr/local/bin trivy \
-    && chmod 0555 /usr/local/bin/trivy \
+        | tar -xz -C /tools/bin trivy \
     && curl --fail --location --silent --show-error \
         "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
-        | tar -xz -C /usr/local/bin actionlint
+        | tar -xz -C /tools/bin actionlint \
+    && curl --fail --location --silent --show-error -o /tmp/docker.tgz \
+        "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
+    && echo "${DOCKER_CLI_SHA256}  /tmp/docker.tgz" | sha256sum -c - \
+    && tar -xzf /tmp/docker.tgz -C /tools/bin --strip-components=1 docker/docker \
+    && chown 0:0 /tools/bin/* \
+    && chmod 0555 /tools/bin/*
+
+FROM python:3.12.11-slim-bookworm
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 NPM_CONFIG_AUDIT=false
+
+RUN --mount=type=secret,id=build-ca-bundle,required=false,mode=0444 \
+    if [ -f /run/secrets/build-ca-bundle ]; then \
+        printf 'Acquire::https::CaInfo "/run/secrets/build-ca-bundle";\n' > /tmp/quality-build-apt.conf; \
+        export APT_CONFIG=/tmp/quality-build-apt.conf; \
+    fi \
+    && sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl git nodejs npm socat \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /tmp/quality-build-apt.conf
+
+COPY --from=tools /staging/usr/local/ /usr/local/
+COPY --from=tools /tools/bin/ /usr/local/bin/
+RUN python3 -c 'import pkg_resources' \
+    && semgrep --version \
+    && trivy --version \
+    && actionlint --version \
+    && docker --version
 
 COPY scripts/quality/quality_gate.py scripts/quality/differential_coverage.py scripts/quality/go_coverage.py /opt/eng-platform/
 COPY docker/quality-executor/trivyignore.yaml /opt/eng-platform/trivyignore.yaml
 COPY docker/quality-executor/quality_executor.py docker/quality-executor/quality_profiles.py docker/quality-executor/untrusted_command.py docker/quality-executor/trusted_scanner.py docker/quality-executor/trusted_scanner.sh docker/quality-executor/api_container_smoke.sh docker/quality-executor/test_quality_executor.py /opt/eng-platform/
 COPY docker/quality-executor/smarti_pg.py docker/quality-executor/test_smarti_pg.py /opt/eng-platform/
 COPY src/eng_platform_api/release_quality_profiles.json /opt/eng-platform/release_quality_profiles.json
+# trivy is already root-owned and 0555 from the tools stage; touching it here
+# would copy the whole binary into a new layer.
 RUN mkdir -p /opt/eng-platform/trusted-bin \
-    && chown 0:0 /usr/local/bin/trivy \
     && install -m 0555 /opt/eng-platform/trusted_scanner.sh /opt/eng-platform/trusted-bin/semgrep \
     && install -m 0555 /opt/eng-platform/trusted_scanner.sh /opt/eng-platform/trusted-bin/trivy \
     && chmod 0555 /opt/eng-platform/quality_executor.py /opt/eng-platform/untrusted_command.py /opt/eng-platform/trusted_scanner.py /opt/eng-platform/api_container_smoke.sh \
