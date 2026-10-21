@@ -1,36 +1,55 @@
-FROM node:22.19.0-bookworm-slim
+FROM node:22.19.0-bookworm-slim AS tools
 
 ARG TRIVY_VERSION=0.72.0
+
+# pip, curl and downloads stay in this stage. pip --root mirrors the final
+# system paths, so the executor's --system-site-packages venvs still see them.
+# setuptools is pinned because Semgrep imports pkg_resources; apt's python3-pip
+# used to provide it implicitly.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl python3 python3-pip \
+    && python3 -m pip install --break-system-packages --no-cache-dir --no-compile --root=/staging \
+        pytest-cov==7.0.0 ruff==0.15.22 setuptools==80.9.0 semgrep==1.136.0 \
+    && mkdir -p /tools/bin \
+    && curl --fail --location --silent --show-error \
+        "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+        | tar -xz -C /tools/bin trivy \
+    && chown 0:0 /tools/bin/trivy \
+    && chmod 0555 /tools/bin/trivy
+
+FROM node:22.19.0-bookworm-slim
+
 ARG PLAYWRIGHT_VERSION=1.62.1
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/eng-platform/playwright-browsers
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git python3 python3-pip \
-    && rm -rf /var/lib/apt/lists/* \
-    && python3 -m pip install --break-system-packages --no-cache-dir \
-        pytest-cov==7.0.0 ruff==0.15.22 semgrep==1.136.0 \
-    && curl --fail --location --silent --show-error \
-        "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
-        | tar -xz -C /usr/local/bin trivy \
-    && chmod 0555 /usr/local/bin/trivy
+    && apt-get install -y --no-install-recommends ca-certificates git python3 \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
+
+COPY --from=tools /staging/usr/local/ /usr/local/
+COPY --from=tools /tools/bin/ /usr/local/bin/
 
 # The pinned installer selects Chromium revision 1234 and its versioned Linux
 # dependency manifest. The published OCI digest freezes the resolved OS packages.
 # Browsers are installed by the trusted image build, never repository commands.
-RUN npm exec --yes --package=playwright@${PLAYWRIGHT_VERSION} -- playwright install --with-deps chromium \
-    && test -d "${PLAYWRIGHT_BROWSERS_PATH}/chromium-1234" \
+# Smarti UX runs headless without a channel, so only the headless shell ships.
+RUN npm exec --yes --package=playwright@${PLAYWRIGHT_VERSION} -- playwright install --with-deps chromium --only-shell \
     && test -d "${PLAYWRIGHT_BROWSERS_PATH}/chromium_headless_shell-1234" \
+    && test ! -e "${PLAYWRIGHT_BROWSERS_PATH}/chromium-1234" \
     && find "${PLAYWRIGHT_BROWSERS_PATH}" -type d -exec chmod 0555 {} + \
     && find "${PLAYWRIGHT_BROWSERS_PATH}" -type f -exec chmod a+r,a-w {} + \
-    && rm -rf /root/.npm /var/lib/apt/lists/*
+    && rm -rf /root/.npm /root/.cache /var/lib/apt/lists/* /var/cache/apt/*
+
+RUN python3 -c 'import pkg_resources, pytest_cov' && semgrep --version && trivy --version
 
 COPY scripts/quality/quality_gate.py scripts/quality/differential_coverage.py scripts/quality/go_coverage.py /opt/eng-platform/
 COPY docker/quality-executor/trivyignore.yaml /opt/eng-platform/trivyignore.yaml
 COPY docker/quality-executor/quality_executor.py docker/quality-executor/quality_profiles.py docker/quality-executor/untrusted_command.py docker/quality-executor/trusted_scanner.py docker/quality-executor/trusted_scanner.sh docker/quality-executor/test_quality_executor.py /opt/eng-platform/
 COPY docker/quality-executor/smarti_ux.py docker/quality-executor/test_smarti_ux.py docker/quality-executor/smarti_pg.py docker/quality-executor/test_smarti_pg.py /opt/eng-platform/
 COPY src/eng_platform_api/release_quality_profiles.json /opt/eng-platform/release_quality_profiles.json
+# trivy is already root-owned and 0555 from the tools stage; touching it here
+# would copy the whole binary into a new layer.
 RUN mkdir -p /opt/eng-platform/trusted-bin \
-    && chown 0:0 /usr/local/bin/trivy \
     && install -m 0555 /opt/eng-platform/trusted_scanner.sh /opt/eng-platform/trusted-bin/semgrep \
     && install -m 0555 /opt/eng-platform/trusted_scanner.sh /opt/eng-platform/trusted-bin/trivy \
     && chmod 0555 /opt/eng-platform/quality_executor.py /opt/eng-platform/untrusted_command.py /opt/eng-platform/trusted_scanner.py \

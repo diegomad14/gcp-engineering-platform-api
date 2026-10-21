@@ -16,7 +16,9 @@ def test_node_image_installs_versioned_browsers_before_untrusted_commands():
     )
     assert "playwright@${PLAYWRIGHT_VERSION}" in dockerfile
     assert "playwright install --with-deps chromium" in dockerfile
-    assert "chromium-1234" in dockerfile
+    # Smarti UX runs headless without a channel: only the shell is shipped.
+    assert "--only-shell" in dockerfile
+    assert 'test ! -e "${PLAYWRIGHT_BROWSERS_PATH}/chromium-1234"' in dockerfile
     assert "chromium_headless_shell-1234" in dockerfile
     assert "chmod a+r,a-w" in dockerfile
     assert dockerfile.index("playwright install") < dockerfile.index("COPY src/")
